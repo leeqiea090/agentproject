@@ -1,0 +1,40 @@
+# Health
+GET http://127.0.0.1:8000/
+Accept: application/json
+
+###
+# Ingest text into local knowledge base
+POST http://127.0.0.1:8000/kb/text
+Content-Type: application/json
+
+{
+  "source": "sample_bid_knowledge",
+  "text": "投标文件中，施工组织设计通常应包含项目概况、施工部署、进度计划、质量保障、安全文明施工与风险控制等章节。",
+  "metadata": {
+    "domain": "construction"
+  }
+}
+
+###
+# Search knowledge base
+POST http://127.0.0.1:8000/kb/search
+Content-Type: application/json
+
+{
+  "query": "投标技术方案应包含哪些章节",
+  "top_k": 3
+}
+
+###
+# Run multi-agent team from only a final goal
+POST http://127.0.0.1:8000/agent/run
+Content-Type: application/json
+
+{
+  "goal": "生成某市政道路改造项目投标技术方案初稿",
+  "constraints": [
+    "至少包含进度、质量、安全、风险四个板块",
+    "输出为 Markdown"
+  ],
+  "output_format": "Markdown"
+}
