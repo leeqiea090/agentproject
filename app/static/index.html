@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>招投标 AI Agent 服务</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+      background: #f0f2f5;
+      color: #222;
+      min-height: 100vh;
+    }
+
+    /* ── 顶部导航 ── */
+    header {
+      background: linear-gradient(135deg, #1a3a6b 0%, #2563eb 100%);
+      color: #fff;
+      padding: 0 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 60px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+      position: sticky; top: 0; z-index: 100;
+    }
+    header h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: 1px; }
+    header span { font-size: .78rem; opacity: .7; }
+    .nav-links { display: flex; gap: 6px; }
+    .nav-links button {
+      background: rgba(255,255,255,.12);
+      border: 1px solid rgba(255,255,255,.25);
+      color: #fff;
+      padding: 5px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: .82rem;
+      transition: background .2s;
+    }
+    .nav-links button:hover,
+    .nav-links button.active { background: rgba(255,255,255,.28); }
+
+    /* ── 主布局 ── */
+    main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+
+    /* ── 卡片 ── */
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 6px rgba(0,0,0,.08);
+      padding: 28px 32px;
+      margin-bottom: 24px;
+    }
+    .card h2 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #1a3a6b;
+      margin-bottom: 18px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #e8edf5;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card h2 .icon { font-size: 1.15rem; }
+
+    /* ── 状态面板 ── */
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 14px;
+    }
+    .status-item {
+      background: #f6f8ff;
+      border: 1px solid #dce6fb;
+      border-radius: 8px;
+      padding: 14px 18px;
+    }
+    .status-item .label { font-size: .78rem; color: #666; margin-bottom: 4px; }
+    .status-item .value { font-size: 1.1rem; font-weight: 700; color: #1a3a6b; }
+    .badge-ok { color: #16a34a; }
+
+    /* ── 页签 ── */
+    .tabs { display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; }
+    .tab-btn {
+      padding: 7px 20px;
+      border: 2px solid #c7d4f0;
+      border-radius: 6px;
+      background: #fff;
+      color: #2563eb;
+      cursor: pointer;
+      font-size: .88rem;
+      font-weight: 600;
+      transition: all .2s;
+    }
+    .tab-btn:hover { background: #eef2ff; }
+    .tab-btn.active {
+      background: #2563eb;
+      color: #fff;
+      border-color: #2563eb;
+    }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* ── 表单 ── */
+    .form-row { margin-bottom: 16px; }
+    label { display: block; font-size: .85rem; font-weight: 600; color: #444; margin-bottom: 6px; }
+    label .hint { font-weight: 400; color: #999; font-size: .78rem; margin-left: 6px; }
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%;
+      border: 2px solid #d1d9f0;
+      border-radius: 7px;
+      padding: 9px 12px;
+      font-size: .9rem;
+      color: #222;
+      outline: none;
+      transition: border-color .2s;
+      font-family: inherit;
+    }
+    input:focus, textarea:focus, select:focus { border-color: #2563eb; }
+    textarea { min-height: 100px; resize: vertical; line-height: 1.55; }
+
+    /* ── 按钮 ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 22px;
+      border-radius: 7px;
+      border: none;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .2s;
+    }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-primary:disabled { background: #93b0f0; cursor: not-allowed; }
+    .btn-outline {
+      background: #fff;
+      color: #2563eb;
+      border: 1.5px solid #2563eb;
+    }
+    .btn-outline:hover { background: #eef2ff; }
+
+    /* ── 结果展示 ── */
+    .result-box {
+      margin-top: 20px;
+      border: 1.5px solid #dce6fb;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .result-header {
+      background: #f0f5ff;
+      padding: 9px 16px;
+      font-size: .82rem;
+      font-weight: 700;
+      color: #2563eb;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .result-body {
+      padding: 14px 16px;
+      font-size: .85rem;
+      line-height: 1.65;
+      max-height: 420px;
+      overflow-y: auto;
+      background: #fff;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* ── Markdown 样式 ── */
+    .md-content h1, .md-content h2, .md-content h3 { color: #1a3a6b; margin: 12px 0 6px; }
+    .md-content p { margin-bottom: 8px; }
+    .md-content ul, .md-content ol { padding-left: 20px; margin-bottom: 8px; }
+    .md-content li { margin-bottom: 4px; }
+    .md-content strong { color: #1d4ed8; }
+    .md-content code {
+      background: #eef2ff;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-family: monospace;
+      font-size: .82rem;
+    }
+    .md-content pre {
+      background: #1e1e2e;
+      color: #cdd6f4;
+      padding: 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+
+    /* ── 日志 ── */
+    .log-list { display: flex; flex-direction: column; gap: 8px; }
+    .log-item {
+      border-left: 3px solid #2563eb;
+      padding: 8px 12px;
+      background: #f6f8ff;
+      border-radius: 0 6px 6px 0;
+    }
+    .log-item .log-agent {
+      font-size: .78rem;
+      font-weight: 700;
+      color: #2563eb;
+      margin-bottom: 3px;
+    }
+    .log-item .log-content { font-size: .84rem; color: #333; white-space: pre-wrap; }
+
+    /* ── 加载动画 ── */
+    .spinner {
+      display: inline-block;
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── 提示 ── */
+    .alert {
+      padding: 10px 14px;
+      border-radius: 7px;
+      font-size: .85rem;
+      margin-top: 14px;
+    }
+
+    /* ── 搜索结果条 ── */
+    .hit-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 10px;
+      background: #fafbff;
+    }
+    .hit-score {
+      font-size: .75rem;
+      color: #7c8cbc;
+      float: right;
+      background: #eef2ff;
+      padding: 1px 8px;
+      border-radius: 20px;
+    }
+    .hit-text { font-size: .88rem; line-height: 1.6; color: #333; margin-top: 6px; }
+    .hit-meta { font-size: .75rem; color: #aaa; margin-top: 6px; }
+
+    /* ── 统计格 ── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 10px;
+    }
+    .stat-cell {
+      text-align: center;
+      background: #f0f5ff;
+      border-radius: 8px;
+      padding: 16px 8px;
+    }
+    .stat-cell .num { font-size: 1.6rem; font-weight: 800; color: #2563eb; }
+    .stat-cell .desc { font-size: .75rem; color: #666; margin-top: 4px; }
+
+    /* ── Agent 结果分区 ── */
+    .agent-sections { display: flex; flex-direction: column; gap: 14px; }
+    .agent-section {
+      border: 1.5px solid #e2e8f0;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .agent-section-head {
+      background: #eef2ff;
+      padding: 8px 14px;
+      font-size: .82rem;
+      font-weight: 700;
+      color: #1a3a6b;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      user-select: none;
+    }
+    .agent-section-body {
+      padding: 12px 14px;
+      font-size: .86rem;
+      line-height: 1.65;
+      background: #fff;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .copy-btn {
+      font-size: .75rem;
+      padding: 3px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      border: 1px solid #c7d4f0;
+      background: #fff;
+      color: #2563eb;
+    }
+    .copy-btn:hover { background: #eef2ff; }
+
+    @media (max-width: 640px) {
+      .card { padding: 18px 14px; }
+      main { padding: 16px 10px 50px; }
+      .stat-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🏗️ 招投标 AI Agent 服务</h1>
+  <div class="nav-links">
+    <button class="active" onclick="switchPage('home')">首页</button>
+    <button onclick="switchPage('kb')">知识库</button>
+    <button onclick="switchPage('agent')">智能体</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ══════════ 首页 ══════════ -->
+  <div id="page-home">
+    <!-- 服务状态 -->
+    <div class="card">
+      <h2><span class="icon">📡</span>服务状态</h2>
+      <div class="status-grid" id="status-grid">
+        <div class="status-item"><div class="label">服务名称</div><div class="value" id="s-name">检测中…</div></div>
+        <div class="status-item"><div class="label">版本</div><div class="value" id="s-ver">—</div></div>
+        <div class="status-item"><div class="label">运行状态</div><div class="value badge-ok" id="s-status">—</div></div>
+        <div class="status-item"><div class="label">知识库文档块数</div><div class="value" id="s-count">—</div></div>
+      </div>
+    </div>
+
+    <!-- 快速指引 -->
+    <div class="card">
+      <h2><span class="icon">🚀</span>快速开始</h2>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;">
+        <div style="padding:16px;background:#f6f8ff;border-radius:8px;border:1px solid #dce6fb;">
+          <div style="font-weight:700;color:#1a3a6b;margin-bottom:8px;">① 导入知识库</div>
+          <div style="font-size:.85rem;color:#555;line-height:1.6;">上传招标文件（PDF / DOCX / TXT）或直接粘贴文本，系统自动分块向量化存入知识库。</div>
+          <button class="btn btn-outline" style="margin-top:12px;font-size:.82rem;padding:6px 14px;" onclick="switchPage('kb')">前往知识库 →</button>
+        </div>
+        <div style="padding:16px;background:#f6f8ff;border-radius:8px;border:1px solid #dce6fb;">
+          <div style="font-weight:700;color:#1a3a6b;margin-bottom:8px;">② 运行 AI Agent</div>
+          <div style="font-size:.85rem;color:#555;line-height:1.6;">输入任务目标，多个 Agent（规划 → 调研 → 撰写 → 审核）协作完成招投标文案生成。</div>
+          <button class="btn btn-outline" style="margin-top:12px;font-size:.82rem;padding:6px 14px;" onclick="switchPage('agent')">前往智能体 →</button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ 知识库 ══════════ -->
+  <div id="page-kb" style="display:none;">
+
+    <!-- 统计 -->
+    <div class="card">
+      <h2><span class="icon">📊</span>知识库统计
+        <button class="btn btn-outline" style="margin-left:auto;font-size:.78rem;padding:5px 12px;" onclick="loadStats()">刷新</button>
+      </h2>
+      <div class="stat-grid">
+        <div class="stat-cell"><div class="num" id="stat-count">—</div><div class="desc">文档块总数</div></div>
+        <div class="stat-cell"><div class="num" id="stat-coll" style="font-size:1rem;">—</div><div class="desc">集合名称</div></div>
+        <div class="stat-cell"><div class="num" id="stat-path" style="font-size:.8rem;word-break:break-all;">—</div><div class="desc">存储路径</div></div>
+      </div>
+    </div>
+
+    <!-- 功能页签 -->
+    <div class="card">
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('kb','text')">📝 导入文本</button>
+        <button class="tab-btn" onclick="switchTab('kb','file')">📂 上传文件</button>
+        <button class="tab-btn" onclick="switchTab('kb','search')">🔍 语义检索</button>
+      </div>
+
+      <!-- 导入文本 -->
+      <div id="kb-tab-text" class="tab-pane active">
+        <div class="form-row">
+          <label>文本内容 <span class="hint">*必填</span></label>
+          <label for="kb-text"></label><textarea id="kb-text" placeholder="请粘贴或输入要导入的文本内容…"></textarea>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+          <div class="form-row">
+            <label>来源标识 <span class="hint">选填</span></label>
+            <label for="kb-source"></label><input type="text" id="kb-source" placeholder="例：招标文件_2024" />
+          </div>
+          <div class="form-row">
+            <label>分块大小 <span class="hint">200-3000</span></label>
+            <label for="kb-chunk-size"></label><input type="number" id="kb-chunk-size" placeholder="默认 900" min="200" max="3000" />
+          </div>
+          <div class="form-row">
+            <label>分块重叠 <span class="hint">0-800</span></label>
+            <label for="kb-chunk-overlap"></label><input type="number" id="kb-chunk-overlap" placeholder="默认 200" min="0" max="800" />
+          </div>
+        </div>
+        <button class="btn btn-primary" id="btn-ingest-text" onclick="ingestText()">
+          <span>导入知识库</span>
+        </button>
+        <div id="ingest-text-result"></div>
+      </div>
+
+      <!-- 上传文件 -->
+      <div id="kb-tab-file" class="tab-pane">
+        <div class="form-row">
+          <label>选择文件 <span class="hint">支持 PDF / DOCX / TXT</span></label>
+          <input type="file" id="kb-file" accept=".pdf,.docx,.txt,.md" style="padding:8px;border:1.5px dashed #c7d4f0;border-radius:7px;cursor:pointer;width:100%;background:#fafbff;" />
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+          <div class="form-row">
+            <label>来源标识 <span class="hint">选填</span></label>
+            <label for="kb-file-source"></label><input type="text" id="kb-file-source" placeholder="默认使用文件名" />
+          </div>
+          <div class="form-row">
+            <label>分块大小 <span class="hint">200-3000</span></label>
+            <label for="kb-file-chunk-size"></label><input type="number" id="kb-file-chunk-size" placeholder="默认 900" min="200" max="3000" />
+          </div>
+          <div class="form-row">
+            <label>分块重叠 <span class="hint">0-800</span></label>
+            <label for="kb-file-chunk-overlap"></label><input type="number" id="kb-file-chunk-overlap" placeholder="默认 200" min="0" max="800" />
+          </div>
+        </div>
+        <button class="btn btn-primary" id="btn-ingest-file" onclick="ingestFile()">
+          <span>上传并导入</span>
+        </button>
+        <div id="ingest-file-result"></div>
+      </div>
+
+      <!-- 语义检索 -->
+      <div id="kb-tab-search" class="tab-pane">
+        <div class="form-row">
+          <label>检索问题 <span class="hint">*必填</span></label>
+          <label for="search-query"></label><label for="search-query"></label><input type="text" id="search-query" placeholder="例：投标技术方案应包含哪些章节？" />
+        </div>
+        <div class="form-row" style="width:160px;">
+          <label>返回数量 <span class="hint">1-20</span></label>
+          <label for="search-topk"></label><input type="number" id="search-topk" value="5" min="1" max="20" />
+        </div>
+        <button class="btn btn-primary" id="btn-search" onclick="searchKB()">
+          <span>开始检索</span>
+        </button>
+        <div id="search-result"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ 智能体 ══════════ -->
+  <div id="page-agent" style="display:none;">
+    <div class="card">
+      <h2><span class="icon">🤖</span>多智能体任务运行</h2>
+
+      <div class="form-row">
+        <label>任务目标 <span class="hint">*必填，描述你希望 AI 完成的任务</span></label>
+        <label for="agent-goal"></label><textarea id="agent-goal" placeholder="例：生成某市政道路改造项目投标技术方案初稿" style="min-height:80px;"></textarea>
+      </div>
+
+      <div class="form-row">
+        <label>约束条件 <span class="hint">每行一条，选填</span></label>
+        <label for="agent-constraints"></label><label for="agent-constraints"></label><textarea id="agent-constraints" placeholder="例：&#10;至少包含进度、质量、安全、风险四个板块&#10;输出为 Markdown 格式&#10;字数不少于 800 字" style="min-height:90px;"></textarea>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-row">
+          <label>输出格式 <span class="hint">选填</span></label>
+          <label for="agent-format"></label><input type="text" id="agent-format" placeholder="例：Markdown / 结构化 JSON" />
+        </div>
+        <div class="form-row">
+          <label>知识库检索数量 <span class="hint">1-20，选填</span></label>
+          <label for="agent-topk"></label><input type="number" id="agent-topk" placeholder="默认由系统决定" min="1" max="20" />
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="btn-agent-run" onclick="runAgent()" style="min-width:140px;">
+        <span>▶ 运行智能体</span>
+      </button>
+      <span id="agent-running-hint" style="display:none;font-size:.82rem;color:#666;margin-left:12px;">⏳ 智能体运行中，请稍候（通常需要 15~60 秒）…</span>
+
+      <div id="agent-result"></div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+/* ══════════════════════════════════════════
+   页面切换
+══════════════════════════════════════════ */
+function switchPage(page) {
+  ['home','kb','agent'].forEach(p => {
+    document.getElementById('page-' + p).style.display = p === page ? '' : 'none';
+  });
+  document.querySelectorAll('.nav-links button').forEach((b, i) => {
+    b.classList.toggle('active', ['home','kb','agent','docs'][i] === page);
+  });
+  if (page === 'kb') loadStats();
+}
+
+function switchTab(group, tab) {
+  document.querySelectorAll(`[id^="${group}-tab-"]`).forEach(el => el.classList.remove('active'));
+  document.getElementById(`${group}-tab-${tab}`).classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.getAttribute('onclick').includes(`'${tab}'`));
+  });
+}
+
+/* ══════════════════════════════════════════
+   工具函数
+══════════════════════════════════════════ */
+function setLoading(btnId, loading, label) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.innerHTML = loading
+    ? `<span class="spinner"></span> 处理中…`
+    : `<span>${label}</span>`;
+}
+
+function alertHtml(msg, ok) {
+  return `<div class="alert ${ok ? 'alert-ok' : 'alert-err'}">${msg}</div>`;
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(() => alert('已复制到剪贴板！'));
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* 简单 Markdown → HTML（支持 # ## ### **粗体** `code` ``` 代码块 ``` - 列表） */
+function md2html(md) {
+  if (!md) return '';
+  let html = escHtml(md);
+  // 代码块
+  html = html.replace(/```[\s\S]*?```/g, m => {
+    const code = m.replace(/^```[^\n]*\n?/, '').replace(/```$/, '');
+    return `<pre><code>${code}</code></pre>`;
+  });
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+  html = html.replace(/\n{2,}/g, '</p><p>');
+  html = html.replace(/\n/g, '<br>');
+  return `<div class="md-content"><p>${html}</p></div>`;
+}
+
+/* ══════════════════════════════════════════
+   首页：服务状态
+══════════════════════════════════════════ */
+async function loadHomeStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    d.service = undefined;
+    document.getElementById('s-name').textContent   = d['服务名称'] || d.service || '—';
+    document.getElementById('s-ver').textContent    = d['版本']     || d.version  || '—';
+    document.getElementById('s-status').textContent = d['状态']     || d.status   || '—';
+  } catch { document.getElementById('s-status').textContent = '连接失败'; }
+
+  try {
+    const r2 = await fetch('/kb/stats');
+    const d2 = await r2.json();
+    document.getElementById('s-count').textContent = d2.count ?? '—';
+  } catch { document.getElementById('s-count').textContent = '—'; }
+}
+
+/* ══════════════════════════════════════════
+   知识库：统计
+══════════════════════════════════════════ */
+async function loadStats() {
+  try {
+    const r = await fetch('/kb/stats');
+    const d = await r.json();
+    d.collection = undefined;
+    document.getElementById('stat-count').textContent = d.count ?? '—';
+    document.getElementById('stat-coll').textContent  = d.collection || '—';
+    document.getElementById('stat-path').textContent  = d.path || '—';
+    await loadHomeStatus();
+  } catch(e) {
+    document.getElementById('stat-count').textContent = '获取失败';
+  }
+}
+
+/* ══════════════════════════════════════════
+   知识库：导入文本
+══════════════════════════════════════════ */
+async function ingestText() {
+  const text = document.getElementById('kb-text').value.trim();
+  if (!text) { document.getElementById('ingest-text-result').innerHTML = alertHtml('请输入文本内容！'); return; }
+
+  setLoading('btn-ingest-text', true, '导入知识库');
+  const body = { text };
+  const source = document.getElementById('kb-source').value.trim();
+  const cs = document.getElementById('kb-chunk-size').value;
+  const co = document.getElementById('kb-chunk-overlap').value;
+  if (source) body.source = source;
+  if (cs) body.chunk_size = parseInt(cs);
+  if (co) body.chunk_overlap = parseInt(co);
+
+  try {
+    const r = await fetch('/kb/text', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    d.total_characters = undefined;
+    d.chunks_indexed = undefined;
+    if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+    document.getElementById('ingest-text-result').innerHTML =
+      alertHtml(`✅ 导入成功！来源：<strong>${escHtml(d.source)}</strong>，共 <strong>${d.chunks_indexed}</strong> 个分块，总字符数 <strong>${d.total_characters}</strong>。`, true);
+    await loadStats();
+  } catch(e) {
+    document.getElementById('ingest-text-result').innerHTML = alertHtml('❌ 导入失败：' + e.message);
+  }
+  setLoading('btn-ingest-text', false, '导入知识库');
+}
+
+/* ══════════════════════════════════════════
+   知识库：上传文件
+══════════════════════════════════════════ */
+async function ingestFile() {
+  const fileInput = document.getElementById('kb-file');
+  if (!fileInput.files.length) { document.getElementById('ingest-file-result').innerHTML = alertHtml('请先选择文件！'); return; }
+
+  setLoading('btn-ingest-file', true, '上传并导入');
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  const source = document.getElementById('kb-file-source').value.trim();
+  const cs = document.getElementById('kb-file-chunk-size').value;
+  const co = document.getElementById('kb-file-chunk-overlap').value;
+  let url = '/kb/file';
+  const params = new URLSearchParams();
+  if (source) params.set('source', source);
+  if (cs) params.set('chunk_size', cs);
+  if (co) params.set('chunk_overlap', co);
+  if ([...params].length) url += '?' + params.toString();
+
+  try {
+    const r = await fetch(url, { method:'POST', body: formData });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+    document.getElementById('ingest-file-result').innerHTML =
+      alertHtml(`✅ 上传成功！来源：<strong>${escHtml(d.source)}</strong>，共 <strong>${d.chunks_indexed}</strong> 个分块，总字符数 <strong>${d.total_characters}</strong>。`, true);
+    await loadStats();
+  } catch(e) {
+    document.getElementById('ingest-file-result').innerHTML = alertHtml('❌ 上传失败：' + e.message);
+  }
+  setLoading('btn-ingest-file', false, '上传并导入');
+}
+
+/* ══════════════════════════════════════════
+   知识库：语义检索
+══════════════════════════════════════════ */
+async function searchKB() {
+  const query = document.getElementById('search-query').value.trim();
+  if (!query) { document.getElementById('search-result').innerHTML = alertHtml('请输入检索内容！'); return; }
+  setLoading('btn-search', true, '开始检索');
+
+  const topk = parseInt(document.getElementById('search-topk').value) || 5;
+  try {
+    const r = await fetch('/kb/search', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ query, top_k: topk }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+    if (!d.hits || !d.hits.length) {
+      document.getElementById('search-result').innerHTML = alertHtml('未找到相关内容，请先导入文档。');
+    } else {
+      document.getElementById('search-result').innerHTML =
+        `<div class="result-box" style="margin-top:16px;">
+           <div class="result-header">🔍 检索结果（共 ${d.hits.length} 条）</div>
+           <div class="result-body" style="max-height:500px;">` +
+        d.hits.map((h, i) =>
+          `<div class="hit-item">
+             <span class="hit-score">${h.score != null ? '相似度 ' + h.score.toFixed(4) : '—'}</span>
+             <strong style="font-size:.8rem;color:#2563eb;"># ${i+1}</strong>
+             <div class="hit-text">${escHtml(h.text)}</div>
+             ${Object.keys(h.metadata||{}).length ? `<div class="hit-meta">${escHtml(JSON.stringify(h.metadata))}</div>` : ''}
+           </div>`
+        ).join('') +
+        `</div></div>`;
+    }
+  } catch(e) {
+    document.getElementById('search-result').innerHTML = alertHtml('❌ 检索失败：' + e.message);
+  }
+  setLoading('btn-search', false, '开始检索');
+}
+
+/* ══════════════════════════════════════════
+   智能体：运行
+══════════════════════════════════════════ */
+async function runAgent() {
+  const goal = document.getElementById('agent-goal').value.trim();
+  if (!goal) { document.getElementById('agent-result').innerHTML = alertHtml('请输入任务目标！'); return; }
+
+  setLoading('btn-agent-run', true, '▶ 运行智能体');
+  document.getElementById('agent-running-hint').style.display = 'inline';
+  document.getElementById('agent-result').innerHTML = '';
+
+  const constraintsRaw = document.getElementById('agent-constraints').value.trim();
+  const constraints = constraintsRaw ? constraintsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [];
+  const fmt = document.getElementById('agent-format').value.trim();
+  const topk = document.getElementById('agent-topk').value;
+  const body = { goal, constraints };
+  if (fmt) body.output_format = fmt;
+  if (topk) body.top_k = parseInt(topk);
+
+  try {
+    const r = await fetch('/agent/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+
+    const sections = [
+      { key: 'plan',           label: '📋 执行计划' },
+      { key: 'research_notes', label: '🔬 调研笔记' },
+      { key: 'draft',          label: '✍️ 初稿内容' },
+      { key: 'review_notes',   label: '🔎 审核意见' },
+      { key: 'final_answer',   label: '🎯 最终结果' },
+    ];
+
+    const sectionsHtml = sections.map(s => {
+      const content = d[s.key] || '';
+      if (!content) return '';
+      const id = 'sec-' + s.key;
+      return `<div class="agent-section">
+        <div class="agent-section-head" onclick="toggleSection('${id}')">
+          ${s.label}
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="copy-btn" onclick="event.stopPropagation();copyText(document.getElementById('${id}-raw').textContent)">复制</button>
+            <span id="${id}-arrow">▲</span>
+          </div>
+        </div>
+        <div class="agent-section-body md-content" id="${id}">${md2html(content)}</div>
+        <pre id="${id}-raw" style="display:none">${escHtml(content)}</pre>
+      </div>`;
+    }).join('');
+
+    const logsHtml = d.logs && d.logs.length
+      ? `<div class="card" style="margin-top:16px;">
+           <h2><span class="icon">📜</span>执行日志</h2>
+           <div class="log-list">` +
+         d.logs.map(l => `<div class="log-item"><div class="log-agent">${escHtml(l.agent)}</div><div class="log-content">${escHtml(l.content)}</div></div>`).join('') +
+         `</div></div>`
+      : '';
+
+    document.getElementById('agent-result').innerHTML =
+      `<div class="agent-sections" style="margin-top:20px;">${sectionsHtml}</div>${logsHtml}`;
+
+  } catch(e) {
+    document.getElementById('agent-result').innerHTML = alertHtml('❌ 运行失败：' + e.message);
+  }
+
+  setLoading('btn-agent-run', false, '▶ 运行智能体');
+  document.getElementById('agent-running-hint').style.display = 'none';
+}
+
+function toggleSection(id) {
+  const body = document.getElementById(id);
+  const arrow = document.getElementById(id + '-arrow');
+  const collapsed = body.classList.toggle('collapsed');
+  if (arrow) arrow.textContent = collapsed ? '▼' : '▲';
+}
+
+/* ══════════════════════════════════════════
+   初始化
+══════════════════════════════════════════ */
+loadHomeStatus();
+</script>
+</body>
+</html>
+
