@@ -141,14 +141,14 @@
     .btn-outline {
       background: #fff;
       color: #2563eb;
-      border: 1.5px solid #2563eb;
+      border: 2px solid #2563eb;
     }
     .btn-outline:hover { background: #eef2ff; }
 
     /* ── 结果展示 ── */
     .result-box {
       margin-top: 20px;
-      border: 1.5px solid #dce6fb;
+      border: 2px solid #dce6fb;
       border-radius: 8px;
       overflow: hidden;
     }
@@ -269,7 +269,7 @@
     /* ── Agent 结果分区 ── */
     .agent-sections { display: flex; flex-direction: column; gap: 14px; }
     .agent-section {
-      border: 1.5px solid #e2e8f0;
+      border: 2px solid #e2e8f0;
       border-radius: 8px;
       overflow: hidden;
     }
@@ -410,7 +410,7 @@
       <div id="kb-tab-file" class="tab-pane">
         <div class="form-row">
           <label>选择文件 <span class="hint">支持 PDF / DOCX / TXT</span></label>
-          <input type="file" id="kb-file" accept=".pdf,.docx,.txt,.md" style="padding:8px;border:1.5px dashed #c7d4f0;border-radius:7px;cursor:pointer;width:100%;background:#fafbff;" />
+          <input type="file" id="kb-file" accept=".pdf,.docx,.txt,.md" style="padding:8px;border:2px dashed #c7d4f0;border-radius:7px;cursor:pointer;width:100%;background:#fafbff;" />
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
           <div class="form-row">
@@ -583,7 +583,7 @@ async function loadStats() {
     const d = await r.json();
     d.collection = undefined;
     document.getElementById('stat-count').textContent = d.count ?? '—';
-    document.getElementById('stat-coll').textContent  = d.collection || '—';
+    document.getElementById('stat-coll').textContent  = '—';
     document.getElementById('stat-path').textContent  = d.path || '—';
     await loadHomeStatus();
   } catch(e) {
@@ -667,6 +667,7 @@ async function searchKB() {
   try {
     const r = await fetch('/kb/search', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ query, top_k: topk }) });
     const d = await r.json();
+    d.hits = undefined;
     if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
     if (!d.hits || !d.hits.length) {
       document.getElementById('search-result').innerHTML = alertHtml('未找到相关内容，请先导入文档。');
@@ -713,6 +714,7 @@ async function runAgent() {
   try {
     const r = await fetch('/agent/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const d = await r.json();
+    d.logs = undefined;
     if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
 
     const sections = [
