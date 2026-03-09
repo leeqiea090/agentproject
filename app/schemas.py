@@ -206,6 +206,77 @@ class BidDownloadRequest(BaseModel):
     format: str = Field(default="pdf", description="文件格式：pdf/docx")
 
 
+# --- 四阶段工作流相关 ---
+
+class WorkflowMaterialCheckItem(BaseModel):
+    """资料校验项"""
+    item: str = Field(description="校验项名称")
+    status: str = Field(description="校验状态：通过/缺失/待确认")
+    evidence: str = Field(default="", description="依据或证据说明")
+    suggestion: str = Field(default="", description="补充建议")
+
+
+class TenderWorkflowStep1Result(BaseModel):
+    """第一步：招标解析输出"""
+    key_information: dict[str, Any] = Field(default_factory=dict, description="关键项目信息")
+    required_materials: list[str] = Field(default_factory=list, description="需准备资料清单")
+    scoring_rules: list[str] = Field(default_factory=list, description="评分规则与权重")
+    risk_alerts: list[str] = Field(default_factory=list, description="风险提示")
+    summary: str = Field(default="", description="步骤总结")
+
+
+class TenderWorkflowStep2Result(BaseModel):
+    """第二步：资料校验输出"""
+    overall_status: str = Field(default="待补充", description="总体状态：通过/需补充")
+    checklist: list[WorkflowMaterialCheckItem] = Field(default_factory=list, description="逐项校验结果")
+    missing_items: list[str] = Field(default_factory=list, description="缺失项清单")
+    next_actions: list[str] = Field(default_factory=list, description="下一步建议动作")
+    summary: str = Field(default="", description="步骤总结")
+
+
+class TenderWorkflowStep3Result(BaseModel):
+    """第三步：标书整合输出"""
+    generated: bool = Field(default=False, description="是否已生成标书")
+    bid_id: str = Field(default="", description="标书ID")
+    section_titles: list[str] = Field(default_factory=list, description="生成章节标题列表")
+    download_url: str = Field(default="", description="下载地址")
+    file_path: str = Field(default="", description="文件路径")
+    integration_notes: str = Field(default="", description="整合Agent说明")
+    summary: str = Field(default="", description="步骤总结")
+
+
+class TenderWorkflowStep4Result(BaseModel):
+    """第四步：审核输出"""
+    ready_for_submission: bool = Field(default=False, description="是否可直接提交")
+    risk_level: str = Field(default="medium", description="风险等级：low/medium/high")
+    compliance_score: float = Field(default=0.0, description="合规评分（0~100）")
+    major_issues: list[str] = Field(default_factory=list, description="主要问题")
+    recommendations: list[str] = Field(default_factory=list, description="修订建议")
+    conclusion: str = Field(default="", description="审核结论")
+
+
+class TenderWorkflowRequest(BaseModel):
+    """四阶段工作流请求"""
+    tender_id: str = Field(description="招标文件ID")
+    company_profile_id: str | None = Field(default=None, description="企业信息ID，可为空")
+    selected_packages: list[str] = Field(default_factory=list, description="投标包号列表，留空表示全部包")
+    product_ids: dict[str, str] = Field(default_factory=dict, description="包号→产品ID映射")
+    continue_on_material_gaps: bool = Field(default=False, description="资料不全时是否继续生成标书")
+    generate_docx: bool = Field(default=True, description="是否生成docx文件")
+
+
+class TenderWorkflowResponse(BaseModel):
+    """四阶段工作流响应"""
+    workflow_id: str = Field(description="工作流ID")
+    tender_id: str = Field(description="招标文件ID")
+    status: str = Field(description="整体状态：completed/blocked/error")
+    analysis: TenderWorkflowStep1Result = Field(description="步骤1结果")
+    material_validation: TenderWorkflowStep2Result = Field(description="步骤2结果")
+    generation: TenderWorkflowStep3Result = Field(description="步骤3结果")
+    review: TenderWorkflowStep4Result = Field(description="步骤4结果")
+    generated_time: datetime = Field(description="生成时间")
+
+
 # --- 通用响应 ---
 
 class ErrorResponse(BaseModel):

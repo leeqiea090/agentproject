@@ -1,5 +1,5 @@
 """招投标系统API路由"""
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from pathlib import Path
 import shutil
@@ -16,12 +16,19 @@ from app.schemas import (
     BidGenerateRequest,
     BidGenerateResponse,
     BidDocumentSection,
+    TenderWorkflowRequest,
+    TenderWorkflowResponse,
+    TenderWorkflowStep1Result,
+    TenderWorkflowStep2Result,
+    TenderWorkflowStep3Result,
+    TenderWorkflowStep4Result,
     # ErrorResponse
 )
 from app.services.tender_parser import create_tender_parser
 from app.services.bid_generator import create_bid_generator, BidGenerationState
 from app.services.one_click_generator import generate_bid_sections
 from app.services.docx_builder import build_bid_docx
+from app.services.tender_workflow import TenderWorkflowAgent
 from app.services.llm import get_chat_model
 
 logger = logging.getLogger(__name__)
@@ -39,6 +46,7 @@ tender_storage: dict[str, dict] = {}
 company_storage: dict[str, CompanyProfile] = {}
 product_storage: dict[str, ProductSpecification] = {}
 bid_storage: dict[str, dict] = {}
+workflow_storage: dict[str, dict] = {}
 
 
 @router.post("/upload", response_model=TenderUploadResponse)
@@ -129,6 +137,7 @@ async def parse_tender_file(tender_id: str):
 
         # 存储解析结果
         tender_info["parsed_data"] = tender_doc.model_dump()
+        tender_info["raw_text"] = raw_text
         tender_info["status"] = "parsed"
 
         logger.info(f"招标文件解析成功: {tender_id}, 项目: {tender_doc.project_name}")
@@ -431,6 +440,173 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
 
     else:
         raise HTTPException(status_code=400, detail="不支持的格式，请使用 docx 或 markdown")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 四阶段正式流程：解析 → 资料校验 → 标书整合 → 审核
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _resolve_selected_packages(tender_doc: TenderDocument, selected_packages: list[str]) -> list[str]:
+    package_ids = {pkg.package_id for pkg in tender_doc.packages}
+    if not selected_packages:
+        return sorted(package_ids)
+    return [pkg_id for pkg_id in selected_packages if pkg_id in package_ids] or sorted(package_ids)
+
+
+def _resolve_raw_text_for_tender(tender_info: dict, parser) -> str:
+    raw_text = str(tender_info.get("raw_text") or "").strip()
+    if raw_text:
+        return raw_text
+    file_path = tender_info.get("file_path")
+    if file_path:
+        raw_text = parser.extract_text(file_path)
+        tender_info["raw_text"] = raw_text
+        return raw_text
+    return ""
+
+
+@router.post("/workflow/run", response_model=TenderWorkflowResponse, summary="运行四阶段AI正式流程")
+async def run_tender_workflow(req: TenderWorkflowRequest):
+    """
+    四阶段正式流程：
+    1) 解析招标并提炼关键结果；
+    2) 校验已上传资料；
+    3) 整合生成标书；
+    4) 自动审核并给出结论。
+    """
+    if req.tender_id not in tender_storage:
+        raise HTTPException(status_code=404, detail="招标文件不存在")
+
+    tender_info = tender_storage[req.tender_id]
+    if tender_info.get("status") != "parsed":
+        raise HTTPException(status_code=400, detail="招标文件未解析，请先执行解析")
+
+    tender_doc = TenderDocument(**tender_info["parsed_data"])
+    llm = get_chat_model()
+    parser = create_tender_parser(llm)
+    raw_text = _resolve_raw_text_for_tender(tender_info, parser)
+
+    selected_packages = _resolve_selected_packages(tender_doc, req.selected_packages)
+    company = company_storage.get(req.company_profile_id) if req.company_profile_id else None
+
+    products: dict[str, ProductSpecification] = {}
+    for pkg_id in selected_packages:
+        product_id = req.product_ids.get(pkg_id)
+        if not product_id:
+            continue
+        product = product_storage.get(product_id)
+        if product:
+            products[pkg_id] = product
+
+    workflow_agent = TenderWorkflowAgent(llm)
+
+    # Step 1: 解析
+    analysis_dict = workflow_agent.step1_analyze_tender(tender_doc, raw_text)
+
+    # Step 2: 资料校验
+    validation_dict = workflow_agent.step2_validate_materials(
+        tender=tender_doc,
+        required_materials=analysis_dict.get("required_materials", []),
+        selected_packages=selected_packages,
+        company=company,
+        products=products,
+    )
+
+    should_continue = req.continue_on_material_gaps or validation_dict.get("overall_status") == "通过"
+    sections: list[BidDocumentSection] = []
+
+    generation_dict: dict = {
+        "generated": False,
+        "bid_id": "",
+        "section_titles": [],
+        "download_url": "",
+        "file_path": "",
+        "integration_notes": "",
+        "summary": "资料校验未通过，已阻断第三步。",
+    }
+
+    if should_continue:
+        company_for_docx = company or _PLACEHOLDER_COMPANY
+        # 保证下载接口可读取公司信息
+        company_storage[company_for_docx.company_id or "placeholder"] = company_for_docx
+
+        step3_dict, sections = workflow_agent.step3_integrate_bid(
+            tender=tender_doc,
+            raw_text=raw_text,
+            selected_packages=selected_packages,
+            company=company_for_docx,
+            products=products,
+        )
+
+        bid_id = f"WF_BID_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
+        if req.generate_docx:
+            build_bid_docx(sections, tender_doc, company_for_docx, output_file)
+            file_path = str(output_file)
+        else:
+            file_path = ""
+
+        bid_storage[bid_id] = {
+            "bid_id": bid_id,
+            "tender_id": req.tender_id,
+            "company_id": company_for_docx.company_id,
+            "sections": [s.model_dump() for s in sections],
+            "generated_time": datetime.now(),
+            "status": "generated",
+            "file_path": file_path,
+        }
+
+        generation_dict = {
+            "generated": True,
+            "bid_id": bid_id,
+            "section_titles": [s.section_title for s in sections],
+            "download_url": f"/api/tender/bid/download/{bid_id}?format=docx",
+            "file_path": file_path,
+            "integration_notes": step3_dict.get("integration_notes", ""),
+            "summary": step3_dict.get("summary", "标书已生成。"),
+        }
+
+    # Step 4: 审核
+    if sections:
+        review_dict = workflow_agent.step4_review_bid(
+            tender=tender_doc,
+            analysis_result=analysis_dict,
+            validation_result=validation_dict,
+            sections=sections,
+        )
+    else:
+        review_dict = {
+            "ready_for_submission": False,
+            "risk_level": "high",
+            "compliance_score": 0.0,
+            "major_issues": ["第三步未执行，暂无可审核标书内容。"],
+            "recommendations": ["先补齐第二步缺失项，然后重新运行流程。"],
+            "conclusion": "当前流程已阻断，暂不具备提交条件。",
+        }
+
+    workflow_status = "completed" if should_continue else "blocked"
+    workflow_id = str(uuid.uuid4())
+
+    response = TenderWorkflowResponse(
+        workflow_id=workflow_id,
+        tender_id=req.tender_id,
+        status=workflow_status,
+        analysis=TenderWorkflowStep1Result(**analysis_dict),
+        material_validation=TenderWorkflowStep2Result(**validation_dict),
+        generation=TenderWorkflowStep3Result(**generation_dict),
+        review=TenderWorkflowStep4Result(**review_dict),
+        generated_time=datetime.now(),
+    )
+
+    workflow_storage[workflow_id] = response.model_dump()
+    return response
+
+
+@router.get("/workflow/{workflow_id}", response_model=TenderWorkflowResponse, summary="查询四阶段流程结果")
+async def get_tender_workflow_result(workflow_id: str):
+    if workflow_id not in workflow_storage:
+        raise HTTPException(status_code=404, detail="流程结果不存在")
+    return TenderWorkflowResponse(**workflow_storage[workflow_id])
 
 
 # ──────────────────────────────────────────────────────────────────────────────

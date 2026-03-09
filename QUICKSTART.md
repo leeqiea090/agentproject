@@ -56,6 +56,7 @@ python test_tender_system.py
 | **企业信息管理** | 维护企业资质和人员信息 | `POST /api/tender/company/profile` |
 | **产品库管理** | 管理产品技术参数和价格 | `POST /api/tender/products` |
 | **投标文件生成** | AI自动生成规范投标文件 | `POST /api/tender/bid/generate` |
+| **四阶段正式流程** | 解析→资料校验→整合→审核，一次返回全流程结果 | `POST /api/tender/workflow/run` |
 
 ### 生成的投标文件内容
 
