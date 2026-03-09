@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import get_settings
 from app.routers.chat import router as agent_router
 from app.routers.kb import router as kb_router
+from app.routers.tender import router as tender_router
 
 settings = get_settings()
 
@@ -28,6 +29,10 @@ app = FastAPI(
             "name": "智能体",
             "description": "运行多智能体团队，完成招投标文档分析与生成任务",
         },
+        {
+            "name": "招投标系统",
+            "description": "招标文件解析、企业信息管理、投标文件自动生成",
+        },
     ],
 )
 
@@ -36,6 +41,7 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 app.include_router(kb_router)
 app.include_router(agent_router)
+app.include_router(tender_router)
 
 
 @app.get("/", include_in_schema=False)

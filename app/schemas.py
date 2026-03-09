@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -61,3 +63,153 @@ class AgentRunResponse(BaseModel):
     review_notes: str = Field(description="审核 Agent 的审阅意见")
     final_answer: str = Field(description="最终输出结果")
     logs: list[AgentLog] = Field(default_factory=list, description="各 Agent 的执行日志")
+
+
+# ==================== 招投标系统数据模型 ====================
+
+# --- 招标文件相关 ---
+
+class ProcurementPackage(BaseModel):
+    """采购包信息"""
+    package_id: str = Field(description="包号")
+    item_name: str = Field(description="货物/服务名称")
+    quantity: int = Field(description="数量")
+    budget: float = Field(description="预算金额（元）")
+    technical_requirements: dict[str, Any] = Field(default_factory=dict, description="技术参数要求")
+    delivery_time: str = Field(default="", description="交货期限")
+    delivery_place: str = Field(default="", description="交货地点")
+
+
+class CommercialTerms(BaseModel):
+    """商务条款"""
+    payment_method: str = Field(default="", description="付款方式")
+    validity_period: str = Field(default="90日历天", description="投标有效期")
+    warranty_period: str = Field(default="", description="质保期")
+    performance_bond: str = Field(default="不收取", description="履约保证金")
+
+
+class TenderDocument(BaseModel):
+    """招标文件结构化数据"""
+    project_name: str = Field(description="项目名称")
+    project_number: str = Field(description="项目编号")
+    budget: float = Field(description="总预算金额")
+    purchaser: str = Field(description="采购人")
+    agency: str = Field(default="", description="代理机构")
+    procurement_type: str = Field(default="竞争性谈判", description="采购方式")
+    packages: list[ProcurementPackage] = Field(default_factory=list, description="采购包列表")
+    commercial_terms: CommercialTerms = Field(default_factory=CommercialTerms, description="商务条款")
+    evaluation_criteria: dict[str, Any] = Field(default_factory=dict, description="评分标准")
+    special_requirements: str = Field(default="", description="特殊要求说明")
+
+
+class TenderUploadRequest(BaseModel):
+    """招标文件上传请求"""
+    file_name: str = Field(description="文件名")
+    file_size: int = Field(description="文件大小（字节）")
+
+
+class TenderUploadResponse(BaseModel):
+    """招标文件上传响应"""
+    tender_id: str = Field(description="招标文件唯一标识")
+    upload_time: datetime = Field(description="上传时间")
+    status: str = Field(default="uploaded", description="状态：uploaded/parsing/parsed/error")
+
+
+class TenderParseResponse(BaseModel):
+    """招标文件解析响应"""
+    tender_id: str = Field(description="招标文件ID")
+    parsed_data: TenderDocument = Field(description="解析后的结构化数据")
+    raw_text_length: int = Field(description="原始文本长度")
+    parse_time: datetime = Field(description="解析时间")
+
+
+# --- 企业信息相关 ---
+
+class CompanyLicense(BaseModel):
+    """企业证照信息"""
+    license_type: str = Field(description="证照类型，如：营业执照、医疗器械经营许可证")
+    license_number: str = Field(description="证照编号")
+    valid_until: str = Field(default="长期", description="有效期至")
+    file_path: str = Field(default="", description="证照文件路径")
+
+
+class CompanyStaff(BaseModel):
+    """企业人员信息"""
+    name: str = Field(description="姓名")
+    position: str = Field(description="职务")
+    education: str = Field(default="", description="学历")
+    id_number: str = Field(default="", description="身份证号（部分脱敏）")
+    phone: str = Field(default="", description="联系电话")
+
+
+class CompanyProfile(BaseModel):
+    """企业基本信息"""
+    company_id: str | None = Field(default=None, description="企业ID")
+    name: str = Field(description="企业全称")
+    legal_representative: str = Field(description="法定代表人")
+    address: str = Field(description="详细地址")
+    phone: str = Field(description="联系电话")
+    licenses: list[CompanyLicense] = Field(default_factory=list, description="资质证照列表")
+    staff: list[CompanyStaff] = Field(default_factory=list, description="项目团队人员")
+    social_insurance_proof: str = Field(default="", description="社保缴纳证明路径")
+    credit_check_time: datetime | None = Field(default=None, description="最近信用查询时间")
+
+
+class ProductSpecification(BaseModel):
+    """产品技术规格"""
+    product_id: str | None = Field(default=None, description="产品ID")
+    product_name: str = Field(description="产品名称")
+    manufacturer: str = Field(description="生产厂家")
+    origin: str = Field(default="", description="产地")
+    model: str = Field(default="", description="型号")
+    specifications: dict[str, Any] = Field(default_factory=dict, description="技术参数")
+    price: float = Field(description="参考价格")
+    certifications: list[str] = Field(default_factory=list, description="认证证书列表")
+    registration_number: str = Field(default="", description="注册证编号（医疗器械）")
+    authorization_letter: str = Field(default="", description="授权书路径")
+
+
+# --- 投标文件生成相关 ---
+
+class BidGenerateRequest(BaseModel):
+    """投标文件生成请求"""
+    tender_id: str = Field(description="招标文件ID")
+    company_profile_id: str = Field(description="企业信息ID")
+    selected_packages: list[str] = Field(description="投标包号列表")
+    product_ids: dict[str, str] = Field(default_factory=dict, description="包号→产品ID映射")
+    discount_rate: float = Field(default=1.0, ge=0.5, le=1.0, description="报价折扣率，默认1.0（不打折）")
+    add_performance_cases: bool = Field(default=False, description="是否添加业绩案例")
+    custom_service_plan: str = Field(default="", description="自定义售后服务方案")
+
+
+class BidDocumentSection(BaseModel):
+    """投标文件章节"""
+    section_title: str = Field(description="章节标题")
+    content: str = Field(description="章节内容（可以是HTML或Markdown）")
+    attachments: list[str] = Field(default_factory=list, description="附件路径列表")
+
+
+class BidGenerateResponse(BaseModel):
+    """投标文件生成响应"""
+    bid_id: str = Field(description="投标文件ID")
+    tender_id: str = Field(description="对应的招标文件ID")
+    status: str = Field(default="generated", description="状态：generating/generated/error")
+    sections: list[BidDocumentSection] = Field(default_factory=list, description="文档章节列表")
+    file_path: str = Field(default="", description="生成的PDF文件路径")
+    download_url: str = Field(default="", description="下载链接")
+    generated_time: datetime = Field(description="生成时间")
+
+
+class BidDownloadRequest(BaseModel):
+    """投标文件下载请求"""
+    bid_id: str = Field(description="投标文件ID")
+    format: str = Field(default="pdf", description="文件格式：pdf/docx")
+
+
+# --- 通用响应 ---
+
+class ErrorResponse(BaseModel):
+    """错误响应"""
+    error_code: str = Field(description="错误代码")
+    message: str = Field(description="错误信息")
+    details: dict[str, Any] = Field(default_factory=dict, description="详细错误信息")
