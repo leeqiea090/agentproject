@@ -20,7 +20,9 @@ from app.schemas import (
 )
 from app.services.tender_parser import create_tender_parser
 from app.services.bid_generator import create_bid_generator, BidGenerationState
-from app.services.llm import get_llm
+from app.services.one_click_generator import generate_bid_sections
+from app.services.docx_builder import build_bid_docx
+from app.services.llm import get_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +116,7 @@ async def parse_tender_file(tender_id: str):
 
     try:
         # 创建解析器
-        llm = get_llm()
+        llm = get_chat_model()
         parser = create_tender_parser(llm)
 
         # 解析PDF
@@ -290,7 +292,7 @@ async def generate_bid_document(request: BidGenerateRequest):
 
     try:
         # 创建生成器
-        llm = get_llm()
+        llm = get_chat_model()
         generator = create_bid_generator(llm)
 
         # 初始化状态
@@ -330,7 +332,7 @@ async def generate_bid_document(request: BidGenerateRequest):
             status="generated",
             sections=sections,
             file_path="",  # 暂时为空，后续添加PDF生成功能
-            download_url=f"/api/tender/bid/download/{bid_id}",
+            download_url=f"/api/tender/bid/download/{bid_id}?format=docx",
             generated_time=datetime.now()
         )
 
@@ -369,13 +371,13 @@ async def get_bid_document(bid_id: str):
 
 
 @router.get("/bid/download/{bid_id}")
-async def download_bid_document(bid_id: str, format: str = "markdown"):
+async def download_bid_document(bid_id: str, format: str = "docx"):
     """
     下载投标文件
 
     Args:
         bid_id: 投标文件ID
-        format: 文件格式 (markdown/pdf)
+        format: 文件格式 (docx/markdown)
 
     Returns:
         文件下载
@@ -386,8 +388,30 @@ async def download_bid_document(bid_id: str, format: str = "markdown"):
     bid_info = bid_storage[bid_id]
     sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
 
-    if format == "markdown":
-        # 生成Markdown文件
+    if format == "docx":
+        # 获取招标文件和企业信息，用于封面
+        tender_info = tender_storage.get(bid_info["tender_id"])
+        company = company_storage.get(bid_info["company_id"])
+
+        if not tender_info or not company:
+            raise HTTPException(status_code=404, detail="关联的招标/企业信息不存在")
+
+        tender_doc = TenderDocument(**tender_info["parsed_data"])
+        output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
+
+        try:
+            build_bid_docx(sections, tender_doc, company, output_file)
+        except Exception as e:
+            logger.error(f"Word文件生成失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Word文件生成失败: {str(e)}")
+
+        return FileResponse(
+            output_file,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"投标文件_{tender_doc.project_name}.docx",
+        )
+
+    elif format == "markdown":
         output_file = BID_OUTPUT_DIR / f"{bid_id}.md"
 
         with output_file.open("w", encoding="utf-8") as f:
@@ -405,9 +429,98 @@ async def download_bid_document(bid_id: str, format: str = "markdown"):
             filename=f"投标文件_{bid_id}.md"
         )
 
-    elif format == "pdf":
-        # TODO: 实现PDF生成
-        raise HTTPException(status_code=501, detail="PDF生成功能待开发")
-
     else:
-        raise HTTPException(status_code=400, detail="不支持的格式")
+        raise HTTPException(status_code=400, detail="不支持的格式，请使用 docx 或 markdown")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 一键生成接口：上传招标文件 → 自动输出投标文件 Word
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ALLOWED_SUFFIXES = {".pdf", ".docx", ".doc"}
+
+# 占位公司信息（用于生成封面）
+_PLACEHOLDER_COMPANY = CompanyProfile(
+    company_id="placeholder",
+    name="[投标方公司名称]",
+    legal_representative="[法定代表人]",
+    address="[公司注册地址]",
+    phone="[联系电话]",
+)
+
+
+@router.post("/one-click", summary="一键生成投标文件")
+async def one_click_generate(file: UploadFile = File(...)):
+    """
+    上传招标文件（PDF 或 Word），自动解析并生成可下载的投标文件 Word 文档。
+
+    - 输入：招标文件（.pdf / .docx）
+    - 输出：投标文件（.docx）下载链接
+    """
+    # 1. 校验文件格式
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in _ALLOWED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件格式 '{suffix}'，请上传 PDF 或 Word（.docx）文件",
+        )
+
+    # 2. 保存上传文件
+    job_id = str(uuid.uuid4())
+    save_path = UPLOAD_DIR / f"{job_id}{suffix}"
+    try:
+        with save_path.open("wb") as buf:
+            shutil.copyfileobj(file.file, buf)
+    except Exception as exc:
+        logger.error("文件保存失败: %s", exc)
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
+
+    try:
+        # 3. 解析招标文件
+        llm = get_chat_model()
+        parser = create_tender_parser(llm)
+
+        logger.info("开始提取文本：%s", save_path)
+        raw_text = parser.extract_text(save_path)
+
+        logger.info("开始解析招标结构")
+        tender_doc = parser.parse_tender_document(save_path)
+
+        # 4. 一键生成投标文件各章节
+        # 使用稍高的 max_tokens 保证每章内容完整
+        from langchain_openai import ChatOpenAI
+        from app.config import get_settings
+        settings = get_settings()
+        gen_llm = ChatOpenAI(
+            model=settings.llm_model,
+            temperature=0.3,
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url or None,
+            max_tokens=4096,
+        )
+        sections = generate_bid_sections(tender_doc, raw_text, gen_llm)
+
+        # 5. 构建 Word 文档
+        output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
+        build_bid_docx(sections, tender_doc, _PLACEHOLDER_COMPANY, output_file)
+
+        logger.info("投标文件生成成功：%s", output_file)
+
+        # 6. 返回文件下载
+        safe_name = tender_doc.project_name.replace("/", "_").replace("\\", "_")
+        return FileResponse(
+            output_file,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"投标文件_{safe_name}.docx",
+        )
+
+    except Exception as exc:
+        logger.error("一键生成失败：%s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成失败：{exc}")
+    finally:
+        # 清理上传的临时文件
+        try:
+            save_path.unlink(missing_ok=True)
+        except Exception:
+            pass

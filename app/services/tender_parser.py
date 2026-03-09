@@ -13,6 +13,12 @@ from app.schemas import (
     CommercialTerms
 )
 
+try:
+    from docx import Document as _DocxDocument
+    _DOCX_AVAILABLE = True
+except ImportError:
+    _DOCX_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,15 +77,7 @@ class TenderParser:
         ])
 
     def extract_text_from_pdf(self, pdf_path: str | Path) -> str:
-        """
-        从PDF文件中提取文本
-
-        Args:
-            pdf_path: PDF文件路径
-
-        Returns:
-            提取的文本内容
-        """
+        """从PDF文件中提取文本"""
         try:
             with open(pdf_path, 'rb') as file:
                 pdf_reader = pypdf.PdfReader(file)
@@ -93,21 +91,51 @@ class TenderParser:
             logger.error(f"PDF文本提取失败: {str(e)}")
             raise ValueError(f"无法读取PDF文件: {str(e)}")
 
+    def extract_text_from_docx(self, docx_path: str | Path) -> str:
+        """从Word文档(.docx)中提取文本"""
+        if not _DOCX_AVAILABLE:
+            raise ValueError("python-docx 未安装，无法读取Word文件")
+        try:
+            doc = _DocxDocument(str(docx_path))
+            paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
+            # 同时提取表格内容
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                    if row_text:
+                        paragraphs.append(row_text)
+            text = "\n".join(paragraphs)
+            logger.info(f"成功从Word文档提取文本，共 {len(text)} 字符")
+            return text
+        except Exception as e:
+            logger.error(f"Word文档文本提取失败: {str(e)}")
+            raise ValueError(f"无法读取Word文件: {str(e)}")
+
+    def extract_text(self, file_path: str | Path) -> str:
+        """根据文件扩展名自动选择提取方式（支持 .pdf 和 .docx）"""
+        path = Path(file_path)
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            return self.extract_text_from_pdf(file_path)
+        elif suffix in (".docx", ".doc"):
+            return self.extract_text_from_docx(file_path)
+        else:
+            raise ValueError(f"不支持的文件格式：{suffix}，仅支持 .pdf 和 .docx")
+
     def parse_tender_document(self, pdf_path: str | Path) -> TenderDocument:
         """
-        解析招标文件PDF
+        解析招标文件（支持PDF和DOCX）
 
         Args:
-            pdf_path: PDF文件路径
+            pdf_path: 文件路径（.pdf 或 .docx）
 
         Returns:
             结构化的招标文件数据
         """
-        # 1. 提取PDF文本
-        tender_text = self.extract_text_from_pdf(pdf_path)
+        # 1. 提取文本（自动识别格式）
+        tender_text = self.extract_text(pdf_path)
 
-        # 如果文本太长，可以考虑分段处理或只提取前N个字符
-        # 这里简单处理，限制在50000字符以内
+        # 限制 token 长度
         if len(tender_text) > 50000:
             logger.warning(f"招标文件过长 ({len(tender_text)} 字符)，将截取前50000字符")
             tender_text = tender_text[:50000]
