@@ -2,6 +2,7 @@
 import re
 from pathlib import Path
 from datetime import datetime
+from typing import Iterable
 
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
@@ -35,10 +36,12 @@ def _add_heading(doc: Document, text: str, level: int) -> None:
     heading = doc.add_heading(text, level=level)
     heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
     run = heading.runs[0] if heading.runs else heading.add_run(text)
-    run.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
+    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+    run.font.name = "黑体"
+    run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体")
     run.font.bold = True
     if level == 1:
-        run.font.size = Pt(18)
+        run.font.size = Pt(16)
     elif level == 2:
         run.font.size = Pt(14)
     else:
@@ -52,6 +55,97 @@ def _add_paragraph(doc: Document, text: str, bold: bool = False) -> None:
     run.font.size = Pt(11)
     run.font.bold = bold
     para.paragraph_format.space_after = Pt(4)
+
+
+def _append_inline_runs(para, text: str, size: Pt) -> None:
+    """将含 **粗体** 的文本写入段落"""
+    parts = re.split(r"(\*\*.*?\*\*)", text)
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**") and len(part) >= 4:
+            run = para.add_run(part[2:-2])
+            run.bold = True
+        else:
+            run = para.add_run(part)
+        run.font.size = size
+
+
+def _normalize_title(text: str) -> str:
+    """标题归一化（用于去重匹配）"""
+    return re.sub(r"[\s#`*:：、（）()\-—_]", "", text or "")
+
+
+def _clean_markdown_content(section_title: str, content: str) -> str:
+    """
+    清洗章节内容：
+    1. 去除 Markdown 代码块围栏
+    2. 去除与章节标题重复的首部标题
+    """
+    lines = content.splitlines()
+    cleaned: list[str] = []
+    norm_section = _normalize_title(section_title)
+    can_skip_heading = True
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            continue
+
+        if can_skip_heading and stripped:
+            raw_heading = re.sub(r"^#+\s*", "", stripped)
+            norm_heading = _normalize_title(raw_heading)
+            if (
+                norm_heading == norm_section
+                or (norm_section and norm_heading.startswith(norm_section))
+                or (norm_section and norm_section.startswith(norm_heading))
+            ):
+                continue
+            # 只在章节开头阶段尝试跳过重复标题
+            if stripped and not stripped.startswith("#"):
+                can_skip_heading = False
+
+        cleaned.append(line.rstrip())
+
+    return "\n".join(cleaned).strip()
+
+
+def _extract_outline_items(content: str) -> list[str]:
+    """从章节 Markdown 中提取目录项（主要提取二级小节）"""
+    items: list[str] = []
+    seen: set[str] = set()
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        candidate = ""
+        if stripped.startswith("## "):
+            candidate = stripped[3:].strip()
+        elif re.match(r"^[一二三四五六七八九十]+、", stripped):
+            candidate = stripped
+        elif re.match(r"^[（(][一二三四五六七八九十]+[）)]", stripped):
+            candidate = stripped
+
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            items.append(candidate)
+
+    return items[:20]
+
+
+def _add_toc(doc: Document, sections: Iterable[BidDocumentSection]) -> None:
+    """添加简化目录页"""
+    _add_heading(doc, "目录", 1)
+    for section in sections:
+        line = doc.add_paragraph()
+        run = line.add_run(section.section_title)
+        run.font.size = Pt(12)
+        run.font.bold = True
+
+        for item in _extract_outline_items(section.content):
+            sub = doc.add_paragraph(item, style="List Bullet")
+            for r in sub.runs:
+                r.font.size = Pt(10.5)
 
 
 def _render_markdown_table(doc: Document, lines: list[str]) -> None:
@@ -78,8 +172,9 @@ def _render_markdown_table(doc: Document, lines: list[str]) -> None:
             if j >= col_count:
                 break
             cell = table.cell(i, j)
-            cell.text = cell_text
-            run = cell.paragraphs[0].runs[0] if cell.paragraphs[0].runs else cell.paragraphs[0].add_run(cell_text)
+            clean_cell_text = cell_text.replace("**", "")
+            cell.text = clean_cell_text
+            run = cell.paragraphs[0].runs[0] if cell.paragraphs[0].runs else cell.paragraphs[0].add_run(clean_cell_text)
             run.font.size = Pt(10)
             if i == 0:
                 run.font.bold = True
@@ -104,6 +199,11 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
             i += 1
             continue
 
+        # 代码块围栏
+        if stripped.startswith("```"):
+            i += 1
+            continue
+
         # 标题
         if stripped.startswith("### "):
             _add_heading(doc, stripped[4:], 3)
@@ -111,6 +211,12 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
             _add_heading(doc, stripped[3:], 2)
         elif stripped.startswith("# "):
             _add_heading(doc, stripped[2:], 1)
+        elif re.match(r"^第[一二三四五六七八九十]+章[、\s]", stripped):
+            _add_heading(doc, stripped, 1)
+        elif re.match(r"^[一二三四五六七八九十]+、", stripped):
+            _add_heading(doc, stripped, 2)
+        elif re.match(r"^[（(][一二三四五六七八九十]+[）)]", stripped):
+            _add_heading(doc, stripped, 3)
 
         # 分割线
         elif stripped.startswith("---"):
@@ -119,22 +225,12 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
         # 无序列表
         elif stripped.startswith("- ") or stripped.startswith("* "):
             para = doc.add_paragraph(style="List Bullet")
-            text = stripped[2:]
-            # 处理粗体
-            parts = re.split(r"(\*\*.*?\*\*)", text)
-            for part in parts:
-                if part.startswith("**") and part.endswith("**"):
-                    run = para.add_run(part[2:-2])
-                    run.bold = True
-                else:
-                    para.add_run(part)
-            for run in para.runs:
-                run.font.size = Pt(10.5)
+            _append_inline_runs(para, stripped[2:], Pt(10.5))
 
         # 有序列表
-        elif re.match(r"^\d+\. ", stripped):
+        elif re.match(r"^\d+[\.、]\s*", stripped):
             para = doc.add_paragraph(style="List Number")
-            para.add_run(re.sub(r"^\d+\. ", "", stripped)).font.size = Pt(10.5)
+            _append_inline_runs(para, re.sub(r"^\d+[\.、]\s*", "", stripped), Pt(10.5))
 
         # Markdown 表格：收集连续的表格行一起渲染
         elif stripped.startswith("|"):
@@ -148,15 +244,7 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
         # 普通段落（含粗体处理）
         else:
             para = doc.add_paragraph()
-            parts = re.split(r"(\*\*.*?\*\*)", stripped)
-            for part in parts:
-                if part.startswith("**") and part.endswith("**"):
-                    run = para.add_run(part[2:-2])
-                    run.bold = True
-                else:
-                    para.add_run(part)
-            for run in para.runs:
-                run.font.size = Pt(11)
+            _append_inline_runs(para, stripped, Pt(11))
             para.paragraph_format.space_after = Pt(4)
 
         i += 1
@@ -256,16 +344,22 @@ def build_bid_docx(
 
     # 逐章节渲染（跳过自动生成的封面/目录章节，避免重复）
     skip_titles = {"封面", "目录"}
-    for section in sections:
-        if section.section_title in skip_titles:
-            continue
+    render_sections = [section for section in sections if section.section_title not in skip_titles]
+
+    # 自动目录页
+    if render_sections:
+        _add_toc(doc, render_sections)
+        doc.add_page_break()
+
+    for idx, section in enumerate(render_sections):
+        clean_content = _clean_markdown_content(section.section_title, section.content)
 
         # 章节标题
         _add_heading(doc, section.section_title, 1)
         doc.add_paragraph()
 
         # 章节内容（Markdown → Word）
-        _parse_and_render_markdown(doc, section.content)
+        _parse_and_render_markdown(doc, clean_content)
 
         # 附件列表
         if section.attachments:
@@ -273,7 +367,8 @@ def build_bid_docx(
             for att in section.attachments:
                 doc.add_paragraph(att, style="List Bullet")
 
-        doc.add_page_break()
+        if idx < len(render_sections) - 1:
+            doc.add_page_break()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))

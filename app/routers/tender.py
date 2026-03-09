@@ -487,19 +487,8 @@ async def one_click_generate(file: UploadFile = File(...)):
         logger.info("开始解析招标结构")
         tender_doc = parser.parse_tender_document(save_path)
 
-        # 4. 一键生成投标文件各章节
-        # 使用稍高的 max_tokens 保证每章内容完整
-        from langchain_openai import ChatOpenAI
-        from app.config import get_settings
-        settings = get_settings()
-        gen_llm = ChatOpenAI(
-            model=settings.llm_model,
-            temperature=0.3,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url or None,
-            max_tokens=4096,
-        )
-        sections = generate_bid_sections(tender_doc, raw_text, gen_llm)
+        # 4. 一键生成投标文件各章节（按固定模板生成，使用解析后的结构化数据）
+        sections = generate_bid_sections(tender_doc, raw_text, llm)
 
         # 5. 构建 Word 文档
         output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
