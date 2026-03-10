@@ -586,7 +586,7 @@ def _evaluate_requirement_response(requirement_value: str, response_value: str) 
     response_numeric = _first_numeric_value(normalized_response)
     if comparator and threshold_value is not None and response_numeric is not None:
         compare_result = _compare_numeric_requirement(comparator, threshold_value, response_numeric)
-        if compare_result is True:
+        if compare_result:
             return {
                 "deviation_status": "无偏离",
                 "verified": True,
@@ -1076,7 +1076,6 @@ def _expand_extracted_facts(
     """
     expanded_items: list[dict[str, Any]] = []
     expanded_count = 0
-    package_map = {pkg.package_id: pkg for pkg in tender.packages}
 
     for requirement in normalized_result.get("technical_requirements", []):
         if not isinstance(requirement, dict):
@@ -1088,10 +1087,9 @@ def _expand_extracted_facts(
         product = products.get(package_id)
 
         # 生成详细响应
-        detail_lines: list[str] = []
+        detail_lines: list[str] = [f"本条款要求{parameter_name}满足「{normalized_value}」。"]
 
         # 1. 要求含义
-        detail_lines.append(f"本条款要求{parameter_name}满足「{normalized_value}」。")
 
         # 2. 产品响应方式
         if product:
@@ -2240,9 +2238,7 @@ def _resolve_bidder_evidence(
 def _build_evidence_bindings(
     tender: TenderDocument,
     raw_text: str,
-    analysis_result: dict[str, Any],
-    clause_result: dict[str, Any],
-    company: CompanyProfile | None = None,
+        company: CompanyProfile | None = None,
     products: dict[str, ProductSpecification] | None = None,
     selected_packages: list[str] | None = None,
     normalized_result: dict[str, Any] | None = None,
@@ -3097,7 +3093,7 @@ def _materialize_section_content(
         stripped = line.strip()
         if stripped.startswith("#"):
             current_heading = re.sub(r"^#+\s*", "", stripped)
-            pkg_match = re.search(r"(?:第\s*(\d+)\s*包|包\s*(\d+))", current_heading)
+            pkg_match = re.search(r"第\s*(\d+)\s*包|包\s*(\d+)", current_heading)
             if pkg_match:
                 current_package_id = pkg_match.group(1) or pkg_match.group(2)
             current_table_mode = ""
@@ -3261,7 +3257,7 @@ def _materialize_section_content(
                         if package_total == 0
                         else f"已证实 {package_proven}/{package_total} 项；其余 {max(0, package_total - package_proven)} 项待补证"
                     )
-                    cells[4] = "已完成" if package_total > 0 and package_proven == package_total else "待补证"
+                    cells[4] = "已完成" if 0 < package_total == package_proven else "待补证"
                     line = "| " + " | ".join(cells) + " |"
                     changed = True
                 elif "技术条款证据映射" in item_name:
@@ -3793,7 +3789,7 @@ def _build_regression_report(
     unexpected_mentions: set[str] = set()
     if _selected and sections:
         full_text = "\n".join(sec.content for sec in sections)
-        all_pkg_mentions = set(m.group(1) or m.group(2) for m in re.finditer(r"(?:第\s*(\d+)\s*包|包\s*(\d+))", full_text))
+        all_pkg_mentions = set(m.group(1) or m.group(2) for m in re.finditer(r"第\s*(\d+)\s*包|包\s*(\d+)", full_text))
         unexpected_mentions = all_pkg_mentions - _selected
         package_isolation = 1.0 if not unexpected_mentions else max(0.0, 1.0 - len(unexpected_mentions) / max(1, len(all_pkg_mentions)))
     else:
@@ -4522,15 +4518,14 @@ def _second_validation(
     expected_package_ids = list(selected_packages or [])
     if not expected_package_ids and generation_result:
         expected_package_ids = [str(item) for item in generation_result.get("selected_packages", []) if str(item).strip()]
-    all_package_ids: list[str] = []
     if tender is not None:
-        all_package_ids = [pkg.package_id for pkg in tender.packages]
+        pass
     elif isinstance(key_info.get("packages"), list):
-        all_package_ids = [str(item.get("package_id")) for item in key_info["packages"] if isinstance(item, dict)]
+        pass
 
     if expected_package_ids:
         package_mentions = set()
-        for match in re.finditer(r"(?:第\s*(\d+)\s*包|包\s*(\d+))", full_text):
+        for match in re.finditer(r"第\s*(\d+)\s*包|包\s*(\d+)", full_text):
             pkg_id = match.group(1) or match.group(2)
             if pkg_id:
                 package_mentions.add(pkg_id)
@@ -5378,8 +5373,7 @@ class TenderWorkflowAgent:
         tender: TenderDocument,
         raw_text: str,
         analysis_result: dict[str, Any],
-        clause_result: dict[str, Any],
-        company: CompanyProfile | None = None,
+            company: CompanyProfile | None = None,
         products: dict[str, ProductSpecification] | None = None,
         selected_packages: list[str] | None = None,
         normalized_result: dict[str, Any] | None = None,
@@ -5389,8 +5383,6 @@ class TenderWorkflowAgent:
         return _build_evidence_bindings(
             tender=tender,
             raw_text=raw_text,
-            analysis_result=analysis_result,
-            clause_result=clause_result,
             company=company,
             products=products,
             selected_packages=selected_packages,

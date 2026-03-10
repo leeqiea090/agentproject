@@ -118,7 +118,7 @@ class TenderParser:
             pass
 
         # 兜底：抽取第一个可能的JSON对象片段
-        match = re.search(r"\{[\s\S]*\}", text)
+        match = re.search(r"\{[\s\S]*}", text)
         if match:
             data = json.loads(match.group(0))
             if isinstance(data, dict):
@@ -126,14 +126,42 @@ class TenderParser:
 
         raise ValueError("未识别到有效JSON对象")
 
+    # 解析招标文件需要返回完整 JSON，必须保证足够的输出 token
+    _MIN_PARSE_MAX_TOKENS = 4096
+
     def _parse_with_llm(self, tender_text: str) -> dict[str, Any]:
-        chain = self.extraction_prompt | self.llm
+        # 确保 max_tokens 足够容纳完整 JSON 响应
+        llm = self._ensure_parse_tokens(self.llm)
+        chain = self.extraction_prompt | llm
         response = chain.invoke({"tender_text": tender_text})
+        self._check_finish_reason(response, context="parse_tender")
         response_text = self._response_text(response.content)
         return self._extract_json_dict(response_text)
 
+    def _ensure_parse_tokens(self, llm: ChatOpenAI) -> ChatOpenAI:
+        """如果当前 max_tokens 过小，返回一个放宽限制的副本。"""
+        current = getattr(llm, "max_tokens", None) or 0
+        if 0 < current < self._MIN_PARSE_MAX_TOKENS:
+            logger.info(
+                "解析调用 max_tokens=%d 过小，临时提升至 %d",
+                current, self._MIN_PARSE_MAX_TOKENS,
+            )
+            return llm.bind(max_tokens=self._MIN_PARSE_MAX_TOKENS)
+        return llm
+
+    @staticmethod
+    def _check_finish_reason(response: Any, context: str = "") -> None:
+        """检测 LLM 响应是否被截断（finish_reason != 'stop'）。"""
+        finish = getattr(response, "response_metadata", {}).get("finish_reason", "")
+        if finish and finish != "stop":
+            logger.warning(
+                "LLM 响应被截断（finish_reason=%s, context=%s）。"
+                "这通常是 max_tokens 不足导致的，请在 .env 中增大 LLM_MAX_TOKENS 或设为 0。",
+                finish, context,
+            )
+
     def _apply_parse_length_limit(self, tender_text: str) -> str:
-        if self.max_parse_chars > 0 and len(tender_text) > self.max_parse_chars:
+        if 0 < self.max_parse_chars < len(tender_text):
             logger.warning(
                 "招标文件过长 (%d 字符)，将截取前%d字符",
                 len(tender_text),
@@ -206,7 +234,7 @@ class TenderParser:
             if not any(marker in current_line for marker in same_package_markers):
                 while start > 0 and idx - start < 6:
                     previous = lines[start - 1].strip()
-                    if previous and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", previous) and not any(
+                    if previous and re.search(r"包\s*\d+|第\s*\d+\s*包|\d+\s*包", previous) and not any(
                         marker in previous for marker in same_package_markers
                     ):
                         break
@@ -215,7 +243,7 @@ class TenderParser:
             end = idx + 1
             while end < len(lines) and end - idx < 100:
                 following = lines[end].strip()
-                if following and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", following) and not any(
+                if following and re.search(r"包\s*\d+|第\s*\d+\s*包|\d+\s*包", following) and not any(
                     marker in following for marker in same_package_markers
                 ):
                     break
@@ -270,7 +298,8 @@ class TenderParser:
             return tender_doc.model_copy(update={"packages": updated_packages})
         return tender_doc
 
-    def extract_text_from_pdf(self, pdf_path: str | Path) -> str:
+    @staticmethod
+    def extract_text_from_pdf(pdf_path: str | Path) -> str:
         """从PDF文件中提取文本"""
         try:
             with open(pdf_path, 'rb') as file:
@@ -285,7 +314,8 @@ class TenderParser:
             logger.error(f"PDF文本提取失败: {str(e)}")
             raise ValueError(f"无法读取PDF文件: {str(e)}")
 
-    def extract_text_from_docx(self, docx_path: str | Path) -> str:
+    @staticmethod
+    def extract_text_from_docx(docx_path: str | Path) -> str:
         """从Word文档(.docx)中提取文本"""
         if not _DOCX_AVAILABLE:
             raise ValueError("python-docx 未安装，无法读取Word文件")
@@ -349,10 +379,16 @@ class TenderParser:
                 last_error = exc
                 logger.warning("解析尝试失败（输入长度=%d）：%s", limit, exc)
 
-        logger.error("招标文件解析失败，所有重试均未返回有效JSON：%s", last_error)
+        settings = get_settings()
+        logger.error(
+            "招标文件解析失败，所有重试均未返回有效JSON：%s（model=%s, max_tokens=%d）",
+            last_error, settings.llm_model, settings.llm_max_tokens,
+        )
         raise ValueError(
-            "LLM未返回有效JSON。请检查 LLM_MODEL/LLM_BASE_URL 配置，"
-            "或改用更稳定模型（如 gpt-4o-mini）后重试。"
+            f"LLM未返回有效JSON（model={settings.llm_model}）。"
+            f"常见原因：1) max_tokens 过小（当前={settings.llm_max_tokens}，建议≥4096）"
+            f" 2) API Key 无权限 3) 模型名称不正确。"
+            f"请检查 .env 中的 LLM_MODEL/LLM_BASE_URL/LLM_MAX_TOKENS 配置。"
         )
 
     def parse_tender_text(self, tender_text: str) -> TenderDocument:
@@ -376,10 +412,12 @@ class TenderParser:
             logger.info(f"成功解析招标文本: {tender_doc.project_name}")
             return tender_doc
         except Exception as e:  # noqa: BLE001
-            logger.error(f"招标文本解析失败: {str(e)}")
+            settings = get_settings()
+            logger.error(f"招标文本解析失败: {e}（model={settings.llm_model}, max_tokens={settings.llm_max_tokens}）")
             raise ValueError(
-                "LLM未返回有效JSON。请检查 LLM_MODEL/LLM_BASE_URL 配置，"
-                "或在 .env 中设置 TENDER_PARSE_CHAR_LIMIT 后重试。"
+                f"LLM未返回有效JSON（model={settings.llm_model}）。"
+                f"常见原因：1) max_tokens 过小（当前={settings.llm_max_tokens}，建议≥4096）"
+                f" 2) API Key 无权限 3) 模型名称不正确。"
             ) from e
 
     def extract_technical_requirements(self, tender_text: str, package_id: str) -> dict[str, Any]:
@@ -426,8 +464,10 @@ class TenderParser:
             ("user", f"请从以下招标文件中提取采购包{package_id}的全部技术参数（必须逐条列出，禁止笼统概括）：\n\n{{tender_text}}")
         ])
 
-        chain = prompt | self.llm
+        llm = self._ensure_parse_tokens(self.llm)
+        chain = prompt | llm
         response = chain.invoke({"tender_text": tender_text})
+        self._check_finish_reason(response, context=f"extract_tech_pkg{package_id}")
 
         try:
             content = response.content.strip()

@@ -121,8 +121,6 @@ def test_build_evidence_bindings_tracks_match_rate() -> None:
     result = _build_evidence_bindings(
         tender=tender,
         raw_text=raw_text,
-        analysis_result=analysis_result,
-        clause_result=clause_result,
         company=None,
         products={"1": product},
         selected_packages=["1"],
@@ -403,8 +401,6 @@ def test_build_evidence_bindings_exposes_bid_side_pages() -> None:
     result = _build_evidence_bindings(
         tender=tender,
         raw_text="激光器≥3",
-        analysis_result=analysis_result,
-        clause_result=clause_result,
         company=None,
         products={"1": product},
         selected_packages=["1"],
