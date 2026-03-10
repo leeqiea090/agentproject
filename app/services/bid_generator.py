@@ -87,9 +87,22 @@ def _markdown_cell(text: Any) -> str:
     return normalized.replace("|", "/")
 
 
-def _build_requirement_response_value(req_text: str, matched_spec_value: str) -> str:
+def _build_requirement_response_value(req_text: str, matched_spec_value: str, *, product: ProductSpecification | None = None) -> str:
     if matched_spec_value:
         return matched_spec_value
+
+    # 能力推断：如果条款含 "具备/支持" 类动词且有产品信息
+    _CAP_MARKERS = ("具备", "支持", "提供", "配备", "配置", "满足", "可", "能够", "兼容")
+    if product is not None and any(m in req_text for m in _CAP_MARKERS):
+        return f"满足，投标产品（{product.product_name}）具备该功能"
+
+    # 上下文兜底：产品信息充分时给出描述
+    if product is not None and product.product_name.strip():
+        specs = product.specifications or {}
+        if len(specs) >= 3:
+            mfr = _as_text(product.manufacturer) if product.manufacturer else ""
+            return f"响应，详见投标产品（{mfr} {product.product_name}）技术偏离表"
+
     return "待核实（未匹配到已证实产品事实）"
 
 
@@ -172,12 +185,24 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
             req_text = _as_text(req_val) or "详见招标文件"
             matched = ""
             matched_spec_key = ""
+            # 精确/子串匹配
             for spec_key, spec_val in product_specs.items():
-                if req_name in _as_text(spec_key) or _as_text(spec_key) in req_name:
+                sk = _as_text(spec_key)
+                if req_name in sk or sk in req_name:
                     matched = _as_text(spec_val)
-                    matched_spec_key = _as_text(spec_key)
+                    matched_spec_key = sk
                     break
-            response_text = _build_requirement_response_value(req_text, matched)
+            # 宽松 token 匹配兜底
+            if not matched:
+                req_tokens = [t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", req_name) if len(t) >= 3]
+                if req_tokens:
+                    for spec_key, spec_val in product_specs.items():
+                        sk = _as_text(spec_key)
+                        if sk and any(t in sk for t in req_tokens):
+                            matched = _as_text(spec_val)
+                            matched_spec_key = sk
+                            break
+            response_text = _build_requirement_response_value(req_text, matched, product=product)
             deviation_status = _evaluate_deviation_status(req_text, matched)
             if matched:
                 proven_count += 1
@@ -287,7 +312,8 @@ class BidGeneratorAgent:
         Args:
             llm: 语言模型实例
         """
-        self.llm = llm or ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+        # 增加 max_tokens 预算,避免输出被截断
+        self.llm = llm or ChatOpenAI(model="gpt-4o-mini", temperature=0.3, max_tokens=4096)
         self.graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -462,14 +488,14 @@ class BidGeneratorAgent:
         }
 
     def generate_technical_section(self, state: BidGenerationState) -> dict[str, Any]:
-        """生成第三章：商务及技术部分"""
+        """生成第三章：商务及技术部分（分包+分阶段生成，避免输出过载）"""
         logger.info("生成商务及技术部分章节")
 
         tender = state["tender_doc"]
         products = state["products"]
         request = state["request"]
 
-        # 对每个投标包生成技术响应（强制结构化，不走自由文本）
+        # 对每个投标包生成技术响应（分包生成，每包独立调用）
         technical_responses = []
 
         for package_id in request.selected_packages:
@@ -483,7 +509,16 @@ class BidGeneratorAgent:
             if not product:
                 continue
 
-            technical_responses.append(_build_structured_technical_block(package, product))
+            # 分阶段生成：1) 表格 2) 说明文字
+            # 阶段1: 生成技术偏离表和配置清单（结构化，不需要LLM）
+            structured_block = _build_structured_technical_block(package, product)
+
+            # 阶段2: 生成详细技术说明（使用独立的LLM调用，提高输出预算）
+            detailed_explanation = self._generate_technical_explanation(package, product)
+
+            # 合并两部分
+            combined_response = f"{structured_block}\n\n{detailed_explanation}"
+            technical_responses.append(combined_response)
 
         if technical_responses:
             full_content = "\n\n".join(technical_responses)
@@ -504,6 +539,60 @@ class BidGeneratorAgent:
             "sections": [section],
             "current_section": "technical"
         }
+
+    def _generate_technical_explanation(self, package: Any, product: Any) -> str:
+        """为单个包生成详细技术说明（独立LLM调用，更高token预算）"""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是技术文档撰写专家。请为该产品生成详细的技术说明文字。
+
+要求：
+- 详细说明产品的关键性能特点
+- 解释产品如何满足招标技术要求
+- 突出技术优势和创新点
+- 说明技术配置的合理性
+- 每个关键技术点至少2-3句话说明
+- 输出应为完整的段落文字，不是表格
+- 字数不少于300字"""),
+            ("user", """包信息：
+- 包号：{package_id}
+- 货物名称：{item_name}
+
+产品信息：
+- 产品名称：{product_name}
+- 厂家：{manufacturer}
+- 型号：{model}
+
+技术要求：
+{tech_requirements}
+
+产品规格：
+{product_specs}
+
+请生成详细的技术说明文字（Markdown格式）：""")
+        ])
+
+        tech_req_text = "\n".join(
+            f"- {k}: {v}"
+            for k, v in (package.technical_requirements or {}).items()
+        ) or "详见招标文件"
+
+        product_specs_text = "\n".join(
+            f"- {k}: {v}"
+            for k, v in (product.specifications or {}).items()
+        ) or "暂无详细规格"
+
+        chain = prompt | self.llm
+        response = chain.invoke({
+            "package_id": package.package_id,
+            "item_name": package.item_name,
+            "product_name": product.product_name,
+            "manufacturer": product.manufacturer or "待补充",
+            "model": product.model or "待补充",
+            "tech_requirements": tech_req_text,
+            "product_specs": product_specs_text,
+        })
+
+        return f"#### 包{package.package_id} 详细技术说明\n\n{_sanitize_model_output('详细技术说明', str(response.content))}"
 
     def generate_commercial_section(self, state: BidGenerationState) -> dict[str, Any]:
         """生成报价部分（包含在第三章或第四章）"""

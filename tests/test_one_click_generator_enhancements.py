@@ -394,9 +394,9 @@ def test_configuration_table_can_extract_items_from_raw_configuration_section() 
         ),
     )
 
-    assert "主机 | 台 | 1 | 核心设备" in table
-    assert "上样组件 | 套 | 1 | 按招标文件配置要求" in table
-    assert "说明书 | 份 | 1 | 随机技术文件" in table
+    assert "主机 | 台 | 1 | 是 | 核心检测/分析设备 | 核心设备" in table
+    assert "上样组件 | 套 | 1 |" in table
+    assert "说明书 | 份 | 1 |" in table
     assert "随机附件及工具" not in table
 
 

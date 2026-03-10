@@ -147,12 +147,13 @@ def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
     assert response.status_code == 200, response.text
     payload = response.json()
 
-    assert len(payload["stages"]) == 10
+    assert len(payload["stages"]) == 11
     assert [stage["stage_code"] for stage in payload["stages"]] == [
         "document_ingestion",
         "package_segmentation",
         "clause_classification",
         "requirement_normalization",
+        "detail_expansion",
         "rule_decision",
         "evidence_binding",
         "chapter_generation",
@@ -161,7 +162,7 @@ def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
         "evaluation_regression",
     ]
 
-    dual_output = payload["stages"][8]["data"]
+    dual_output = payload["stages"][9]["data"]
     assert "internal_audit" in dual_output
     assert "external_delivery" in dual_output
     assert dual_output["internal_audit"]["selected_packages"] == ["1"]
@@ -169,7 +170,7 @@ def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
     assert dual_output["internal_audit"]["proven_completion_rate"] == 1.0
     assert "section_titles" in dual_output["external_delivery"]
     normalization_stage = payload["stages"][3]["data"]
-    evidence_stage = payload["stages"][5]["data"]
+    evidence_stage = payload["stages"][6]["data"]
     assert "product_fact_extraction" in normalization_stage
     assert "response_value_hints" in normalization_stage
     assert normalization_stage["product_fact_extraction"]["fact_count"] >= 6

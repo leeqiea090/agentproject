@@ -38,6 +38,7 @@ from app.services.tender_workflow import (
     _build_package_segmentation_view,
     _default_step1_result,
     _ensure_str_list,
+    _expand_extracted_facts,
     _extract_product_facts,
     _match_requirements_to_product_facts,
     _materialize_sections,
@@ -813,6 +814,22 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
                     "summary": requirement_match_dict.get("summary", ""),
                 },
             },
+        )
+    )
+
+    # ── 详细展开 (Detail Expander) ──
+    detail_expansion_dict = _expand_extracted_facts(
+        normalized_result=normalization_dict,
+        products=products,
+        tender=tender_doc,
+    )
+    stages.append(
+        _workflow_stage(
+            stage_code="detail_expansion",
+            stage_name="详细展开",
+            status="completed",
+            summary=detail_expansion_dict.get("summary", "详细展开完成。"),
+            data=detail_expansion_dict,
         )
     )
 

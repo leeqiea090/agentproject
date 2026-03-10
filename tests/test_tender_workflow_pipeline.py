@@ -326,6 +326,8 @@ def test_build_regression_report_can_mark_ready_for_delivery() -> None:
     original_checks = [item for item in report["checks"] if item["name"] not in {
         "package_isolation_score", "atomic_requirement_rate", "offered_fact_coverage",
         "bid_evidence_coverage", "config_pollution_rate", "external_block_rate",
+        "detail_target_atomic_clauses", "detail_target_deviation_rows",
+        "detail_target_narrative_chars", "detail_target_evidence_coverage",
     }]
     assert all(item["status"] == "通过" for item in original_checks)
     # New metrics should exist

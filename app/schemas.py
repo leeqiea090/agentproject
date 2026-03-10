@@ -156,17 +156,34 @@ class CompanyProfile(BaseModel):
 
 
 class ProductSpecification(BaseModel):
-    """产品技术规格"""
+    """产品技术规格 - 增强版，包含完整的投标产品事实"""
     product_id: str | None = Field(default=None, description="产品ID")
     product_name: str = Field(description="产品名称")
+
+    # 基础信息
+    brand: str = Field(default="", description="品牌名称（新增）")
     manufacturer: str = Field(description="生产厂家")
     origin: str = Field(default="", description="产地")
     model: str = Field(default="", description="型号")
+
+    # 技术规格
     specifications: dict[str, Any] = Field(default_factory=dict, description="技术参数")
+    technical_specs: dict[str, Any] = Field(default_factory=dict, description="详细技术规格（新增，与specifications同步）")
+
+    # 配置与功能
+    config_items: list[dict[str, Any]] = Field(default_factory=list, description="配置项清单（新增）")
+    functional_notes: str = Field(default="", description="功能说明（新增）")
+
+    # 交付与验收
+    acceptance_notes: str = Field(default="", description="验收说明（新增）")
+    training_notes: str = Field(default="", description="培训说明（新增）")
+
+    # 证据与证照
     price: float = Field(description="参考价格")
     certifications: list[str] = Field(default_factory=list, description="认证证书列表")
     registration_number: str = Field(default="", description="注册证编号（医疗器械）")
     authorization_letter: str = Field(default="", description="授权书路径")
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list, description="证据引用列表（新增）,包含文件名、页码等")
 
 
 # --- 投标文件生成相关 ---
