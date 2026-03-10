@@ -87,12 +87,45 @@ def _markdown_cell(text: Any) -> str:
     return normalized.replace("|", "/")
 
 
-def _build_requirement_response(req_name: str, req_text: str, matched_spec_value: str) -> str:
+def _build_requirement_response_value(req_text: str, matched_spec_value: str) -> str:
     if matched_spec_value:
-        return f"承诺满足“{req_name}”要求，拟投参数为“{matched_spec_value}”，并提供技术资料佐证。"
-    if any(marker in req_text for marker in _HARD_REQUIREMENT_MARKERS):
-        return f"承诺满足“{req_name}”且指标不低于“{req_text}”，交付时按条款验收。"
-    return f"承诺满足“{req_name}：{req_text}”，交付时提交对应技术资料并配合验收。"
+        return matched_spec_value
+    return "待核实（未匹配到已证实产品事实）"
+
+
+def _first_numeric_value(value: str) -> float | None:
+    match = re.search(r"-?\d+(?:\.\d+)?", _as_text(value))
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _evaluate_deviation_status(req_text: str, matched_spec_value: str) -> str:
+    requirement = _as_text(req_text)
+    response = _as_text(matched_spec_value)
+    if not response:
+        return "待核实"
+
+    for marker in _HARD_REQUIREMENT_MARKERS:
+        if marker in requirement:
+            threshold = _first_numeric_value(requirement)
+            response_numeric = _first_numeric_value(response)
+            if threshold is None or response_numeric is None:
+                return "待核实"
+            if marker in {"≥", ">=", "不低于", "不少于", "至少"}:
+                return "无偏离" if response_numeric >= threshold else "有偏离"
+            if marker in {"≤", "<=", "不高于", "不大于"}:
+                return "无偏离" if response_numeric <= threshold else "有偏离"
+
+    compact_requirement = re.sub(r"\s+", "", requirement)
+    compact_response = re.sub(r"\s+", "", response)
+    if compact_requirement and compact_response:
+        if compact_requirement == compact_response or compact_response in compact_requirement or compact_requirement in compact_response:
+            return "无偏离"
+    return "待核实"
 
 
 def _ensure_compliance_branch_blocks(content: str, allow_consortium: bool, requires_sme: bool) -> str:
@@ -129,6 +162,8 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
     evidence_rows: list[str] = []
     tech_req = package.technical_requirements or {}
     product_specs = product.specifications or {}
+    proven_count = 0
+    no_deviation_count = 0
 
     if tech_req:
         idx = 1
@@ -142,7 +177,12 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
                     matched = _as_text(spec_val)
                     matched_spec_key = _as_text(spec_key)
                     break
-            response_text = _build_requirement_response(req_name, req_text, matched)
+            response_text = _build_requirement_response_value(req_text, matched)
+            deviation_status = _evaluate_deviation_status(req_text, matched)
+            if matched:
+                proven_count += 1
+            if deviation_status == "无偏离":
+                no_deviation_count += 1
             evidence_text = (
                 f"招标条款：{_markdown_cell(req_name)}={_markdown_cell(req_text)}；"
                 f"产品参数：{_markdown_cell(matched_spec_key)}={_markdown_cell(matched)}"
@@ -151,7 +191,7 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
             )
 
             rows.append(
-                f"| {idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | 无偏离 | {_markdown_cell(evidence_text)} |"
+                f"| {idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | {deviation_status} | {_markdown_cell(evidence_text)} |"
             )
             evidence_rows.append(
                 f"| {idx} | {_markdown_cell(req_name)} | 招标技术条款 | {_markdown_cell(evidence_text)} | 技术偏离表第{idx}行 |"
@@ -159,14 +199,16 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
             idx += 1
     else:
         rows.append(
-            "| 1 | 核心技术参数 | 详见招标文件 | 承诺逐条满足并提交技术资料，交付时配合验收 | 无偏离 | 招标条款+产品参数待人工补充 |"
+            "| 1 | 核心技术参数 | 详见招标文件 | 待核实（未提取到结构化技术要求） | 待核实 | 招标条款+产品参数待人工补充 |"
         )
         evidence_rows.append("| 1 | 核心技术参数 | 招标技术条款 | 暂未匹配到产品参数，需补充证据 | 技术偏离表第1行 |")
 
+    total_rows = len(rows)
+    unresolved_count = max(0, total_rows - proven_count)
     deviation_table = "\n".join(
         [
             f"#### 1) 技术偏离表（第{package.package_id}包）",
-            "| 序号 | 参数项 | 招标要求 | 投标响应 | 偏离说明 | 证据映射 |",
+            "| 序号 | 参数项 | 招标要求 | 投标产品响应参数 | 偏离说明 | 证据映射 |",
             "|---:|---|---|---|---|---|",
             *rows,
         ]
@@ -190,10 +232,10 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
             "#### 3) 响应校验清单",
             "| 序号 | 校验项 | 结论 |",
             "|---:|---|---|",
-            "| 1 | 技术参数逐条对照 | 已完成 |",
-            "| 2 | 产品信息完整性 | 已完成 |",
-            "| 3 | 偏离项披露 | 无偏离（如有偏离将在表内注明） |",
-            f"| 4 | 证据映射完整性 | 已形成 {len(evidence_rows)} 条映射记录 |",
+            f"| 1 | 技术参数逐条对照 | 已证实 {proven_count}/{total_rows} 项 |",
+            f"| 2 | 产品信息完整性 | {'已完成' if product.model and product.manufacturer else '待补充'} |",
+            f"| 3 | 偏离项披露 | 仅 {no_deviation_count} 项已证实可标注无偏离；其余 {max(0, total_rows - no_deviation_count)} 项保持待核实/有偏离 |",
+            f"| 4 | 证据映射完整性 | 已形成 {len(evidence_rows)} 条映射记录；待补证 {unresolved_count} 项 |",
         ]
     )
 

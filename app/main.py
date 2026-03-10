@@ -61,4 +61,12 @@ def api_status():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    if settings.app_host == "0.0.0.0":
+        print(f"Local access URL: http://127.0.0.1:{settings.app_port}")
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=settings.app_reload,
+    )

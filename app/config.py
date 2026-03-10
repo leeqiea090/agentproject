@@ -29,10 +29,20 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = os.getenv("APP_NAME", "Bid-Agent-Service")
     app_version: str = os.getenv("APP_VERSION", "0.1.0")
+    app_host: str = os.getenv("APP_HOST", "127.0.0.1")
+    app_port: int = _int_env("APP_PORT", 8000)
+    app_reload: bool = _bool_env("APP_RELOAD", True)
 
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")

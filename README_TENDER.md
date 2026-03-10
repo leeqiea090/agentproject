@@ -210,8 +210,8 @@ curl "http://localhost:8000/api/tender/bid/download/{bid_id}?format=markdown" \
 - `POST /api/tender/bid/generate` - 生成投标文件
 - `GET /api/tender/bid/{bid_id}` - 获取投标文件信息
 - `GET /api/tender/bid/download/{bid_id}` - 下载投标文件
-- `POST /api/tender/workflow/run` - 运行九阶段正式流程（文档解析→需求抽取→条款分类/分支决策→证据绑定→分章节生成→一致性校验→合规校验→外发净化→评测回归）
-- `GET /api/tender/workflow/{workflow_id}` - 查询九阶段流程结果
+- `POST /api/tender/workflow/run` - 运行十层正式流程（文档接入→包件切分→条款分类→需求归一化→规则决策→证据绑定→分章节生成→硬校验→双输出→评测回归）
+- `GET /api/tender/workflow/{workflow_id}` - 查询十层流程结果
 
 ## 工作原理
 

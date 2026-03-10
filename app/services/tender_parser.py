@@ -1,18 +1,18 @@
 """招标文件解析服务"""
-import pypdf
-from pathlib import Path
-from typing import Any
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 import json
 import logging
 import re
+from pathlib import Path
+from typing import Any
+
+import pypdf
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
 from app.schemas import (
     TenderDocument,
-    ProcurementPackage,
-    CommercialTerms
+    ProcurementPackage
 )
 
 try:
@@ -37,10 +37,8 @@ class TenderParser:
         """
         self.llm = llm or ChatOpenAI(model="gpt-4o-mini", temperature=0)
         settings = get_settings()
-        # 0 表示不限制长度
         self.max_parse_chars = max(0, settings.tender_parse_char_limit)
 
-        # 信息提取Prompt
         self.extraction_prompt = ChatPromptTemplate.from_messages([
             ("system", """你是一个专业的政府采购招标文件分析专家。你的任务是从招标文件中准确提取关键信息。
 
@@ -396,19 +394,36 @@ class TenderParser:
             技术要求字典
         """
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是技术参数提取专家。请从招标文件中提取指定采购包的所有技术参数和要求。
+            ("system", """你是技术参数提取专家。你的任务是从招标文件中提取指定采购包的**每一条**独立技术参数。
 
-输出JSON格式，例如：
+**严格要求：**
+1. 必须把每个技术参数拆成**独立的键值对**，每个参数一行。
+2. **绝对禁止**输出类似 {{"核心技术参数": "详见招标文件"}} 这种笼统概括。
+3. 如果招标文件中有表格形式的参数（如"激光器 ≥3个"），必须逐行提取。
+4. 参数名称要精确，参数值要包含数量词、比较符号（≥、≤、不低于等）和单位。
+5. 即使参数是从长段落中提取的，也必须拆分为原子级条目。
+
+输出JSON格式，示例：
 {{
     "产地": "进口",
-    "方法": "流式细胞术",
-    "激光器": "3个独立激光器",
-    "荧光通道": "≥11个",
-    "其他参数": "..."
+    "检测方法": "流式细胞术",
+    "激光器数量": "≥3个独立激光器",
+    "荧光检测通道": "≥11色荧光检测",
+    "前向散射光": "具备",
+    "侧向散射光": "具备",
+    "检测速度": "≥10000个事件/秒",
+    "样本获取速率": "3档可调",
+    "液流模式": "鞘液聚焦",
+    "最小上样体积": "≤10μL",
+    "绝对计数": "支持无需外加微球的绝对计数",
+    "自动补偿": "全自动荧光补偿",
+    "质控功能": "具备每日自动质控功能",
+    "软件": "中文操作软件",
+    "上样工作站": "配置自动上样工作站"
 }}
 
-如果没有找到相关信息，返回空对象 {{}}"""),
-            ("user", f"请从以下招标文件中提取采购包{package_id}的技术参数：\n\n{{tender_text}}")
+如果确实没有找到任何技术参数，返回空对象 {{}}"""),
+            ("user", f"请从以下招标文件中提取采购包{package_id}的全部技术参数（必须逐条列出，禁止笼统概括）：\n\n{{tender_text}}")
         ])
 
         chain = prompt | self.llm

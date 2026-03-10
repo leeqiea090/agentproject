@@ -189,12 +189,22 @@ class BidDocumentSection(BaseModel):
     attachments: list[str] = Field(default_factory=list, description="附件路径列表")
 
 
+class BidMaterializeReport(BaseModel):
+    """投标底稿深注入报告"""
+    changed_sections: list[str] = Field(default_factory=list, description="已完成深注入的章节列表")
+    unresolved_sections: list[str] = Field(default_factory=list, description="仍含待人工补录项的章节列表")
+    summary: str = Field(default="", description="深注入执行摘要")
+
+
 class BidGenerateResponse(BaseModel):
     """投标文件生成响应"""
     bid_id: str = Field(description="投标文件ID")
     tender_id: str = Field(description="对应的招标文件ID")
     status: str = Field(default="generated", description="状态：generating/generated/error")
     sections: list[BidDocumentSection] = Field(default_factory=list, description="文档章节列表")
+    materialize_report: BidMaterializeReport = Field(default_factory=BidMaterializeReport, description="深注入报告")
+    consistency_report: dict[str, Any] = Field(default_factory=dict, description="一致性校验报告")
+    outbound_report: dict[str, Any] = Field(default_factory=dict, description="外发净化报告")
     file_path: str = Field(default="", description="生成的PDF文件路径")
     download_url: str = Field(default="", description="下载链接")
     generated_time: datetime = Field(description="生成时间")
@@ -307,11 +317,11 @@ class TenderWorkflowRequest(BaseModel):
 
 
 class TenderWorkflowResponse(BaseModel):
-    """九阶段工作流响应（兼容原四阶段摘要字段）"""
+    """十层工作流响应（兼容原四阶段摘要字段）"""
     workflow_id: str = Field(description="工作流ID")
     tender_id: str = Field(description="招标文件ID")
     status: str = Field(description="整体状态：completed/blocked/error")
-    stages: list[WorkflowStageRecord] = Field(default_factory=list, description="九阶段流程结果")
+    stages: list[WorkflowStageRecord] = Field(default_factory=list, description="十层流程结果")
     analysis: TenderWorkflowStep1Result = Field(description="步骤1结果")
     material_validation: TenderWorkflowStep2Result = Field(description="步骤2结果")
     generation: TenderWorkflowStep3Result = Field(description="步骤3结果")

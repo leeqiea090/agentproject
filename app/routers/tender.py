@@ -31,7 +31,19 @@ from app.services.bid_generator import create_bid_generator, BidGenerationState
 from app.services.one_click_generator import generate_bid_sections
 from app.services.docx_builder import build_bid_docx
 from app.services.retriever import ingest_text_to_kb
-from app.services.tender_workflow import TenderWorkflowAgent
+from app.services.tender_workflow import (
+    TenderWorkflowAgent,
+    _build_document_ingestion_view,
+    _build_internal_audit_snapshot,
+    _build_package_segmentation_view,
+    _default_step1_result,
+    _ensure_str_list,
+    _extract_product_facts,
+    _match_requirements_to_product_facts,
+    _materialize_sections,
+    _sanitize_for_external_delivery,
+    _second_validation,
+)
 from app.services.llm import get_chat_model
 
 logger = logging.getLogger(__name__)
@@ -52,6 +64,43 @@ bid_storage: dict[str, dict] = {}
 workflow_storage: dict[str, dict] = {}
 workflow_kb_indexed_sources: set[str] = set()
 one_click_job_storage: dict[str, dict] = {}
+
+
+def _is_external_delivery_blocked(outbound_report: dict | None) -> bool:
+    return str((outbound_report or {}).get("status", "") or "").strip() == "阻断外发"
+
+
+def _build_external_delivery_view(
+    sections: list[BidDocumentSection],
+    outbound_report: dict,
+    *,
+    download_url: str = "",
+    file_path: str = "",
+) -> dict:
+    if _is_external_delivery_blocked(outbound_report):
+        return {
+            **outbound_report,
+            "generated": False,
+            "download_url": "",
+            "file_path": "",
+            "section_titles": [],
+        }
+
+    return {
+        **outbound_report,
+        "generated": True,
+        "download_url": download_url,
+        "file_path": file_path,
+        "section_titles": [section.section_title for section in sections],
+    }
+
+
+def _sections_for_storage_or_response(
+    internal_sections: list[BidDocumentSection],
+    outbound_sections: list[BidDocumentSection],
+    outbound_report: dict,
+) -> list[BidDocumentSection]:
+    return internal_sections if _is_external_delivery_blocked(outbound_report) else outbound_sections
 
 
 @router.post("/upload", response_model=TenderUploadResponse)
@@ -308,6 +357,8 @@ async def generate_bid_document(request: BidGenerateRequest):
         # 创建生成器
         llm = get_chat_model()
         generator = create_bid_generator(llm)
+        workflow_agent = TenderWorkflowAgent(llm)
+        raw_text = str(tender_info.get("raw_text", "") or "")
 
         # 初始化状态
         initial_state: BidGenerationState = {
@@ -326,27 +377,101 @@ async def generate_bid_document(request: BidGenerateRequest):
         final_state = generator.generate(initial_state)
 
         bid_id = final_state["bid_id"]
-        sections = final_state["sections"]
+        generated_sections = final_state["sections"]
+        analysis_result = _default_step1_result(tender_doc)
+        clause_result = workflow_agent.step3_classify_clauses(
+            tender=tender_doc,
+            analysis_result=analysis_result,
+            selected_packages=request.selected_packages,
+            raw_text=raw_text,
+        )
+        normalization_result = workflow_agent.step4_normalize_requirements(
+            tender=tender_doc,
+            analysis_result=analysis_result,
+            clause_result=clause_result,
+            selected_packages=request.selected_packages,
+            raw_text=raw_text,
+        )
+        product_fact_result = _extract_product_facts(
+            tender=tender_doc,
+            products=products,
+            selected_packages=request.selected_packages,
+        )
+        evidence_result = workflow_agent.step4_bind_evidence(
+            tender=tender_doc,
+            raw_text=raw_text,
+            analysis_result=analysis_result,
+            clause_result=clause_result,
+            company=company_profile,
+            products=products,
+            selected_packages=request.selected_packages,
+            normalized_result=normalization_result,
+            product_fact_result=product_fact_result,
+        )
+        materialized_sections, materialize_report = _materialize_sections(
+            sections=generated_sections,
+            tender=tender_doc,
+            company=company_profile,
+            products=products,
+            evidence_result=evidence_result,
+        )
+        consistency_report = _second_validation(
+            analysis_result=analysis_result,
+            validation_result={"overall_status": "通过"},
+            sections=materialized_sections,
+            generation_result={
+                "selected_packages": request.selected_packages,
+                "citations": [],
+            },
+            tender=tender_doc,
+            selected_packages=request.selected_packages,
+            products=products,
+            evidence_result=evidence_result,
+        )
+        sections, outbound_report = _sanitize_for_external_delivery(
+            materialized_sections,
+            hard_validation_result=consistency_report,
+            evidence_result=evidence_result,
+        )
+        stored_sections = _sections_for_storage_or_response(materialized_sections, sections, outbound_report)
+        outbound_view = _build_external_delivery_view(
+            sections,
+            outbound_report,
+            download_url=f"/api/tender/bid/download/{bid_id}?format=docx",
+        )
 
         # 保存结果
         bid_storage[bid_id] = {
             "bid_id": bid_id,
             "tender_id": request.tender_id,
             "company_id": request.company_profile_id,
-            "sections": [s.model_dump() for s in sections],
+            "sections": [s.model_dump() for s in stored_sections],
             "generated_time": datetime.now(),
-            "status": "generated"
+            "status": "generated",
+            "materialize_report": materialize_report,
+            "consistency_report": consistency_report,
+            "outbound_report": outbound_view,
         }
 
-        logger.info(f"投标文件生成成功: {bid_id}, 共 {len(sections)} 个章节")
+        logger.info(
+            "投标文件生成成功: %s, 共 %d 个章节，深注入更新 %d 个章节，一致性状态=%s，外发状态=%s",
+            bid_id,
+            len(stored_sections),
+            len(materialize_report.get("changed_sections", [])),
+            consistency_report.get("overall_status", "unknown"),
+            outbound_view.get("status", "unknown"),
+        )
 
         return BidGenerateResponse(
             bid_id=bid_id,
             tender_id=request.tender_id,
             status="generated",
-            sections=sections,
+            sections=stored_sections,
+            materialize_report=materialize_report,
+            consistency_report=consistency_report,
+            outbound_report=outbound_view,
             file_path="",  # 暂时为空，后续添加PDF生成功能
-            download_url=f"/api/tender/bid/download/{bid_id}?format=docx",
+            download_url=outbound_view.get("download_url", ""),
             generated_time=datetime.now()
         )
 
@@ -372,14 +497,18 @@ async def get_bid_document(bid_id: str):
     bid_info = bid_storage[bid_id]
 
     sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
+    outbound_report = bid_info.get("outbound_report", {})
 
     return BidGenerateResponse(
         bid_id=bid_info["bid_id"],
         tender_id=bid_info["tender_id"],
         status=bid_info["status"],
         sections=sections,
+        materialize_report=bid_info.get("materialize_report", {}),
+        consistency_report=bid_info.get("consistency_report", {}),
+        outbound_report=outbound_report,
         file_path=bid_info.get("file_path", ""),
-        download_url=f"/api/tender/bid/download/{bid_id}",
+        download_url=str(outbound_report.get("download_url", "") or ""),
         generated_time=bid_info["generated_time"]
     )
 
@@ -400,6 +529,8 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
         raise HTTPException(status_code=404, detail="投标文件不存在")
 
     bid_info = bid_storage[bid_id]
+    if _is_external_delivery_blocked(bid_info.get("outbound_report")):
+        raise HTTPException(status_code=409, detail="当前标书未通过硬校验，已阻断外发下载")
     sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
 
     if format == "docx":
@@ -448,8 +579,8 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 正式流程：文档解析 → 需求抽取 → 条款分类/分支决策 → 证据绑定 →
-# 分章节生成 → 一致性校验 → 合规校验 → 外发净化 → 评测回归
+# 正式流程：文档接入 → 包件切分 → 条款分类 → 需求归一化 → 规则决策 →
+# 证据绑定 → 分章节生成 → 硬校验 → 双输出 → 评测回归
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _resolve_selected_packages(tender_doc: TenderDocument, selected_packages: list[str]) -> list[str]:
@@ -539,19 +670,20 @@ def _workflow_stage(
     }
 
 
-@router.post("/workflow/run", response_model=TenderWorkflowResponse, summary="运行九阶段AI正式流程")
+@router.post("/workflow/run", response_model=TenderWorkflowResponse, summary="运行十层AI正式流程")
 async def run_tender_workflow(req: TenderWorkflowRequest):
     """
-    九阶段正式流程：
-    1) 文档解析；
-    2) 需求抽取；
-    3) 条款分类/分支决策；
-    4) 证据绑定；
-    5) 分章节生成；
-    6) 一致性校验；
-    7) 合规校验；
-    8) 外发净化；
-    9) 评测回归。
+    十层正式流程：
+    1) 文档接入；
+    2) 包件切分；
+    3) 条款分类；
+    4) 需求归一化；
+    5) 规则决策；
+    6) 证据绑定；
+    7) 分章节生成；
+    8) 硬校验；
+    9) 双输出；
+    10) 评测回归。
 
     兼容保留 analysis/material_validation/generation/review 四类摘要字段。
     """
@@ -581,41 +713,47 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
     workflow_agent = TenderWorkflowAgent(llm)
     stages: list[dict] = []
 
-    parse_summary = (
-        f"文档解析完成，提取原文 {len(raw_text)} 字，识别 {len(tender_doc.packages)} 个包件。"
+    ingestion_dict = _build_document_ingestion_view(
+        raw_text=raw_text,
+        file_path=tender_info.get("file_path"),
+        tender_id=req.tender_id,
     )
     stages.append(
         _workflow_stage(
-            stage_code="document_parsing",
-            stage_name="文档解析",
+            stage_code="document_ingestion",
+            stage_name="文档接入",
             status="completed",
-            summary=parse_summary,
+            summary=ingestion_dict.get("summary", "文档接入完成。"),
             data={
+                **ingestion_dict,
                 "project_name": tender_doc.project_name,
                 "project_number": tender_doc.project_number,
                 "parse_mode": "cached" if was_preparsed else "auto",
-                "raw_text_length": len(raw_text),
-                "package_count": len(tender_doc.packages),
-                "selected_packages": selected_packages,
             },
         )
     )
 
-    # Step 2: 需求抽取
+    package_scope_dict = _build_package_segmentation_view(
+        tender=tender_doc,
+        raw_text=raw_text,
+        selected_packages=selected_packages,
+    )
+    package_stage_status = "completed" if not package_scope_dict.get("missing_scope_packages") else "warning"
+    stages.append(
+        _workflow_stage(
+            stage_code="package_segmentation",
+            stage_name="包件切分",
+            status=package_stage_status,
+            summary=package_scope_dict.get("summary", "包件切分完成。"),
+            data=package_scope_dict,
+            issues=package_scope_dict.get("missing_scope_packages", []),
+        )
+    )
+
     analysis_dict = workflow_agent.step1_analyze_tender(
         tender=tender_doc,
         raw_text=raw_text,
         kb_source=kb_source,
-    )
-    stages.append(
-        _workflow_stage(
-            stage_code="requirement_extraction",
-            stage_name="需求抽取",
-            status="completed",
-            summary=analysis_dict.get("summary", "已完成需求抽取。"),
-            data=analysis_dict,
-            issues=analysis_dict.get("risk_alerts", []),
-        )
     )
 
     # 内部资料校验（兼容旧摘要字段）
@@ -627,7 +765,6 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
         products=products,
     )
 
-    # Step 3: 条款分类 / 分支决策
     clause_dict = workflow_agent.step3_classify_clauses(
         tender=tender_doc,
         analysis_result=analysis_dict,
@@ -636,20 +773,84 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
     )
     stages.append(
         _workflow_stage(
-            stage_code="clause_routing",
-            stage_name="条款分类/分支决策",
+            stage_code="clause_classification",
+            stage_name="条款分类",
             status="completed",
             summary=clause_dict.get("summary", "已完成条款分类。"),
             data=clause_dict,
         )
     )
 
-    # Step 4: 证据绑定
+    normalization_dict = workflow_agent.step4_normalize_requirements(
+        tender=tender_doc,
+        analysis_result=analysis_dict,
+        clause_result=clause_dict,
+        selected_packages=selected_packages,
+        raw_text=raw_text,
+    )
+    product_fact_dict = _extract_product_facts(
+        tender=tender_doc,
+        products=products,
+        selected_packages=selected_packages,
+    )
+    requirement_match_dict = _match_requirements_to_product_facts(
+        normalized_result=normalization_dict,
+        product_fact_result=product_fact_dict,
+        company=company,
+        products=products,
+    )
+    stages.append(
+        _workflow_stage(
+            stage_code="requirement_normalization",
+            stage_name="需求归一化",
+            status="completed",
+            summary=normalization_dict.get("summary", "需求归一化完成。"),
+            data={
+                **normalization_dict,
+                "product_fact_extraction": product_fact_dict,
+                "response_value_hints": {
+                    "technical_matches": requirement_match_dict.get("technical_matches", []),
+                    "summary": requirement_match_dict.get("summary", ""),
+                },
+            },
+        )
+    )
+
+    rule_dict = workflow_agent.step5_decide_rules(
+        tender=tender_doc,
+        raw_text=raw_text,
+        selected_packages=selected_packages,
+        company=company,
+        products=products,
+        clause_result=clause_dict,
+    )
+    rule_blocking_items = rule_dict.get("blocking_fill_items", [])
+    rule_manual_items = rule_dict.get("manual_fill_items", [])
+    rule_stage_status = "blocked" if rule_blocking_items else "completed" if not rule_manual_items else "warning"
+    stages.append(
+        _workflow_stage(
+            stage_code="rule_decision",
+            stage_name="规则决策",
+            status=rule_stage_status,
+            summary=rule_dict.get("summary", "规则决策完成。"),
+            data={
+                **rule_dict,
+                "material_validation_status": validation_dict.get("overall_status", ""),
+            },
+            issues=rule_blocking_items + [item for item in rule_manual_items if item not in rule_blocking_items],
+        )
+    )
+
     evidence_dict = workflow_agent.step4_bind_evidence(
         tender=tender_doc,
         raw_text=raw_text,
         analysis_result=analysis_dict,
         clause_result=clause_dict,
+        company=company,
+        products=products,
+        selected_packages=selected_packages,
+        normalized_result=normalization_dict,
+        product_fact_result=product_fact_dict,
     )
     evidence_stage_status = "completed" if not evidence_dict.get("issues") else "warning"
     stages.append(
@@ -658,22 +859,33 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             stage_name="证据绑定",
             status=evidence_stage_status,
             summary=evidence_dict.get("summary", "已完成证据绑定。"),
-            data=evidence_dict,
+            data={
+                **evidence_dict,
+                "requirement_product_matching": requirement_match_dict,
+            },
             issues=evidence_dict.get("issues", []),
         )
     )
 
-    should_continue = req.continue_on_material_gaps or validation_dict.get("overall_status") == "通过"
+    should_continue = req.continue_on_material_gaps or (
+        validation_dict.get("overall_status") == "通过" and not rule_blocking_items
+    )
     sections: list[BidDocumentSection] = []
+    internal_sections: list[BidDocumentSection] = []
     sanitized_sections: list[BidDocumentSection] = []
     sanitize_stage_data: dict = {
         "status": "未执行",
         "changed_sections": [],
         "placeholder_sections": [],
-        "summary": "第五步未完成，外发净化未执行。",
+        "summary": "第九层未执行，外发净化未执行。",
     }
-    consistency_dict: dict | None = None
+    hard_validation_dict: dict | None = None
     review_dict: dict | None = None
+    materialize_dict: dict = {
+        "changed_sections": [],
+        "unresolved_sections": [],
+        "summary": "尚未执行正文实参注入。",
+    }
 
     generation_dict: dict = {
         "generated": False,
@@ -683,6 +895,8 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
         "download_url": "",
         "file_path": "",
         "integration_notes": "",
+        "selected_packages": selected_packages,
+        "product_summary": [],
         "summary": "资料校验未通过，已阻断分章节生成。",
     }
 
@@ -701,6 +915,14 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             products=products,
             kb_source=kb_source,
         )
+        internal_sections, materialize_dict = _materialize_sections(
+            sections=sections,
+            tender=tender_doc,
+            company=company,
+            products=products,
+            evidence_result=evidence_dict,
+        )
+        sections = internal_sections
 
         bid_id = f"WF_BID_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
         generation_dict = {
@@ -715,11 +937,20 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             ),
             "file_path": "",
             "integration_notes": step3_dict.get("integration_notes", ""),
+            "selected_packages": step3_dict.get("selected_packages", selected_packages),
+            "product_summary": step3_dict.get("product_summary", []),
+            "materialize_report": materialize_dict,
             "summary": step3_dict.get("summary", "标书已生成。"),
         }
-        generation_stage_status = "completed"
+        generation_stage_status = "completed" if not materialize_dict.get("unresolved_sections") else "warning"
     else:
-        generation_stage_issues = validation_dict.get("missing_items", []) or ["资料校验未通过，流程已阻断。"]
+        generation_stage_issues = (
+            validation_dict.get("missing_items", [])
+            or rule_blocking_items
+            or ["资料校验未通过，流程已阻断。"]
+        )
+        if rule_blocking_items and validation_dict.get("overall_status") == "通过":
+            generation_dict["summary"] = "规则决策识别到关键阻断项，已阻断分章节生成。"
 
     stages.append(
         _workflow_stage(
@@ -730,110 +961,148 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             data={
                 **generation_dict,
                 "material_validation_status": validation_dict.get("overall_status", ""),
+                "materialize_report": materialize_dict,
             },
-            issues=generation_stage_issues,
+            issues=generation_stage_issues or materialize_dict.get("unresolved_sections", []),
         )
     )
 
-    # Step 6: 一致性校验
     if sections:
-        consistency_dict = workflow_agent.step6_validate_consistency(
+        hard_validation_dict = workflow_agent.step6_validate_consistency(
             analysis_result=analysis_dict,
             validation_result=validation_dict,
             sections=sections,
             generation_result=generation_dict,
+            tender=tender_doc,
+            selected_packages=selected_packages,
+            products=products,
+            evidence_result=evidence_dict,
         )
-        consistency_stage_status = "completed" if consistency_dict.get("overall_status") == "通过" else "warning"
-        stages.append(
-            _workflow_stage(
-                stage_code="consistency_validation",
-                stage_name="一致性校验",
-                status=consistency_stage_status,
-                summary=consistency_dict.get("summary", "一致性校验完成。"),
-                data=consistency_dict,
-                issues=consistency_dict.get("issues", []),
-            )
-        )
-
-        # Step 7: 合规校验
         review_dict = workflow_agent.step4_review_bid(
             tender=tender_doc,
             analysis_result=analysis_dict,
             validation_result=validation_dict,
             sections=sections,
             generation_result=generation_dict,
+            selected_packages=selected_packages,
+            products=products,
+            evidence_result=evidence_dict,
         )
-        review_dict["secondary_validation"] = consistency_dict
-        review_stage_status = "completed" if review_dict.get("ready_for_submission") else "warning"
+        review_dict["secondary_validation"] = hard_validation_dict
+        hard_stage_status = (
+            "completed"
+            if hard_validation_dict.get("overall_status") == "通过" and review_dict.get("ready_for_submission")
+            else "warning"
+        )
         stages.append(
             _workflow_stage(
-                stage_code="compliance_validation",
-                stage_name="合规校验",
-                status=review_stage_status,
+                stage_code="hard_validation",
+                stage_name="硬校验",
+                status=hard_stage_status,
                 summary=review_dict.get("conclusion", "合规校验完成。"),
-                data=review_dict,
-                issues=review_dict.get("major_issues", []),
+                data={
+                    **hard_validation_dict,
+                    "review": review_dict,
+                },
+                issues=_ensure_str_list(hard_validation_dict.get("issues", [])) + review_dict.get("major_issues", []),
             )
         )
 
-        # Step 8: 外发净化
-        sanitized_sections, sanitize_stage_data = workflow_agent.step8_sanitize_outbound(sections)
+        sanitized_sections, sanitize_stage_data = workflow_agent.step8_sanitize_outbound(
+            sections,
+            hard_validation_result=hard_validation_dict,
+            evidence_result=evidence_dict,
+        )
 
         bid_id = generation_dict["bid_id"]
         company_for_docx = company or _PLACEHOLDER_COMPANY
         output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
-        if req.generate_docx:
+        if req.generate_docx and not _is_external_delivery_blocked(sanitize_stage_data):
             build_bid_docx(sanitized_sections, tender_doc, company_for_docx, output_file)
             file_path = str(output_file)
         else:
             file_path = ""
+        if _is_external_delivery_blocked(sanitize_stage_data):
+            generation_dict["download_url"] = ""
 
+        stored_sections = _sections_for_storage_or_response(sections, sanitized_sections, sanitize_stage_data)
+        outbound_view = _build_external_delivery_view(
+            sanitized_sections,
+            sanitize_stage_data,
+            download_url=generation_dict.get("download_url", ""),
+            file_path=file_path,
+        )
         generation_dict["file_path"] = file_path
+        generation_dict["download_url"] = outbound_view.get("download_url", "")
         bid_storage[bid_id] = {
             "bid_id": bid_id,
             "tender_id": req.tender_id,
             "company_id": company_for_docx.company_id,
-            "sections": [s.model_dump() for s in sanitized_sections],
+            "sections": [s.model_dump() for s in stored_sections],
             "generated_time": datetime.now(),
             "status": "generated",
             "file_path": file_path,
+            "materialize_report": materialize_dict,
+            "consistency_report": hard_validation_dict,
+            "outbound_report": outbound_view,
         }
 
         sanitize_stage_data = {
-            **sanitize_stage_data,
+            **outbound_view,
             "bid_id": bid_id,
-            "download_url": generation_dict["download_url"],
-            "file_path": file_path,
-            "section_titles": [s.section_title for s in sanitized_sections],
         }
-        sanitize_stage_status = "completed" if sanitize_stage_data.get("status") == "通过" else "warning"
+        internal_audit = _build_internal_audit_snapshot(
+            ingestion_result=ingestion_dict,
+            package_result=package_scope_dict,
+            clause_result=clause_dict,
+            normalized_result=normalization_dict,
+            product_fact_result=product_fact_dict,
+            rule_result=rule_dict,
+            evidence_result=evidence_dict,
+            validation_result=validation_dict,
+            hard_validation_result=hard_validation_dict,
+            sections=sections,
+        )
+        dual_output_summary = (
+            f"已输出内部审计版与外发净化版；内部章节 {len(sections)} 章，外发章节 {len(sanitized_sections)} 章。"
+            if not _is_external_delivery_blocked(sanitize_stage_data)
+            else f"已保留内部审计版；外发净化版已阻断，内部章节 {len(sections)} 章。"
+        )
+        dual_output_stage_status = (
+            "blocked"
+            if _is_external_delivery_blocked(sanitize_stage_data)
+            else "completed" if sanitize_stage_data.get("status") == "通过" else "warning"
+        )
         stages.append(
             _workflow_stage(
-                stage_code="outbound_sanitization",
-                stage_name="外发净化",
-                status=sanitize_stage_status,
-                summary=sanitize_stage_data.get("summary", "外发净化完成。"),
-                data=sanitize_stage_data,
-                issues=sanitize_stage_data.get("placeholder_sections", []),
+                stage_code="dual_output",
+                stage_name="双输出",
+                status=dual_output_stage_status,
+                summary=dual_output_summary,
+                data={
+                    "internal_audit": internal_audit,
+                    "external_delivery": sanitize_stage_data,
+                },
+                issues=sanitize_stage_data.get("placeholder_sections", []) + sanitize_stage_data.get("blocked_reasons", []),
             )
         )
     else:
-        consistency_dict = {
+        hard_validation_dict = {
             "executed": False,
             "overall_status": "需修订",
             "check_items": [],
-            "issues": ["分章节生成未执行，无法完成一致性校验。"],
+            "issues": ["分章节生成未执行，无法完成发布前硬校验。"],
             "suggestions": ["先补齐资料缺口并完成分章节生成。"],
-            "summary": "一致性校验未执行：缺少生成章节。",
+            "summary": "硬校验未执行：缺少生成章节。",
         }
         stages.append(
             _workflow_stage(
-                stage_code="consistency_validation",
-                stage_name="一致性校验",
+                stage_code="hard_validation",
+                stage_name="硬校验",
                 status="blocked",
-                summary=consistency_dict["summary"],
-                data=consistency_dict,
-                issues=consistency_dict["issues"],
+                summary=hard_validation_dict["summary"],
+                data=hard_validation_dict,
+                issues=hard_validation_dict["issues"],
             )
         )
 
@@ -841,38 +1110,47 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             "ready_for_submission": False,
             "risk_level": "high",
             "compliance_score": 0.0,
-            "major_issues": ["第五步未执行，暂无可审核标书内容。"],
+            "major_issues": ["第七层未执行，暂无可审核标书内容。"],
             "recommendations": ["先补齐资料缺失项，然后重新运行流程。"],
-            "secondary_validation": consistency_dict,
+            "secondary_validation": hard_validation_dict,
             "conclusion": "当前流程已阻断，暂不具备提交条件。",
         }
-        stages.append(
-            _workflow_stage(
-                stage_code="compliance_validation",
-                stage_name="合规校验",
-                status="blocked",
-                summary=review_dict["conclusion"],
-                data=review_dict,
-                issues=review_dict["major_issues"],
-            )
+        internal_audit = _build_internal_audit_snapshot(
+            ingestion_result=ingestion_dict,
+            package_result=package_scope_dict,
+            clause_result=clause_dict,
+            normalized_result=normalization_dict,
+            product_fact_result=product_fact_dict,
+            rule_result=rule_dict,
+            evidence_result=evidence_dict,
+            validation_result=validation_dict,
+            hard_validation_result=hard_validation_dict,
+            sections=[],
         )
         stages.append(
             _workflow_stage(
-                stage_code="outbound_sanitization",
-                stage_name="外发净化",
+                stage_code="dual_output",
+                stage_name="双输出",
                 status="skipped",
-                summary=sanitize_stage_data["summary"],
-                data=sanitize_stage_data,
+                summary="已保留内部审计信息，外发净化版未生成。",
+                data={
+                    "internal_audit": internal_audit,
+                    "external_delivery": sanitize_stage_data,
+                },
                 issues=[],
             )
         )
 
     regression_dict = workflow_agent.step9_regression(
         stages=stages,
-        consistency_result=consistency_dict,
+        consistency_result=hard_validation_dict,
         review_result=review_dict,
         sanitize_result=sanitize_stage_data,
         evidence_result=evidence_dict,
+        normalized_result=normalization_dict,
+        product_fact_result=product_fact_dict,
+        sections=sections or None,
+        selected_packages=selected_packages,
     )
     regression_stage_status = "completed" if regression_dict.get("overall_status") == "通过" else "warning"
     stages.append(
@@ -909,7 +1187,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
     return response
 
 
-@router.get("/workflow/{workflow_id}", response_model=TenderWorkflowResponse, summary="查询九阶段流程结果")
+@router.get("/workflow/{workflow_id}", response_model=TenderWorkflowResponse, summary="查询十层流程结果")
 async def get_tender_workflow_result(workflow_id: str):
     if workflow_id not in workflow_storage:
         raise HTTPException(status_code=404, detail="流程结果不存在")

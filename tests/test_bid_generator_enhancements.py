@@ -54,3 +54,31 @@ def test_structured_technical_block_contains_evidence_mapping() -> None:
     assert "技术条款证据映射表" in block
     assert "证据映射完整性" in block
     assert "参数待补充" not in block
+    assert "承诺满足" not in block
+    assert "3个" in block
+    assert "12个" in block
+
+
+def test_structured_technical_block_keeps_unverified_items_pending() -> None:
+    package = ProcurementPackage(
+        package_id="1",
+        item_name="流式细胞分析仪",
+        quantity=1,
+        budget=100.0,
+        technical_requirements={"激光器": "≥3", "荧光通道": "≥11"},
+        delivery_time="30天",
+        delivery_place="采购人指定地点",
+    )
+    product = ProductSpecification(
+        product_name="流式细胞分析仪",
+        manufacturer="某厂商",
+        model="X100",
+        origin="中国",
+        specifications={"激光器": "3个"},
+        price=10.0,
+    )
+
+    block = _build_structured_technical_block(package, product)
+
+    assert "待核实（未匹配到已证实产品事实）" in block
+    assert "| 2 | 荧光通道 | ≥11 | 待核实（未匹配到已证实产品事实） | 待核实 |" in block

@@ -297,7 +297,7 @@ def test_configuration_table_uses_real_configuration_items_instead_of_template()
     assert "随机附件及工具" not in table
 
 
-def test_requirement_rows_use_parameter_values_as_response_values() -> None:
+def test_requirement_rows_keep_response_values_pending_until_bidder_facts_are_bound() -> None:
     tender = _sample_tender()
     pkg = tender.packages[0]
     pkg.technical_requirements = {"激光器": "≥3", "荧光通道": "≥11"}
@@ -305,9 +305,24 @@ def test_requirement_rows_use_parameter_values_as_response_values() -> None:
     rows, _ = _build_requirement_rows(pkg, tender_raw="")
 
     response_map = {row["key"]: row["response"] for row in rows}
-    assert response_map["激光器"] == "≥3"
-    assert response_map["荧光通道"] == "≥11"
+    assert response_map["激光器"] == "待核实（需填入投标产品实参）"
+    assert response_map["荧光通道"] == "待核实（需填入投标产品实参）"
     assert all("承诺满足" not in row["response"] for row in rows)
+
+
+def test_generated_sections_do_not_use_commitment_sentences_as_response_values() -> None:
+    tender = _sample_tender()
+    pkg = tender.packages[0]
+    pkg.technical_requirements = {"激光器": "≥3", "荧光通道": "≥11"}
+
+    technical = _gen_technical(llm=None, tender=tender, tender_raw="包1\n技术参数\n激光器：≥3\n荧光通道：≥11\n")
+    appendix = _gen_appendix(llm=None, tender=tender, tender_raw="包1\n技术参数\n激光器：≥3\n荧光通道：≥11\n")
+
+    assert "承诺满足" not in technical.content
+    assert "承诺满足" not in appendix.content
+    assert "待核实（需填入投标产品实参）" in technical.content
+    assert "待核实（需填入投标产品实参）" in appendix.content
+    assert " | 无偏离 | " not in technical.content
 
 
 def test_detail_quote_table_prefers_quantity_inferred_from_package_scope() -> None:
@@ -357,6 +372,62 @@ def test_detail_quote_table_prefers_quantity_inferred_from_package_scope() -> No
     table = _build_detail_quote_table(tender, tender_raw)
 
     assert "| 2 | 手术用头架 | [品牌型号] | [生产厂家] | [品牌] | [待填写] | 3 | [待填写] |" in table
+
+
+def test_configuration_table_can_extract_items_from_raw_configuration_section() -> None:
+    tender = _sample_tender(project_name="检验科设备采购项目")
+    pkg = tender.packages[0]
+    pkg.item_name = "进口全自动电泳仪"
+    pkg.technical_requirements = {}
+
+    table = _build_configuration_table(
+        pkg,
+        tender_raw=(
+            "包1 进口全自动电泳仪\n"
+            "技术参数与性能要求\n"
+            "检测原理：琼脂凝胶电泳法\n"
+            "装箱配置单：\n"
+            "1、主机 1台\n"
+            "2、上样组件 1套\n"
+            "3、说明书 1份\n"
+            "质保：进口一年，国产三年\n"
+        ),
+    )
+
+    assert "主机 | 台 | 1 | 核心设备" in table
+    assert "上样组件 | 套 | 1 | 按招标文件配置要求" in table
+    assert "说明书 | 份 | 1 | 随机技术文件" in table
+    assert "随机附件及工具" not in table
+
+
+def test_requirement_rows_trim_evidence_before_configuration_and_complaint_sections() -> None:
+    tender = _sample_tender(project_name="检验科设备采购项目")
+    pkg = tender.packages[0]
+    pkg.item_name = "进口流式细胞分析仪"
+    pkg.technical_requirements = {
+        "卫生部国家临检中心TBNK淋巴细胞亚群项目的室间质评具备独立分组": "是",
+        "刀锋式点样": "是",
+    }
+
+    rows, _ = _build_requirement_rows(
+        pkg,
+        tender_raw=(
+            "包1 进口流式细胞分析仪\n"
+            "技术参数与性能要求\n"
+            "卫生部国家临检中心TBNK淋巴细胞亚群项目的室间质评有独立分组且实验室数量充足。\n"
+            "刀锋式点样。\n"
+            "装箱配置单：主机1台、流式管架1套\n"
+            "质保：进口一年，国产三年\n"
+            "质疑：是参与所质疑项目采购活动的供应商。\n"
+        ),
+    )
+
+    quotes = {row["key"]: row["evidence_quote"] for row in rows}
+    assert "独立分组" in quotes["卫生部国家临检中心TBNK淋巴细胞亚群项目的室间质评具备独立分组"]
+    assert "质疑" not in quotes["卫生部国家临检中心TBNK淋巴细胞亚群项目的室间质评具备独立分组"]
+    assert "刀锋式点样" in quotes["刀锋式点样"]
+    assert "装箱配置单" not in quotes["刀锋式点样"]
+    assert "质保" not in quotes["刀锋式点样"]
 
 
 def test_parser_can_correct_package_quantity_from_package_scope_text() -> None:
