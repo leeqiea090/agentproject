@@ -6,7 +6,9 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 import json
 import logging
+import re
 
+from app.config import get_settings
 from app.schemas import (
     TenderDocument,
     ProcurementPackage,
@@ -20,6 +22,7 @@ except ImportError:
     _DOCX_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+_FALLBACK_PARSE_CHAR_LIMITS = (24000, 16000, 10000)
 
 
 class TenderParser:
@@ -33,6 +36,9 @@ class TenderParser:
             llm: 语言模型实例，如果为None则使用默认配置
         """
         self.llm = llm or ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        settings = get_settings()
+        # 0 表示不限制长度
+        self.max_parse_chars = max(0, settings.tender_parse_char_limit)
 
         # 信息提取Prompt
         self.extraction_prompt = ChatPromptTemplate.from_messages([
@@ -75,6 +81,68 @@ class TenderParser:
 }}"""),
             ("user", "招标文件内容：\n\n{tender_text}\n\n请提取上述信息并返回JSON格式的结果。")
         ])
+
+    @staticmethod
+    def _response_text(content: Any) -> str:
+        """兼容不同模型返回结构，统一抽取为纯文本。"""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+            return "\n".join(parts).strip()
+        return str(content).strip()
+
+    @staticmethod
+    def _extract_json_dict(raw_text: str) -> dict[str, Any]:
+        text = raw_text.strip()
+        if not text:
+            raise ValueError("LLM返回为空")
+
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+        # 优先直接按完整JSON解析
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+        # 兜底：抽取第一个可能的JSON对象片段
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            data = json.loads(match.group(0))
+            if isinstance(data, dict):
+                return data
+
+        raise ValueError("未识别到有效JSON对象")
+
+    def _parse_with_llm(self, tender_text: str) -> dict[str, Any]:
+        chain = self.extraction_prompt | self.llm
+        response = chain.invoke({"tender_text": tender_text})
+        response_text = self._response_text(response.content)
+        return self._extract_json_dict(response_text)
+
+    def _apply_parse_length_limit(self, tender_text: str) -> str:
+        if self.max_parse_chars > 0 and len(tender_text) > self.max_parse_chars:
+            logger.warning(
+                "招标文件过长 (%d 字符)，将截取前%d字符",
+                len(tender_text),
+                self.max_parse_chars,
+            )
+            return tender_text[:self.max_parse_chars]
+        return tender_text
 
     def extract_text_from_pdf(self, pdf_path: str | Path) -> str:
         """从PDF文件中提取文本"""
@@ -135,42 +203,28 @@ class TenderParser:
         # 1. 提取文本（自动识别格式）
         tender_text = self.extract_text(pdf_path)
 
-        # 限制 token 长度
-        if len(tender_text) > 50000:
-            logger.warning(f"招标文件过长 ({len(tender_text)} 字符)，将截取前50000字符")
-            tender_text = tender_text[:50000]
+        # 可选限制长度并增加降级重试，降低空响应概率
+        tender_text = self._apply_parse_length_limit(tender_text)
 
-        # 2. 使用LLM提取结构化信息
-        chain = self.extraction_prompt | self.llm
+        candidate_lengths = [len(tender_text)] + [x for x in _FALLBACK_PARSE_CHAR_LIMITS if x < len(tender_text)]
+        last_error: Exception | None = None
 
-        try:
-            response = chain.invoke({"tender_text": tender_text})
+        for limit in candidate_lengths:
+            candidate_text = tender_text[:limit]
+            try:
+                parsed_data = self._parse_with_llm(candidate_text)
+                tender_doc = TenderDocument(**parsed_data)
+                logger.info(f"成功解析招标文件: {tender_doc.project_name}（输入长度={limit}）")
+                return tender_doc
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning("解析尝试失败（输入长度=%d）：%s", limit, exc)
 
-            # 解析LLM返回的JSON
-            # 去除可能的markdown代码块标记
-            content = response.content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-
-            parsed_data = json.loads(content)
-
-            # 3. 使用Pydantic模型验证和结构化
-            tender_doc = TenderDocument(**parsed_data)
-
-            logger.info(f"成功解析招标文件: {tender_doc.project_name}")
-            return tender_doc
-
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {str(e)}\nLLM返回内容: {response.content}")
-            raise ValueError(f"LLM返回的数据格式不正确: {str(e)}")
-        except Exception as e:
-            logger.error(f"招标文件解析失败: {str(e)}")
-            raise
+        logger.error("招标文件解析失败，所有重试均未返回有效JSON：%s", last_error)
+        raise ValueError(
+            "LLM未返回有效JSON。请检查 LLM_MODEL/LLM_BASE_URL 配置，"
+            "或改用更稳定模型（如 gpt-4o-mini）后重试。"
+        )
 
     def parse_tender_text(self, tender_text: str) -> TenderDocument:
         """
@@ -182,36 +236,19 @@ class TenderParser:
         Returns:
             结构化的招标文件数据
         """
-        if len(tender_text) > 50000:
-            logger.warning(f"招标文件过长 ({len(tender_text)} 字符)，将截取前50000字符")
-            tender_text = tender_text[:50000]
-
-        chain = self.extraction_prompt | self.llm
+        tender_text = self._apply_parse_length_limit(tender_text)
 
         try:
-            response = chain.invoke({"tender_text": tender_text})
-
-            content = response.content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-
-            parsed_data = json.loads(content)
+            parsed_data = self._parse_with_llm(tender_text)
             tender_doc = TenderDocument(**parsed_data)
-
             logger.info(f"成功解析招标文本: {tender_doc.project_name}")
             return tender_doc
-
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {str(e)}")
-            raise ValueError(f"LLM返回的数据格式不正确: {str(e)}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"招标文本解析失败: {str(e)}")
-            raise
+            raise ValueError(
+                "LLM未返回有效JSON。请检查 LLM_MODEL/LLM_BASE_URL 配置，"
+                "或在 .env 中设置 TENDER_PARSE_CHAR_LIMIT 后重试。"
+            ) from e
 
     def extract_technical_requirements(self, tender_text: str, package_id: str) -> dict[str, Any]:
         """

@@ -38,5 +38,5 @@ if __name__ == "__main__":
             print(f"[ERROR] 端口 {PORT} 仍被占用，请手动处理后重试。")
             sys.exit(1)
         print(f"[INFO] 端口 {PORT} 已释放，正在启动服务...")
-
+    # os.system("/Users/lq/PycharmProjects/FastAPIProject/.venv/bin/uvicorn app.main:app --reload")
     uvicorn.run("app.main:app", host=HOST, port=PORT, reload=True)

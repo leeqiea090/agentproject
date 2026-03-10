@@ -39,6 +39,8 @@ class Settings:
     llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
     llm_temperature: float = _float_env("LLM_TEMPERATURE", 0.2)
     llm_max_tokens: int = _int_env("LLM_MAX_TOKENS", 2000)
+    # 0 表示不限制招标文件输入长度
+    tender_parse_char_limit: int = _int_env("TENDER_PARSE_CHAR_LIMIT", 0)
 
     embedding_model_name: str = os.getenv(
         "EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"

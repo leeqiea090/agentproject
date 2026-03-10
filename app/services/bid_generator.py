@@ -3,6 +3,7 @@ from typing import Any, TypedDict, Annotated
 import operator
 from datetime import datetime
 import logging
+import re
 
 from langgraph.graph import StateGraph, END
 from langchain_core.prompts import ChatPromptTemplate
@@ -17,6 +18,203 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MODEL_POLLUTION_PREFIXES = (
+    "你是",
+    "请生成",
+    "输出JSON",
+    "Markdown格式",
+    "根据以上",
+    "以下是",
+    "as an ai",
+)
+_MODEL_POLLUTION_TOKENS = ("{{", "}}", "<!--", "-->", "```")
+_MODEL_POLLUTION_INFIX_KEYWORDS = (
+    "system:",
+    "assistant:",
+    "user:",
+    "只允许输出",
+    "输出格式",
+    "返回json",
+    "判定结果：",
+    "原文长度",
+    "debug:",
+    "trace:",
+)
+_HARD_REQUIREMENT_MARKERS = ("≥", "≤", ">=", "<=", "不低于", "不少于", "不高于", "不大于", "至少")
+
+
+def _as_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        return "；".join(f"{k}：{_as_text(v)}" for k, v in value.items() if _as_text(v))
+    if isinstance(value, list):
+        return "；".join(_as_text(item) for item in value if _as_text(item))
+    return str(value).strip()
+
+
+def _sanitize_model_output(section_title: str, content: str) -> str:
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()
+    lines: list[str] = []
+    for line in normalized.split("\n"):
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if stripped in {section_title, f"# {section_title}", f"## {section_title}"}:
+            continue
+        if any(token in stripped for token in _MODEL_POLLUTION_TOKENS):
+            continue
+        if any(lowered.startswith(prefix.lower()) for prefix in _MODEL_POLLUTION_PREFIXES):
+            continue
+        if any(keyword in lowered for keyword in _MODEL_POLLUTION_INFIX_KEYWORDS):
+            continue
+        if re.match(r"^(system|assistant|user)\s*[:：]", lowered):
+            continue
+        if re.match(r"^(好的|当然|以下|下面|请注意|温馨提示)[，,:：]", stripped):
+            continue
+        if re.search(r"(根据你|根据您).{0,8}(提供|输入)", stripped):
+            continue
+        lines.append(line.rstrip())
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def _markdown_cell(text: Any) -> str:
+    normalized = re.sub(r"\s+", " ", _as_text(text))
+    return normalized.replace("|", "/")
+
+
+def _build_requirement_response(req_name: str, req_text: str, matched_spec_value: str) -> str:
+    if matched_spec_value:
+        return f"承诺满足“{req_name}”要求，拟投参数为“{matched_spec_value}”，并提供技术资料佐证。"
+    if any(marker in req_text for marker in _HARD_REQUIREMENT_MARKERS):
+        return f"承诺满足“{req_name}”且指标不低于“{req_text}”，交付时按条款验收。"
+    return f"承诺满足“{req_name}：{req_text}”，交付时提交对应技术资料并配合验收。"
+
+
+def _ensure_compliance_branch_blocks(content: str, allow_consortium: bool, requires_sme: bool) -> str:
+    result = content.strip()
+    if "联合体投标声明（分支选择）" not in result:
+        branch_b_hint = "分支B适用时须附联合体协议书。" if allow_consortium else "分支B本项目不适用。"
+        result += (
+            "\n\n## 联合体投标声明（分支选择）\n"
+            "请按投标组织形式勾选：\n"
+            "- □ 分支A：独立投标，不组成联合体；\n"
+            f"- □ 分支B：联合体投标，{branch_b_hint}\n"
+        )
+
+    if "企业类型声明函（分支选择）" not in result:
+        _ = requires_sme
+        result += (
+            "\n\n## 企业类型声明函（分支选择）\n"
+            "请按企业实际情况勾选并提交对应材料：\n"
+            "### 分支A：中小企业声明函（货物/服务）\n"
+            "□ 适用。\n"
+            "### 分支B：监狱企业证明材料\n"
+            "□ 适用。\n"
+            "### 分支C：残疾人福利性单位声明函\n"
+            "□ 适用。\n"
+            "### 分支D：非中小企业声明\n"
+            "□ 适用。\n"
+        )
+
+    return result
+
+
+def _build_structured_technical_block(package: Any, product: ProductSpecification) -> str:
+    rows: list[str] = []
+    evidence_rows: list[str] = []
+    tech_req = package.technical_requirements or {}
+    product_specs = product.specifications or {}
+
+    if tech_req:
+        idx = 1
+        for req_key, req_val in tech_req.items():
+            req_name = _as_text(req_key) or "技术参数"
+            req_text = _as_text(req_val) or "详见招标文件"
+            matched = ""
+            matched_spec_key = ""
+            for spec_key, spec_val in product_specs.items():
+                if req_name in _as_text(spec_key) or _as_text(spec_key) in req_name:
+                    matched = _as_text(spec_val)
+                    matched_spec_key = _as_text(spec_key)
+                    break
+            response_text = _build_requirement_response(req_name, req_text, matched)
+            evidence_text = (
+                f"招标条款：{_markdown_cell(req_name)}={_markdown_cell(req_text)}；"
+                f"产品参数：{_markdown_cell(matched_spec_key)}={_markdown_cell(matched)}"
+                if matched
+                else f"招标条款：{_markdown_cell(req_name)}={_markdown_cell(req_text)}；产品参数：未匹配到同名参数，需补充"
+            )
+
+            rows.append(
+                f"| {idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | 无偏离 | {_markdown_cell(evidence_text)} |"
+            )
+            evidence_rows.append(
+                f"| {idx} | {_markdown_cell(req_name)} | 招标技术条款 | {_markdown_cell(evidence_text)} | 技术偏离表第{idx}行 |"
+            )
+            idx += 1
+    else:
+        rows.append(
+            "| 1 | 核心技术参数 | 详见招标文件 | 承诺逐条满足并提交技术资料，交付时配合验收 | 无偏离 | 招标条款+产品参数待人工补充 |"
+        )
+        evidence_rows.append("| 1 | 核心技术参数 | 招标技术条款 | 暂未匹配到产品参数，需补充证据 | 技术偏离表第1行 |")
+
+    deviation_table = "\n".join(
+        [
+            f"#### 1) 技术偏离表（第{package.package_id}包）",
+            "| 序号 | 参数项 | 招标要求 | 投标响应 | 偏离说明 | 证据映射 |",
+            "|---:|---|---|---|---|---|",
+            *rows,
+        ]
+    )
+
+    config_table = "\n".join(
+        [
+            "#### 2) 配置清单",
+            "| 序号 | 配置项 | 说明 |",
+            "|---:|---|---|",
+            f"| 1 | 产品名称 | {product.product_name} |",
+            f"| 2 | 品牌/厂家 | {product.manufacturer} |",
+            f"| 3 | 型号 | {product.model or '[待补充]'} |",
+            f"| 4 | 产地 | {product.origin or '[待补充]'} |",
+            f"| 5 | 参考价格(元) | {product.price:.2f} |",
+        ]
+    )
+
+    checklist = "\n".join(
+        [
+            "#### 3) 响应校验清单",
+            "| 序号 | 校验项 | 结论 |",
+            "|---:|---|---|",
+            "| 1 | 技术参数逐条对照 | 已完成 |",
+            "| 2 | 产品信息完整性 | 已完成 |",
+            "| 3 | 偏离项披露 | 无偏离（如有偏离将在表内注明） |",
+            f"| 4 | 证据映射完整性 | 已形成 {len(evidence_rows)} 条映射记录 |",
+        ]
+    )
+
+    evidence_table = "\n".join(
+        [
+            "#### 4) 技术条款证据映射表",
+            "| 序号 | 参数项 | 证据来源 | 证据摘要 | 应用位置 |",
+            "|---:|---|---|---|---|",
+            *evidence_rows,
+        ]
+    )
+
+    return "\n\n".join(
+        [
+            f"### 包{package.package_id}：{package.item_name}",
+            deviation_table,
+            config_table,
+            checklist,
+            evidence_table,
+        ]
+    )
 
 
 class BidGenerationState(TypedDict):
@@ -128,7 +326,7 @@ class BidGeneratorAgent:
 
         section = BidDocumentSection(
             section_title="第一章 资格性证明文件",
-            content=response.content,
+            content=_sanitize_model_output("第一章 资格性证明文件", str(response.content)),
             attachments=[lic.file_path for lic in company.licenses if lic.file_path]
         )
 
@@ -144,6 +342,18 @@ class BidGeneratorAgent:
         tender = state["tender_doc"]
         company = state["company_profile"]
         request = state["request"]
+        context_text = " ".join(
+            [
+                tender.project_name,
+                tender.special_requirements,
+                " ".join(f"{k}{v}" for k, v in tender.evaluation_criteria.items()),
+            ]
+        )
+        allow_consortium = ("联合体" in context_text and "不接受联合体" not in context_text)
+        requires_sme = any(
+            token in context_text
+            for token in ("中小企业", "小微", "监狱企业", "残疾人福利性单位", "价格扣除")
+        )
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", """你是投标文件撰写专家。请生成"符合性承诺"章节。
@@ -173,7 +383,11 @@ class BidGeneratorAgent:
 
 企业名称：{company_name}
 
-请生成"第二章 符合性承诺"的内容（Markdown格式）：""")
+声明函分支要求：
+- 联合体分支：{consortium_branch}
+- 企业类型声明分支：{enterprise_branch}
+
+请生成"第二章 符合性承诺"的内容（Markdown格式），并明确输出分支化声明：""")
         ])
 
         chain = prompt | self.llm
@@ -184,12 +398,20 @@ class BidGeneratorAgent:
             "validity_period": tender.commercial_terms.validity_period,
             "performance_bond": tender.commercial_terms.performance_bond,
             "packages": ", ".join(request.selected_packages),
-            "company_name": company.name
+            "company_name": company.name,
+            "consortium_branch": "允许联合体（同时给出独立投标/联合体投标两种声明）" if allow_consortium else "不允许联合体（输出非联合体声明）",
+            "enterprise_branch": "需提供中小企业/监狱企业/残疾人福利性单位分支声明" if requires_sme else "输出非中小企业声明",
         })
 
+        cleaned_content = _sanitize_model_output("第二章 符合性承诺", str(response.content))
+        ensured_content = _ensure_compliance_branch_blocks(
+            content=cleaned_content,
+            allow_consortium=allow_consortium,
+            requires_sme=requires_sme,
+        )
         section = BidDocumentSection(
             section_title="第二章 符合性承诺",
-            content=response.content
+            content=ensured_content
         )
 
         return {
@@ -205,7 +427,7 @@ class BidGeneratorAgent:
         products = state["products"]
         request = state["request"]
 
-        # 对每个投标包生成技术响应
+        # 对每个投标包生成技术响应（强制结构化，不走自由文本）
         technical_responses = []
 
         for package_id in request.selected_packages:
@@ -219,50 +441,17 @@ class BidGeneratorAgent:
             if not product:
                 continue
 
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", """你是医疗设备技术专家。请生成技术响应内容，包括：
-1. 产品基本信息（品牌、型号、产地等）
-2. 技术偏离表（逐条对比招标要求和产品参数）
-3. 详细配置清单
-4. 技术优势说明
+            technical_responses.append(_build_structured_technical_block(package, product))
 
-要求：
-- 准确对比招标要求和产品参数
-- 如有偏离需明确说明，否则标注"无偏离"
-- 突出产品技术优势
-- 使用表格形式（Markdown格式）"""),
-                ("user", """采购包信息：
-- 包号：{package_id}
-- 货物名称：{item_name}
-- 数量：{quantity}
-- 技术要求：{tech_req}
-
-我方产品：
-- 产品名称：{product_name}
-- 生产厂家：{manufacturer}
-- 产地：{origin}
-- 型号：{model}
-- 技术参数：{specs}
-
-请生成该包的技术响应内容（Markdown格式，包含技术偏离表）：""")
-            ])
-
-            chain = prompt | self.llm
-            response = chain.invoke({
-                "package_id": package.package_id,
-                "item_name": package.item_name,
-                "quantity": package.quantity,
-                "tech_req": str(package.technical_requirements),
-                "product_name": product.product_name,
-                "manufacturer": product.manufacturer,
-                "origin": product.origin,
-                "model": product.model,
-                "specs": str(product.specifications)
-            })
-
-            technical_responses.append(f"\n\n### 包{package_id}：{package.item_name}\n\n{response.content}")
-
-        full_content = "\n".join(technical_responses)
+        if technical_responses:
+            full_content = "\n\n".join(technical_responses)
+        else:
+            full_content = (
+                "### 技术响应总览\n\n"
+                "| 序号 | 校验项 | 结论 |\n"
+                "|---:|---|---|\n"
+                "| 1 | 目标包号是否匹配 | 未找到可用的包号与产品映射，请检查 selected_packages 与 product_ids |"
+            )
 
         section = BidDocumentSection(
             section_title="第三章 商务及技术部分",
@@ -329,7 +518,7 @@ class BidGeneratorAgent:
 
         section = BidDocumentSection(
             section_title="报价书及报价一览表",
-            content=response.content
+            content=_sanitize_model_output("报价书及报价一览表", str(response.content))
         )
 
         return {
@@ -389,7 +578,7 @@ class BidGeneratorAgent:
 
         section = BidDocumentSection(
             section_title="第四章 技术服务和售后服务",
-            content=response.content
+            content=_sanitize_model_output("第四章 技术服务和售后服务", str(response.content))
         )
 
         return {

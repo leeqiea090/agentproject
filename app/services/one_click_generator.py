@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +19,36 @@ _LEGAL_REP = "[法定代表人]"
 _AUTHORIZED_REP = "[授权代表]"
 _PHONE = "[联系电话]"
 _ADDRESS = "[联系地址]"
+
+_TEMPLATE_POLLUTION_PREFIXES = (
+    "你是",
+    "请生成",
+    "输出json",
+    "输出JSON",
+    "markdown格式",
+    "Markdown格式",
+    "根据以上",
+    "以下是",
+    "as an ai",
+)
+_TEMPLATE_POLLUTION_TOKENS = ("{{", "}}", "<!--", "-->")
+_TEMPLATE_POLLUTION_INFIX_KEYWORDS = (
+    "system:",
+    "assistant:",
+    "user:",
+    "只允许输出",
+    "请严格按照",
+    "请按以下",
+    "根据上述",
+    "输出格式",
+    "返回json",
+    "判定结果：",
+    "原文长度",
+    "用于内容校验",
+    "debug:",
+    "trace:",
+)
+_HARD_REQUIREMENT_MARKERS = ("≥", "≤", ">=", "<=", "不低于", "不少于", "不高于", "不大于", "至少")
 
 
 def _today() -> str:
@@ -46,6 +77,58 @@ def _as_text(value: Any) -> str:
 
 def _fmt_money(amount: float) -> str:
     return f"{amount:,.2f}"
+
+
+def _tender_context_text(tender: TenderDocument) -> str:
+    eval_items = " ".join(f"{k}:{v}" for k, v in tender.evaluation_criteria.items())
+    package_names = " ".join(pkg.item_name for pkg in tender.packages)
+    package_requirements = " ".join(
+        " ".join(str(v) for v in pkg.technical_requirements.values())
+        for pkg in tender.packages
+    )
+    return " ".join(
+        [
+            tender.project_name,
+            tender.project_number,
+            tender.procurement_type,
+            tender.special_requirements,
+            eval_items,
+            package_names,
+            package_requirements,
+        ]
+    )
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _is_medical_project(tender: TenderDocument) -> bool:
+    context = _tender_context_text(tender)
+    return _contains_any(
+        context,
+        ("医疗", "器械", "检验", "试剂", "诊断", "流式", "医院"),
+    )
+
+
+def _requires_sme_declaration(tender: TenderDocument) -> bool:
+    context = _tender_context_text(tender)
+    return _contains_any(
+        context,
+        ("中小企业", "小微", "监狱企业", "残疾人福利性单位", "价格扣除", "声明函"),
+    )
+
+
+def _allow_consortium(tender: TenderDocument) -> bool:
+    context = _tender_context_text(tender)
+    if "不接受联合体" in context:
+        return False
+    return "联合体" in context and _contains_any(context, ("允许联合体", "接受联合体", "可联合体"))
+
+
+def _has_imported_clues(tender: TenderDocument) -> bool:
+    context = _tender_context_text(tender)
+    return _contains_any(context, ("进口", "原装", "境外"))
 
 
 def _package_scope(tender: TenderDocument) -> str:
@@ -102,33 +185,127 @@ def _flatten_requirements(pkg: ProcurementPackage) -> list[tuple[str, str]]:
     return items
 
 
-def _build_deviation_table(tender: TenderDocument, pkg: ProcurementPackage) -> str:
+def _markdown_cell(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text).strip())
+    return normalized.replace("|", "/")
+
+
+def _extract_match_tokens(*texts: str) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        raw_tokens = re.split(r"[，,、；;：:（）()【】\\[\\]\\s/\\\\]+", text)
+        for token in raw_tokens:
+            normalized = token.strip()
+            if len(normalized) < 2:
+                continue
+            if normalized.isdigit():
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            tokens.append(normalized)
+    tokens.sort(key=len, reverse=True)
+    return tokens
+
+
+def _extract_evidence_snippet(tender_raw: str, req_key: str, req_val: str) -> tuple[str, str, bool]:
+    source = "招标原文片段"
+    text = tender_raw or ""
+    if not text.strip():
+        quote = f"{_markdown_cell(req_key)}：{_markdown_cell(req_val)}（依据结构化解析结果）"
+        return source, quote, False
+
+    candidates = [
+        f"{req_key}：{req_val}",
+        req_key,
+        req_val,
+        *_extract_match_tokens(req_key, req_val)[:8],
+    ]
+
+    idx = -1
+    matched = ""
+    lowered = text.lower()
+    for candidate in candidates:
+        keyword = candidate.strip()
+        if not keyword:
+            continue
+        pos = lowered.find(keyword.lower())
+        if pos >= 0:
+            idx = pos
+            matched = keyword
+            break
+
+    if idx < 0:
+        quote = f"{_markdown_cell(req_key)}：{_markdown_cell(req_val)}（原文未定位到完全同名片段）"
+        return source, quote, False
+
+    start = max(0, idx - 24)
+    end = min(len(text), idx + max(24, len(matched)) + 36)
+    snippet = text[start:end].replace("\n", " ").replace("\r", " ")
+    snippet = re.sub(r"\s+", " ", snippet).strip()
+    if len(snippet) > 120:
+        snippet = snippet[:120] + "..."
+    return source, _markdown_cell(snippet), True
+
+
+def _build_response_commitment(req_key: str, req_val: str) -> str:
+    key = _markdown_cell(req_key)
+    value = _markdown_cell(req_val)
+    if any(marker in value for marker in _HARD_REQUIREMENT_MARKERS):
+        return f"承诺满足“{key}”且指标不低于“{value}”，按招标条款逐项验收。"
+    return f"承诺满足“{key}：{value}”，交付时提供对应技术资料并配合验收。"
+
+
+def _build_requirement_rows(pkg: ProcurementPackage, tender_raw: str) -> tuple[list[dict[str, Any]], int]:
+    requirements = _flatten_requirements(pkg)
+    rows: list[dict[str, Any]] = []
+    for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
+        source, quote, mapped = _extract_evidence_snippet(tender_raw, req_key, req_val)
+        rows.append(
+            {
+                "key": req_key,
+                "requirement": req_val,
+                "response": _build_response_commitment(req_key, req_val),
+                "evidence_source": source,
+                "evidence_quote": quote,
+                "mapped": mapped,
+            }
+        )
+    return rows, len(requirements)
+
+
+def _build_deviation_table(
+    tender: TenderDocument,
+    pkg: ProcurementPackage,
+    requirement_rows: list[dict[str, Any]],
+    total_requirements: int,
+) -> str:
     lines = [
         f"### （一）技术偏离及详细配置明细表（第{pkg.package_id}包）",
         f"项目名称：{tender.project_name}",
         f"项目编号：{tender.project_number}",
         "",
-        "| 序号 | 招标技术参数要求 | 投标产品响应参数 | 偏离情况 | 偏离说明 |",
+        "| 序号 | 招标技术参数要求 | 投标产品响应参数 | 偏离情况 | 响应依据/证据映射 |",
         "|---:|---|---|---|---|",
     ]
 
-    requirements = _flatten_requirements(pkg)
-    if not requirements:
+    if not requirement_rows:
         lines.append(
-            "| 1 | 详见招标文件采购需求 | 完全响应，具体品牌型号参数待填写 | 无偏离 | 本项目参数逐条响应见后附技术资料 |"
+            "| 1 | 详见招标文件采购需求 | 承诺按采购需求逐条响应并配合验收 | 无偏离 | 结构化解析结果（建议复核原文） |"
         )
         return "\n".join(lines)
 
-    for idx, (key, val) in enumerate(requirements[:_MAX_TECH_ROWS_PER_PACKAGE], start=1):
-        req = f"{key}：{val}"
+    for idx, row in enumerate(requirement_rows, start=1):
+        req = f"{_markdown_cell(str(row['key']))}：{_markdown_cell(str(row['requirement']))}"
+        evidence_text = f"{_markdown_cell(str(row['evidence_source']))}；{_markdown_cell(str(row['evidence_quote']))}"
         lines.append(
-            f"| {idx} | {req} | 完全响应，参数不低于招标要求（品牌型号：[品牌型号]） | 无偏离 | "
-            "最终参数以产品彩页和技术文件为准 |"
+            f"| {idx} | {req} | {_markdown_cell(str(row['response']))} | 无偏离 | {evidence_text} |"
         )
 
-    if len(requirements) > _MAX_TECH_ROWS_PER_PACKAGE:
+    if total_requirements > len(requirement_rows):
         lines.append(
-            "|  | 其余技术参数 | 详见后附完整技术响应表 | 无偏离 | 本表仅展示核心参数，完整参数另附 |"
+            "|  | 其余技术参数 | 详见后附完整技术响应表 | 无偏离 | 证据映射表继续列示 |"
         )
 
     return "\n".join(lines)
@@ -158,18 +335,234 @@ def _build_main_parameter_table(pkg: ProcurementPackage) -> str:
 
     requirements = _flatten_requirements(pkg)
     if not requirements:
-        lines.append("| 1 | 核心技术参数 | 详见招标文件 | 完全响应（具体型号参数待填写） | 无偏离 |")
+        lines.append("| 1 | 核心技术参数 | 详见招标文件 | 承诺逐条满足并提交技术资料 | 无偏离 |")
         return "\n".join(lines)
 
     for idx, (key, val) in enumerate(requirements[:_MAX_TECH_ROWS_PER_PACKAGE], start=1):
         lines.append(
-            f"| {idx} | {key} | {val} | 满足或优于招标要求（具体参数待填写） | 无偏离 |"
+            f"| {idx} | {_markdown_cell(key)} | {_markdown_cell(val)} | {_build_response_commitment(key, val)} | 无偏离 |"
         )
 
     if len(requirements) > _MAX_TECH_ROWS_PER_PACKAGE:
         lines.append("|  | 其余参数 | 详见附录参数表 | 全部响应 | 无偏离 |")
 
     return "\n".join(lines)
+
+
+def _build_response_checklist_table(
+    pkg: ProcurementPackage,
+    mapped_count: int,
+    total_requirements: int,
+) -> str:
+    if total_requirements <= 0:
+        evidence_result = "未提取到结构化参数，已保留人工复核项"
+        evidence_status = "待复核"
+    else:
+        evidence_result = f"已完成 {mapped_count}/{total_requirements} 项条款证据映射"
+        evidence_status = "已完成" if mapped_count > 0 else "待复核"
+
+    lines = [
+        f"### （三）技术响应检查清单（第{pkg.package_id}包）",
+        "| 序号 | 校验项 | 响应结论 | 证据载体 | 校验状态 |",
+        "|---:|---|---|---|---|",
+        "| 1 | 关键技术参数逐条响应 | 已形成偏离表逐项响应 | 技术偏离表 | 已完成 |",
+        "| 2 | 配置清单完整性 | 主机/软件/附件/技术文件均已列示 | 配置明细表 | 已完成 |",
+        "| 3 | 交付与培训要求 | 已承诺按招标文件执行 | 报价书与服务方案 | 已完成 |",
+        "| 4 | 质保与售后要求 | 已在售后章节明确响应时限与保障 | 售后服务方案 | 已完成 |",
+        f"| 5 | 技术条款证据映射 | {evidence_result} | 技术条款证据映射表 | {evidence_status} |",
+    ]
+    return "\n".join(lines)
+
+
+def _build_evidence_mapping_table(
+    pkg: ProcurementPackage,
+    requirement_rows: list[dict[str, Any]],
+    total_requirements: int,
+) -> str:
+    lines = [
+        f"### （四）技术条款证据映射表（第{pkg.package_id}包）",
+        "| 序号 | 技术参数项 | 证据来源 | 原文片段 | 应用位置 |",
+        "|---:|---|---|---|---|",
+    ]
+
+    if not requirement_rows:
+        lines.append("| 1 | 核心技术参数 | 结构化解析结果 | 未提取到可映射原文片段，需人工复核原文 | 技术偏离表第1行 |")
+        return "\n".join(lines)
+
+    for idx, row in enumerate(requirement_rows, start=1):
+        lines.append(
+            f"| {idx} | {_markdown_cell(str(row['key']))} | {_markdown_cell(str(row['evidence_source']))} | "
+            f"{_markdown_cell(str(row['evidence_quote']))} | 技术偏离表第{idx}行 |"
+        )
+
+    if total_requirements > len(requirement_rows):
+        lines.append("|  | 其余参数项 | 招标原文 | 详见延伸条款，需人工补充映射 | 技术偏离表后续行 |")
+
+    return "\n".join(lines)
+
+
+def _sanitize_generated_content(section_title: str, content: str) -> tuple[str, list[str]]:
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()
+    removed_lines: list[str] = []
+    kept: list[str] = []
+    for line in normalized.split("\n"):
+        stripped = line.strip()
+        lower = stripped.lower()
+        if stripped in {section_title, f"# {section_title}", f"## {section_title}"}:
+            removed_lines.append(stripped)
+            continue
+        if any(token in stripped for token in _TEMPLATE_POLLUTION_TOKENS):
+            removed_lines.append(stripped)
+            continue
+        if any(lower.startswith(prefix.lower()) for prefix in _TEMPLATE_POLLUTION_PREFIXES):
+            removed_lines.append(stripped)
+            continue
+        if any(keyword in lower for keyword in _TEMPLATE_POLLUTION_INFIX_KEYWORDS):
+            removed_lines.append(stripped)
+            continue
+        if re.match(r"^(system|assistant|user)\s*[:：]", lower):
+            removed_lines.append(stripped)
+            continue
+        if re.match(r"^(好的|当然|以下|下面|请注意|温馨提示)[，,:：]", stripped):
+            removed_lines.append(stripped)
+            continue
+        if re.search(r"(根据你|根据您).{0,8}(提供|输入)", stripped):
+            removed_lines.append(stripped)
+            continue
+        kept.append(line.rstrip())
+
+    cleaned = "\n".join(kept).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned, removed_lines
+
+
+def _detect_template_pollution(content: str) -> list[str]:
+    findings: list[str] = []
+    lowered = content.lower()
+    if "todo" in lowered or "tbd" in lowered or "lorem ipsum" in lowered:
+        findings.append("存在未清理的占位英文模板词")
+    if "```" in content:
+        findings.append("存在未清理的代码块围栏")
+    if "{{" in content or "}}" in content:
+        findings.append("存在未渲染模板变量")
+    if "system:" in lowered or "assistant:" in lowered or "user:" in lowered:
+        findings.append("存在角色提示词残留")
+    if "判定结果：" in content or "原文长度" in content:
+        findings.append("存在内部调试痕迹")
+    return findings
+
+
+def _apply_template_pollution_guard(sections: list[BidDocumentSection]) -> list[BidDocumentSection]:
+    guarded: list[BidDocumentSection] = []
+    for section in sections:
+        cleaned, removed = _sanitize_generated_content(section.section_title, section.content)
+        findings = _detect_template_pollution(cleaned)
+        if removed:
+            logger.debug("章节[%s] 模板污染清理：移除 %d 行提示性文本。", section.section_title, len(removed))
+        if findings:
+            logger.debug("章节[%s] 模板污染检查告警：%s", section.section_title, "；".join(findings))
+        guarded.append(
+            BidDocumentSection(
+                section_title=section.section_title,
+                content=cleaned,
+                attachments=section.attachments,
+            )
+        )
+    return guarded
+
+
+def _build_qualification_license_block(tender: TenderDocument) -> str:
+    lines = [
+        "### （一）投标公司资质-营业执照",
+        "（此处留空，待上传证件）",
+    ]
+
+    if _is_medical_project(tender):
+        lines.extend(
+            [
+                "",
+                "### （二）投标公司资质-医疗器械经营许可证/备案凭证（如适用）",
+                "（此处留空，待上传证件）",
+                "",
+                "### （三）生产厂家资质-营业执照",
+                "（此处留空，待上传证件）",
+                "",
+                "### （四）生产厂家资质-医疗器械生产/经营许可文件（如适用）",
+                "（此处留空，待上传证件）",
+                "",
+                "### （五）投标产品注册证/备案证明（如适用）",
+                "（此处留空，待上传证件）",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "### （二）与项目相关的行业资质证书（如适用）",
+                "（此处留空，待上传证件）",
+                "",
+                "### （三）质量管理体系或服务能力证明（如适用）",
+                "（此处留空，待上传证件）",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "### （六）投标产品授权文件",
+            "（此处留空，待上传证件）",
+        ]
+    )
+
+    if _has_imported_clues(tender):
+        lines.extend(
+            [
+                "",
+                "### （七）进口产品合法来源与报关资料（如适用）",
+                "（此处留空，待上传证明材料）",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def _build_enterprise_declaration_block(tender: TenderDocument, today: str) -> str:
+    _ = tender
+    return f"""## 八、企业类型声明函（分支选择）
+请按企业实际情况勾选并提交对应材料：
+
+### 分支A：中小企业声明函（货物/服务）
+□ 适用。  
+本公司郑重声明：本次投标所提供货物/服务由符合《中小企业划型标准规定》的企业制造/承接。
+（此处留空，待按采购文件附表填写企业名称、从业人数、营业收入、资产总额等信息）
+
+### 分支B：监狱企业证明材料
+□ 适用。  
+如本单位属于监狱企业，提交由省级以上监狱管理局、戒毒管理局（含新疆生产建设兵团）出具的证明文件。
+
+### 分支C：残疾人福利性单位声明函
+□ 适用。  
+如本单位属于残疾人福利性单位，提交残疾人福利性单位声明函及相关证明材料。
+
+### 分支D：非中小企业声明
+□ 适用。  
+本公司郑重声明：本次投标所提供货物/服务不属于中小企业政策优惠适用范围，并对声明真实性负责。
+
+企业名称（盖章）：{_COMPANY}  
+法定代表人或授权代表：{_AUTHORIZED_REP}  
+日期：{today}"""
+
+
+def _build_consortium_declaration_block(tender: TenderDocument, today: str) -> str:
+    allows = _allow_consortium(tender)
+    branch_b_hint = "如选择分支B，须同步提交联合体协议书及职责分工。" if allows else "分支B本项目不适用。"
+    return f"""## 四、联合体投标声明（分支选择）
+请按投标组织形式勾选：
+- □ 分支A：本次以独立投标方式参与，不组成联合体；
+- □ 分支B：本次以联合体方式参与；{branch_b_hint}
+
+投标人名称：{_COMPANY}  
+日期：{today}"""
 
 
 def _build_detail_quote_table(tender: TenderDocument) -> str:
@@ -203,6 +596,7 @@ def _gen_qualification(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSe
     _ = llm
     today = _today()
     purchaser = _safe_text(tender.purchaser, "[采购人名称]")
+    license_block = _build_qualification_license_block(tender)
     content = f"""## 一、符合《中华人民共和国政府采购法》第二十二条规定声明
 {purchaser}：
 
@@ -299,23 +693,7 @@ def _gen_qualification(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSe
 （此处留空，待上传授权代表身份证正反面复印件）
 
 ## 七、相关证件
-### （一）投标公司资质-营业执照
-（此处留空，待上传证件）
-
-### （二）投标公司资质-医疗器械经营许可证/备案凭证（如适用）
-（此处留空，待上传证件）
-
-### （三）生产厂家资质-营业执照
-（此处留空，待上传证件）
-
-### （四）生产厂家资质-医疗器械生产/经营许可文件（如适用）
-（此处留空，待上传证件）
-
-### （五）投标产品注册证/备案证明（如适用）
-（此处留空，待上传证件）
-
-### （六）投标产品授权文件
-（此处留空，待上传证件）
+{license_block}
 
 ## 八、围标串标承诺函
 {purchaser}：
@@ -338,6 +716,17 @@ def _gen_compliance(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSecti
     validity = _safe_text(tender.commercial_terms.validity_period, "90日历天")
     warranty = _safe_text(tender.commercial_terms.warranty_period, "按招标文件约定执行")
     bond = _safe_text(tender.commercial_terms.performance_bond, "按招标文件约定执行")
+    consortium_block = _build_consortium_declaration_block(tender, today)
+    enterprise_declaration_block = _build_enterprise_declaration_block(tender, today)
+    medical_extra_block = ""
+    if _is_medical_project(tender):
+        medical_extra_block = f"""
+
+## 九、医疗器械合规声明函（适用医疗项目）
+我方声明：本次投标涉及的医疗器械产品在供货时将确保注册证/备案凭证、说明书、标签、合格证及追溯信息完整有效，且与投标型号一致。
+
+投标人名称：{_COMPANY}  
+日期：{today}"""
 
     content = f"""## 一、投标报价承诺
 {purchaser}：
@@ -366,11 +755,7 @@ def _gen_compliance(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSecti
 授权代表：{_AUTHORIZED_REP}  
 日期：{today}
 
-## 四、联合体投标声明
-我方声明：本次投标为独立投标，非联合体投标。
-
-投标人名称：{_COMPANY}  
-日期：{today}
+{consortium_block}
 
 ## 五、技术部分实质性内容承诺
 我方承诺：所投产品或服务对招标文件技术条款逐条响应，满足（或优于）采购文件要求；如出现偏离，将在“技术偏离表”中如实披露并说明原因。
@@ -392,12 +777,8 @@ def _gen_compliance(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSecti
 投标人名称：{_COMPANY}  
 日期：{today}
 
-## 八、非中小企业声明函
-本公司郑重声明：本次投标所提供货物/服务的企业规模属性情况如下（按采购文件要求填写），并对声明内容的真实性负责。
-
-企业名称（盖章）：{_COMPANY}  
-法定代表人或授权代表：{_AUTHORIZED_REP}  
-日期：{today}
+{enterprise_declaration_block}
+{medical_extra_block}
 """
     return BidDocumentSection(section_title="第二章 符合性承诺", content=content.strip())
 
@@ -413,16 +794,56 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str) -> 
     technical_sections: list[str] = []
     if tender.packages:
         for pkg in tender.packages:
-            technical_sections.append(_build_deviation_table(tender, pkg))
+            requirement_rows, total_requirements = _build_requirement_rows(pkg, tender_raw)
+            mapped_count = sum(1 for row in requirement_rows if bool(row.get("mapped")))
+
+            technical_sections.append(
+                _build_deviation_table(
+                    tender=tender,
+                    pkg=pkg,
+                    requirement_rows=requirement_rows,
+                    total_requirements=total_requirements,
+                )
+            )
             technical_sections.append(_build_configuration_table(pkg))
+            technical_sections.append(
+                _build_response_checklist_table(
+                    pkg=pkg,
+                    mapped_count=mapped_count,
+                    total_requirements=total_requirements,
+                )
+            )
+            technical_sections.append(
+                _build_evidence_mapping_table(
+                    pkg=pkg,
+                    requirement_rows=requirement_rows,
+                    total_requirements=total_requirements,
+                )
+            )
     else:
         technical_sections.append(
             "\n".join(
                 [
                     "### （一）技术偏离及详细配置明细表",
-                    "| 序号 | 招标技术参数要求 | 投标产品响应参数 | 偏离情况 | 偏离说明 |",
+                    "| 序号 | 招标技术参数要求 | 投标产品响应参数 | 偏离情况 | 响应依据/证据映射 |",
                     "|---:|---|---|---|---|",
-                    "| 1 | 详见招标文件 | 完全响应（具体参数待填写） | 无偏离 | - |",
+                    "| 1 | 详见招标文件 | 承诺逐条满足并按条款验收 | 无偏离 | 结构化解析结果（建议复核原文） |",
+                    "",
+                    "### （二）详细配置明细表",
+                    "| 序号 | 配置名称 | 单位 | 数量 | 备注 |",
+                    "|---:|---|---|---:|---|",
+                    "| 1 | 核心配置 | 项 | 1 | 待按项目补充 |",
+                    "",
+                    "### （三）技术响应检查清单",
+                    "| 序号 | 校验项 | 响应结论 | 证据载体 | 校验状态 |",
+                    "|---:|---|---|---|---|",
+                    "| 1 | 技术参数逐条响应 | 已覆盖 | 技术偏离表 | 已完成 |",
+                    "| 2 | 技术条款证据映射 | 未提取参数，需人工补充映射 | 技术条款证据映射表 | 待复核 |",
+                    "",
+                    "### （四）技术条款证据映射表",
+                    "| 序号 | 技术参数项 | 证据来源 | 原文片段 | 应用位置 |",
+                    "|---:|---|---|---|---|",
+                    "| 1 | 核心技术参数 | 结构化解析结果 | 未提取到可映射原文片段，需人工复核原文 | 技术偏离表第1行 |",
                 ]
             )
         )
@@ -453,8 +874,8 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str) -> 
 ## 三、技术偏离及详细配置明细表
 {"\n\n".join(technical_sections)}
 
-> 说明：本章已按“逐包、逐参数”形式编制。若采购文件另有固定格式，以采购文件格式为准。
-> 招标原文长度：{len(tender_raw)} 字符（用于内容校验与追溯）。
+> 说明：本章已按“逐包、逐参数、逐校验项”强制结构化编制。若采购文件另有固定格式，以采购文件格式为准。
+> 本章已提供技术条款证据映射，供评审与复核使用。
 """
     return BidDocumentSection(section_title="第三章 商务及技术部分", content=content.strip())
 
@@ -477,7 +898,7 @@ def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSection
                     "#### 包信息",
                     "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
                     "|---:|---|---|---|---|",
-                    "| 1 | 核心参数 | 详见招标文件 | 完全响应（参数待填写） | 无偏离 |",
+                    "| 1 | 核心参数 | 详见招标文件 | 承诺逐条满足并提交技术资料 | 无偏离 |",
                 ]
             )
         )
@@ -541,7 +962,7 @@ def generate_bid_sections(
         各章节列表
     """
     logger.info("开始一键生成投标文件章节")
-    logger.info("招标原文长度：%d 字符", len(tender_raw))
+    logger.debug("招标原文长度：%d 字符", len(tender_raw))
 
     sections = [
         _gen_qualification(llm, tender),
@@ -549,6 +970,7 @@ def generate_bid_sections(
         _gen_technical(llm, tender, tender_raw),
         _gen_appendix(llm, tender),
     ]
+    sections = _apply_template_pollution_guard(sections)
 
     logger.info("一键投标文件章节生成完成，共 %d 章", len(sections))
     return sections

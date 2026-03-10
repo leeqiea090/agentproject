@@ -28,6 +28,7 @@ from app.services.tender_parser import create_tender_parser
 from app.services.bid_generator import create_bid_generator, BidGenerationState
 from app.services.one_click_generator import generate_bid_sections
 from app.services.docx_builder import build_bid_docx
+from app.services.retriever import ingest_text_to_kb
 from app.services.tender_workflow import TenderWorkflowAgent
 from app.services.llm import get_chat_model
 
@@ -47,6 +48,7 @@ company_storage: dict[str, CompanyProfile] = {}
 product_storage: dict[str, ProductSpecification] = {}
 bid_storage: dict[str, dict] = {}
 workflow_storage: dict[str, dict] = {}
+workflow_kb_indexed_sources: set[str] = set()
 
 
 @router.post("/upload", response_model=TenderUploadResponse)
@@ -465,6 +467,29 @@ def _resolve_raw_text_for_tender(tender_info: dict, parser) -> str:
     return ""
 
 
+def _ensure_tender_indexed_for_workflow(tender_id: str, raw_text: str) -> str | None:
+    text = (raw_text or "").strip()
+    if not text:
+        return None
+
+    source = f"tender::{tender_id}"
+    if source in workflow_kb_indexed_sources:
+        return source
+
+    try:
+        ingest_text_to_kb(
+            text=text,
+            source=source,
+            metadata={"tender_id": tender_id, "doc_type": "tender_raw"},
+        )
+        workflow_kb_indexed_sources.add(source)
+        logger.info("已入库招标原文，source=%s", source)
+        return source
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("招标原文入库失败，不影响主流程：%s", exc)
+        return None
+
+
 @router.post("/workflow/run", response_model=TenderWorkflowResponse, summary="运行四阶段AI正式流程")
 async def run_tender_workflow(req: TenderWorkflowRequest):
     """
@@ -485,6 +510,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
     llm = get_chat_model()
     parser = create_tender_parser(llm)
     raw_text = _resolve_raw_text_for_tender(tender_info, parser)
+    kb_source = _ensure_tender_indexed_for_workflow(req.tender_id, raw_text)
 
     selected_packages = _resolve_selected_packages(tender_doc, req.selected_packages)
     company = company_storage.get(req.company_profile_id) if req.company_profile_id else None
@@ -501,7 +527,11 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
     workflow_agent = TenderWorkflowAgent(llm)
 
     # Step 1: 解析
-    analysis_dict = workflow_agent.step1_analyze_tender(tender_doc, raw_text)
+    analysis_dict = workflow_agent.step1_analyze_tender(
+        tender=tender_doc,
+        raw_text=raw_text,
+        kb_source=kb_source,
+    )
 
     # Step 2: 资料校验
     validation_dict = workflow_agent.step2_validate_materials(
@@ -519,6 +549,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
         "generated": False,
         "bid_id": "",
         "section_titles": [],
+        "citations": [],
         "download_url": "",
         "file_path": "",
         "integration_notes": "",
@@ -536,6 +567,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             selected_packages=selected_packages,
             company=company_for_docx,
             products=products,
+            kb_source=kb_source,
         )
 
         bid_id = f"WF_BID_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -560,6 +592,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             "generated": True,
             "bid_id": bid_id,
             "section_titles": [s.section_title for s in sections],
+            "citations": step3_dict.get("citations", []),
             "download_url": f"/api/tender/bid/download/{bid_id}?format=docx",
             "file_path": file_path,
             "integration_notes": step3_dict.get("integration_notes", ""),
@@ -573,6 +606,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             analysis_result=analysis_dict,
             validation_result=validation_dict,
             sections=sections,
+            generation_result=generation_dict,
         )
     else:
         review_dict = {
@@ -581,6 +615,14 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             "compliance_score": 0.0,
             "major_issues": ["第三步未执行，暂无可审核标书内容。"],
             "recommendations": ["先补齐第二步缺失项，然后重新运行流程。"],
+            "secondary_validation": {
+                "executed": False,
+                "overall_status": "需修订",
+                "check_items": [],
+                "issues": ["第三步未执行，无法完成二次校验。"],
+                "suggestions": ["先补齐第二步缺失项，再重新运行流程。"],
+                "summary": "二次校验未执行：缺少标书章节内容。",
+            },
             "conclusion": "当前流程已阻断，暂不具备提交条件。",
         }
 

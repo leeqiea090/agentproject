@@ -216,12 +216,21 @@ class WorkflowMaterialCheckItem(BaseModel):
     suggestion: str = Field(default="", description="补充建议")
 
 
+class WorkflowCitation(BaseModel):
+    """检索引用项"""
+    source: str = Field(default="unknown", description="引用来源标识")
+    chunk_index: int | None = Field(default=None, description="来源分块序号")
+    score: float | None = Field(default=None, description="检索相关度得分")
+    quote: str = Field(default="", description="引用片段摘要")
+
+
 class TenderWorkflowStep1Result(BaseModel):
     """第一步：招标解析输出"""
     key_information: dict[str, Any] = Field(default_factory=dict, description="关键项目信息")
     required_materials: list[str] = Field(default_factory=list, description="需准备资料清单")
     scoring_rules: list[str] = Field(default_factory=list, description="评分规则与权重")
     risk_alerts: list[str] = Field(default_factory=list, description="风险提示")
+    citations: list[WorkflowCitation] = Field(default_factory=list, description="检索引用列表")
     summary: str = Field(default="", description="步骤总结")
 
 
@@ -239,10 +248,28 @@ class TenderWorkflowStep3Result(BaseModel):
     generated: bool = Field(default=False, description="是否已生成标书")
     bid_id: str = Field(default="", description="标书ID")
     section_titles: list[str] = Field(default_factory=list, description="生成章节标题列表")
+    citations: list[WorkflowCitation] = Field(default_factory=list, description="整合阶段检索引用")
     download_url: str = Field(default="", description="下载地址")
     file_path: str = Field(default="", description="文件路径")
     integration_notes: str = Field(default="", description="整合Agent说明")
     summary: str = Field(default="", description="步骤总结")
+
+
+class WorkflowSecondaryCheckItem(BaseModel):
+    """二次校验明细项"""
+    name: str = Field(description="校验项名称")
+    status: str = Field(description="校验结果：通过/需修订")
+    detail: str = Field(default="", description="校验详情")
+
+
+class WorkflowSecondaryValidationResult(BaseModel):
+    """二次校验输出"""
+    executed: bool = Field(default=True, description="是否执行了二次校验")
+    overall_status: str = Field(default="通过", description="二次校验总体状态：通过/需修订")
+    check_items: list[WorkflowSecondaryCheckItem] = Field(default_factory=list, description="二次校验明细")
+    issues: list[str] = Field(default_factory=list, description="二次校验发现的问题")
+    suggestions: list[str] = Field(default_factory=list, description="二次校验修订建议")
+    summary: str = Field(default="", description="二次校验总结")
 
 
 class TenderWorkflowStep4Result(BaseModel):
@@ -252,6 +279,10 @@ class TenderWorkflowStep4Result(BaseModel):
     compliance_score: float = Field(default=0.0, description="合规评分（0~100）")
     major_issues: list[str] = Field(default_factory=list, description="主要问题")
     recommendations: list[str] = Field(default_factory=list, description="修订建议")
+    secondary_validation: WorkflowSecondaryValidationResult = Field(
+        default_factory=WorkflowSecondaryValidationResult,
+        description="二次校验结果（规则校验）",
+    )
     conclusion: str = Field(default="", description="审核结论")
 
 

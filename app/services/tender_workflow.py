@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,11 +11,24 @@ from langchain_openai import ChatOpenAI
 
 from app.schemas import BidDocumentSection, CompanyProfile, ProductSpecification, TenderDocument
 from app.services.one_click_generator import generate_bid_sections
+from app.services.retriever import search_knowledge
 
 logger = logging.getLogger(__name__)
 
 _MAX_RAW_PROMPT_CHARS = 24000
 _MAX_REVIEW_SECTION_CHARS = 1800
+_MAX_CITATION_QUOTE_CHARS = 220
+_DEFAULT_CITATION_TOP_K = 6
+_PLACEHOLDER_PATTERNS = (
+    "[待填写]",
+    "[投标方公司名称]",
+    "[法定代表人]",
+    "[授权代表]",
+    "[联系电话]",
+    "[联系地址]",
+    "（此处留空",
+    "(此处留空",
+)
 
 
 def _llm_call(llm: ChatOpenAI, system_prompt: str, user_prompt: str) -> str:
@@ -47,6 +61,260 @@ def _ensure_str_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _to_int_or_none(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prepare_citations(hits: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    seen: set[tuple[str, int | None, str]] = set()
+
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+
+        metadata = hit.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        source = str(metadata.get("source") or "unknown").strip() or "unknown"
+        chunk_index = _to_int_or_none(metadata.get("chunk_index"))
+
+        score: float | None = None
+        raw_score = hit.get("score")
+        if raw_score is not None:
+            try:
+                score = round(float(raw_score), 6)
+            except (TypeError, ValueError):
+                score = None
+
+        quote = str(hit.get("text") or "").replace("\n", " ").strip()
+        if len(quote) > _MAX_CITATION_QUOTE_CHARS:
+            quote = quote[:_MAX_CITATION_QUOTE_CHARS] + "..."
+        if not quote:
+            continue
+
+        dedup_key = (source, chunk_index, quote)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        citations.append(
+            {
+                "source": source,
+                "chunk_index": chunk_index,
+                "score": score,
+                "quote": quote,
+            }
+        )
+
+        if len(citations) >= max(1, limit):
+            break
+
+    return citations
+
+
+def _retrieve_citations(query: str, preferred_source: str | None = None, top_k: int = _DEFAULT_CITATION_TOP_K) -> list[dict[str, Any]]:
+    if not query.strip():
+        return []
+
+    try:
+        hits = search_knowledge(query=query, top_k=max(1, top_k))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("检索引用失败，query=%s, error=%s", query, exc)
+        return []
+
+    if not hits:
+        return []
+
+    if preferred_source:
+        preferred_hits: list[dict[str, Any]] = []
+        for hit in hits:
+            metadata = hit.get("metadata", {})
+            source = str(metadata.get("source", "")).strip()
+            if source == preferred_source:
+                preferred_hits.append(hit)
+        if preferred_hits:
+            hits = preferred_hits
+
+    return _prepare_citations(hits, limit=top_k)
+
+
+def _material_coverage(required_materials: list[str], sections: list[BidDocumentSection]) -> tuple[int, int, list[str]]:
+    if not required_materials:
+        return 0, 0, []
+
+    full_text = "\n".join(sec.content for sec in sections)
+    full_text = full_text.lower()
+
+    matched = 0
+    missing: list[str] = []
+    for item in required_materials:
+        normalized = item.strip()
+        if not normalized:
+            continue
+        tokens = [tok for tok in re.split(r"[，,、；;（）()\\s/]+", normalized) if len(tok) >= 2]
+        if not tokens:
+            tokens = [normalized]
+        if any(token.lower() in full_text for token in tokens[:4]):
+            matched += 1
+        else:
+            missing.append(normalized)
+
+    total = len([x for x in required_materials if x.strip()])
+    return matched, total, missing
+
+
+def _second_validation(
+    analysis_result: dict[str, Any],
+    validation_result: dict[str, Any],
+    sections: list[BidDocumentSection],
+    generation_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    check_items: list[dict[str, str]] = []
+    issues: list[str] = []
+    suggestions: list[str] = []
+
+    validation_status = str(validation_result.get("overall_status", "")).strip()
+    material_pass = validation_status == "通过"
+    check_items.append(
+        {
+            "name": "资料完整性复核",
+            "status": "通过" if material_pass else "需修订",
+            "detail": f"第二步校验状态：{validation_status or '未提供'}",
+        }
+    )
+    if not material_pass:
+        issues.append("资料校验未通过，存在缺失项或待确认项。")
+        suggestions.append("先完成缺失资料补齐，再重新运行流程。")
+
+    section_titles = [sec.section_title for sec in sections]
+    required_chapters = ("第一章", "第二章", "第三章", "第四章")
+    missing_chapters = [
+        chapter
+        for chapter in required_chapters
+        if not any(chapter in title for title in section_titles)
+    ]
+    chapter_pass = not missing_chapters
+    chapter_detail = "章节完整" if chapter_pass else f"缺少章节：{', '.join(missing_chapters)}"
+    check_items.append(
+        {
+            "name": "分章节完整性",
+            "status": "通过" if chapter_pass else "需修订",
+            "detail": chapter_detail,
+        }
+    )
+    if not chapter_pass:
+        issues.append(f"分章节生成不完整：{', '.join(missing_chapters)}。")
+        suggestions.append("补齐缺失章节，确保投标文件结构完整。")
+
+    placeholder_total = 0
+    placeholder_section_details: list[str] = []
+    for sec in sections:
+        count = 0
+        for pattern in _PLACEHOLDER_PATTERNS:
+            count += sec.content.count(pattern)
+        if count > 0:
+            placeholder_total += count
+            placeholder_section_details.append(f"{sec.section_title}({count}处)")
+
+    placeholder_pass = placeholder_total == 0
+    placeholder_detail = (
+        "未发现占位符。"
+        if placeholder_pass
+        else f"发现 {placeholder_total} 处占位符：{'；'.join(placeholder_section_details)}"
+    )
+    check_items.append(
+        {
+            "name": "占位符与留空项检查",
+            "status": "通过" if placeholder_pass else "需修订",
+            "detail": placeholder_detail,
+        }
+    )
+    if not placeholder_pass:
+        issues.append("标书中仍存在未替换占位符或留空说明。")
+        suggestions.append("逐章替换 [待填写]/公司信息占位符，并补齐附件留空项。")
+
+    evidence_mapping_pass = any("技术条款证据映射表" in sec.content for sec in sections)
+    check_items.append(
+        {
+            "name": "技术条款证据映射",
+            "status": "通过" if evidence_mapping_pass else "需修订",
+            "detail": "已检测到技术条款证据映射表" if evidence_mapping_pass else "未检测到“技术条款证据映射表”章节内容",
+        }
+    )
+    if not evidence_mapping_pass:
+        issues.append("技术章节缺少证据映射表，参数与原文无法一一追溯。")
+        suggestions.append("在第三章补充“技术条款证据映射表”，逐条关联招标原文片段。")
+
+    required_materials = _ensure_str_list(analysis_result.get("required_materials"))
+    matched, total, missing = _material_coverage(required_materials, sections)
+    coverage_ratio = 1.0 if total == 0 else matched / total
+    coverage_pass = coverage_ratio >= 0.6
+    check_items.append(
+        {
+            "name": "资料覆盖率检查",
+            "status": "通过" if coverage_pass else "需修订",
+            "detail": f"覆盖 {matched}/{total} 项（覆盖率 {coverage_ratio:.0%}）",
+        }
+    )
+    if not coverage_pass and total > 0:
+        preview_missing = "；".join(missing[:5]) if missing else "多项资料未覆盖"
+        issues.append(f"资料覆盖不足：{preview_missing}。")
+        suggestions.append("根据“需准备资料清单”补齐对应章节内容与附件说明。")
+
+    analysis_citations = analysis_result.get("citations")
+    if not isinstance(analysis_citations, list):
+        analysis_citations = []
+    generation_citations: list[dict[str, Any]] = []
+    if generation_result and isinstance(generation_result.get("citations"), list):
+        generation_citations = generation_result["citations"]
+
+    citation_count = len(analysis_citations) + len(generation_citations)
+    citation_pass = citation_count > 0
+    check_items.append(
+        {
+            "name": "检索引用可追溯性",
+            "status": "通过" if citation_pass else "需修订",
+            "detail": f"可追溯引用条数：{citation_count}",
+        }
+    )
+    if not citation_pass:
+        issues.append("未生成检索引用，难以追溯结论依据。")
+        suggestions.append("先将招标原文入库并重跑流程，确保输出包含 citations。")
+
+    overall_status = "通过" if not issues else "需修订"
+    if not suggestions and overall_status == "通过":
+        suggestions = ["可进入人工终审与盖章提交流程。"]
+
+    summary = (
+        f"二次校验完成：{len(check_items)} 项，"
+        f"{'全部通过' if overall_status == '通过' else f'发现 {len(issues)} 项问题'}。"
+    )
+
+    return {
+        "executed": True,
+        "overall_status": overall_status,
+        "check_items": check_items,
+        "issues": issues,
+        "suggestions": suggestions,
+        "summary": summary,
+    }
+
+
+def _append_unique(base: list[str], extras: list[str]) -> list[str]:
+    for item in extras:
+        normalized = str(item).strip()
+        if normalized and normalized not in base:
+            base.append(normalized)
+    return base
 
 
 def _format_eval_rules(evaluation_criteria: dict[str, Any]) -> list[str]:
@@ -119,6 +387,7 @@ def _default_step1_result(tender: TenderDocument) -> dict[str, Any]:
             "请确保技术参数响应表逐条对应，不要遗漏关键参数。",
             "证照与授权文件需在有效期内，且与投标产品一致。",
         ],
+        "citations": [],
         "summary": "已完成招标关键信息、资料清单和评分规则提取。",
     }
 
@@ -139,6 +408,14 @@ def _default_step4_if_blocked(reason: str) -> dict[str, Any]:
         "compliance_score": 0.0,
         "major_issues": [reason],
         "recommendations": ["先补齐资料缺口，再重新运行第三步与第四步。"],
+        "secondary_validation": {
+            "executed": False,
+            "overall_status": "需修订",
+            "check_items": [],
+            "issues": [reason],
+            "suggestions": ["先补齐资料缺口后再执行二次校验。"],
+            "summary": "未执行二次校验：缺少可审核标书内容。",
+        },
         "conclusion": "当前不具备提交条件。",
     }
 
@@ -149,10 +426,31 @@ class TenderWorkflowAgent:
     def __init__(self, llm: ChatOpenAI):
         self.llm = llm
 
-    def step1_analyze_tender(self, tender: TenderDocument, raw_text: str) -> dict[str, Any]:
+    def step1_analyze_tender(
+        self,
+        tender: TenderDocument,
+        raw_text: str,
+        kb_source: str | None = None,
+    ) -> dict[str, Any]:
         """第一步：解析招标文件并提炼关键结果。"""
         fallback = _default_step1_result(tender)
         raw_excerpt = (raw_text or "")[:_MAX_RAW_PROMPT_CHARS]
+        package_names = "、".join(pkg.item_name for pkg in tender.packages if pkg.item_name.strip())
+        citation_query = "；".join(
+            part
+            for part in [
+                tender.project_name.strip(),
+                tender.project_number.strip(),
+                package_names,
+                "评分标准 资格要求 商务条款 资料清单",
+            ]
+            if part
+        )
+        citations = _retrieve_citations(
+            query=citation_query,
+            preferred_source=kb_source,
+            top_k=_DEFAULT_CITATION_TOP_K,
+        )
         system_prompt = (
             "你是“招标解析Agent”。你的任务是根据招标文件结构化信息和原文，"
             "输出投标准备所需的关键信息。只允许输出JSON。"
@@ -197,12 +495,15 @@ class TenderWorkflowAgent:
             risk_alerts = fallback["risk_alerts"]
         if not summary:
             summary = fallback["summary"]
+        if citations:
+            summary = f"{summary}（已附 {len(citations)} 条检索引用）"
 
         return {
             "key_information": key_info,
             "required_materials": required_materials,
             "scoring_rules": scoring_rules,
             "risk_alerts": risk_alerts,
+            "citations": citations,
             "summary": summary,
         }
 
@@ -374,6 +675,7 @@ class TenderWorkflowAgent:
         selected_packages: list[str],
         company: CompanyProfile,
         products: dict[str, ProductSpecification],
+        kb_source: str | None = None,
     ) -> tuple[dict[str, Any], list[BidDocumentSection]]:
         """第三步：整合生成标书内容。"""
         package_ids = {pkg.package_id for pkg in tender.packages}
@@ -397,6 +699,30 @@ class TenderWorkflowAgent:
                     }
                 )
 
+        citation_query = "；".join(
+            [
+                filtered_tender.project_name,
+                filtered_tender.project_number,
+                " ".join(pkg.item_name for pkg in filtered_packages if pkg.item_name.strip()),
+                "技术参数 交货期 投标报价 评分点",
+            ]
+        ).strip("；")
+        citations = _retrieve_citations(
+            query=citation_query,
+            preferred_source=kb_source,
+            top_k=_DEFAULT_CITATION_TOP_K,
+        )
+        citation_prompt_block = ""
+        if citations:
+            citation_lines: list[str] = []
+            for idx, item in enumerate(citations, start=1):
+                src = item.get("source", "unknown")
+                chunk = item.get("chunk_index")
+                chunk_text = "?" if chunk is None else str(chunk)
+                quote = item.get("quote", "")
+                citation_lines.append(f"{idx}. [{src}#{chunk_text}] {quote}")
+            citation_prompt_block = "检索引用（用于追溯）：\n" + "\n".join(citation_lines) + "\n"
+
         system_prompt = (
             "你是“标书整合Agent”。请基于项目与已上传资料给出整合策略。"
             "输出纯文本，控制在200~400字。"
@@ -406,6 +732,7 @@ class TenderWorkflowAgent:
             f"包号：{target_packages}\n"
             f"企业：{company.name}\n"
             f"产品摘要：{json.dumps(product_summary, ensure_ascii=False)}\n"
+            f"{citation_prompt_block}"
             "请给出：章节重点、资料落位建议、常见格式风险。"
         )
 
@@ -414,6 +741,7 @@ class TenderWorkflowAgent:
 
         return {
             "generated": True,
+            "citations": citations,
             "integration_notes": integration_notes,
             "summary": f"已完成标书整合，共生成 {len(sections)} 个章节。",
         }, sections
@@ -424,6 +752,7 @@ class TenderWorkflowAgent:
         analysis_result: dict[str, Any],
         validation_result: dict[str, Any],
         sections: list[BidDocumentSection],
+        generation_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """第四步：审核标书并输出结论。"""
         if not sections:
@@ -503,11 +832,29 @@ class TenderWorkflowAgent:
         if not conclusion:
             conclusion = fallback["conclusion"]
 
+        second_validation = _second_validation(
+            analysis_result=analysis_result,
+            validation_result=validation_result,
+            sections=sections,
+            generation_result=generation_result,
+        )
+
         if validation_result.get("overall_status") == "需补充":
             ready = False
             risk_level = "high"
             if "资料仍有缺失项，当前不建议提交。" not in major_issues:
                 major_issues.insert(0, "资料仍有缺失项，当前不建议提交。")
+
+        if second_validation.get("overall_status") == "需修订":
+            ready = False
+            risk_level = "high"
+            score = min(score, 75.0)
+            major_issues = _append_unique(major_issues, second_validation.get("issues", []))
+            recommendations = _append_unique(recommendations, second_validation.get("suggestions", []))
+            if "二次校验未通过，请先修订后再提交。" not in major_issues:
+                major_issues.insert(0, "二次校验未通过，请先修订后再提交。")
+            if "二次校验发现问题，需完成修订后再提交。" not in conclusion:
+                conclusion = f"{conclusion} 二次校验发现问题，需完成修订后再提交。"
 
         return {
             "ready_for_submission": ready,
@@ -515,5 +862,6 @@ class TenderWorkflowAgent:
             "compliance_score": score,
             "major_issues": major_issues,
             "recommendations": recommendations,
+            "secondary_validation": second_validation,
             "conclusion": conclusion,
         }
