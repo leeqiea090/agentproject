@@ -3045,6 +3045,18 @@ def _find_table_column(cells: list[str], keywords: tuple[str, ...]) -> int:
     return -1
 
 
+def _extract_heading_package_id(heading: str) -> str | None:
+    normalized_heading = _safe_text(heading)
+    if not normalized_heading:
+        return None
+
+    for pattern in (r"第\s*(\d+)\s*包", r"包\s*(\d+)(?:\s*[:：）)])?"):
+        match = re.search(pattern, normalized_heading)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _resolve_row_package_id(
     current_package_id: str | None,
     cells: list[str],
@@ -3093,9 +3105,9 @@ def _materialize_section_content(
         stripped = line.strip()
         if stripped.startswith("#"):
             current_heading = re.sub(r"^#+\s*", "", stripped)
-            pkg_match = re.search(r"第\s*(\d+)\s*包|包\s*(\d+)", current_heading)
-            if pkg_match:
-                current_package_id = pkg_match.group(1) or pkg_match.group(2)
+            heading_package_id = _extract_heading_package_id(current_heading)
+            if heading_package_id:
+                current_package_id = heading_package_id
             current_table_mode = ""
             current_table_header = []
         elif stripped.startswith("|"):
@@ -3471,11 +3483,22 @@ def _sanitize_for_external_delivery(
         current_pkg = ""
         for line in cleaned.content.splitlines():
             stripped = line.strip()
-            if "技术偏离" in stripped and stripped.startswith("#"):
-                pkg_match = re.search(r"[包第]\s*(\d+)\s*[包）)]", stripped)
-                current_pkg = pkg_match.group(1) if pkg_match else "?"
-                deviation_rows_by_pkg.setdefault(current_pkg, 0)
+            if stripped.startswith("#"):
+                heading_pkg = _extract_heading_package_id(stripped)
+                if heading_pkg:
+                    current_pkg = heading_pkg
+                if "技术偏离" in stripped:
+                    current_pkg = current_pkg or "?"
+                    deviation_rows_by_pkg.setdefault(current_pkg or "?", 0)
+                continue
             elif stripped.startswith("|") and not stripped.startswith("|---") and not stripped.startswith("| 序号") and not stripped.startswith("| 条款"):
+                if not current_pkg or current_pkg == "?":
+                    clause_cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+                    if clause_cells:
+                        clause_match = re.match(r"^(\d+)\.", clause_cells[0])
+                        if clause_match:
+                            current_pkg = clause_match.group(1)
+                            deviation_rows_by_pkg.setdefault(current_pkg, 0)
                 if current_pkg:
                     deviation_rows_by_pkg[current_pkg] = deviation_rows_by_pkg.get(current_pkg, 0) + 1
 
@@ -3527,10 +3550,14 @@ def _sanitize_for_external_delivery(
         current_pkg = ""
         for line in cleaned.content.splitlines():
             stripped = line.strip()
-            if any(marker in stripped for marker in ("详细配置明细表", "配置清单")) and stripped.startswith("#"):
-                pkg_match = re.search(r"[包第]\s*(\d+)\s*[包）)]", stripped)
-                current_pkg = pkg_match.group(1) if pkg_match else "?"
-                config_rows_by_pkg.setdefault(current_pkg, 0)
+            if stripped.startswith("#"):
+                heading_pkg = _extract_heading_package_id(stripped)
+                if heading_pkg:
+                    current_pkg = heading_pkg
+                if any(marker in stripped for marker in ("详细配置明细表", "配置清单")):
+                    current_pkg = current_pkg or "?"
+                    config_rows_by_pkg.setdefault(current_pkg or "?", 0)
+                continue
             elif stripped.startswith("|") and not stripped.startswith("|---") and not stripped.startswith("| 序号"):
                 if current_pkg and "|" in stripped:
                     cells = [c.strip() for c in stripped.split("|")]
@@ -4865,6 +4892,103 @@ def _second_validation(
     if not template_pass:
         issues.append(f"模板段落重复率 {template_ratio:.0%}，文档内容过于模板化。")
         suggestions.append("切换到 Rich draft mode，引用本包真实参数、配置和证据替换模板句。")
+
+    # ── 底稿完整性检查（5项新增）──
+
+    # (6) 条款数检查 — 若某包 < 5 条 requirement 则告警
+    if tender is not None:
+        thin_packages: list[str] = []
+        pkg_req_counts: dict[str, int] = {}
+        for pkg in tender.packages:
+            req_count = len(pkg.technical_requirements or {})
+            pkg_req_counts[pkg.package_id] = req_count
+            if req_count < 5:
+                thin_packages.append(f"包{pkg.package_id}({req_count}条)")
+        clause_count_pass = not thin_packages
+        check_items.append({
+            "name": "条款数充足性",
+            "status": "通过" if clause_count_pass else "需修订",
+            "detail": (
+                "各包条款数均≥5条"
+                if clause_count_pass
+                else f"条款数不足：{'；'.join(thin_packages)}"
+            ),
+        })
+        if not clause_count_pass:
+            issues.append(f"以下包条款数过少（<5条）：{'；'.join(thin_packages)}。底稿拆条不够细。")
+            suggestions.append("对条款数不足的包，从招标原文中补充提取技术参数，确保每包至少5条原子级条款。")
+
+        # (7) 包间粒度均匀性 — 最多包/最少包差异超过3倍则告警
+        if len(pkg_req_counts) >= 2:
+            max_count = max(pkg_req_counts.values())
+            min_count = max(1, min(pkg_req_counts.values()))
+            granularity_ratio = max_count / min_count
+            granularity_pass = granularity_ratio <= 3.0
+            check_items.append({
+                "name": "包间粒度均匀性",
+                "status": "通过" if granularity_pass else "需修订",
+                "detail": (
+                    f"包间条款数比 {granularity_ratio:.1f}:1（"
+                    + "、".join(f"包{k}:{v}条" for k, v in sorted(pkg_req_counts.items()))
+                    + "）"
+                ),
+            })
+            if not granularity_pass:
+                issues.append(f"包间拆分粒度不均匀（比值{granularity_ratio:.1f}:1），部分包过粗。")
+                suggestions.append("对条款数较少的包从原文重新提取，使各包粒度差距不超过3倍。")
+
+    # (8) 配置表薄弱检查 — 配置项 < 3 则告警（仅在有明确包号时检查）
+    meaningful_config_pkgs = {k: v for k, v in config_rows_per_pkg.items() if k != "?"}
+    thin_config_packages: list[str] = []
+    for pkg_id, count in meaningful_config_pkgs.items():
+        if count < 3:
+            thin_config_packages.append(f"包{pkg_id}({count}项)")
+    if meaningful_config_pkgs:
+        config_thin_pass = not thin_config_packages
+        check_items.append({
+            "name": "配置表薄弱检查",
+            "status": "通过" if config_thin_pass else "需修订",
+            "detail": (
+                "各包配置项均≥3项"
+                if config_thin_pass
+                else f"配置表过薄：{'；'.join(thin_config_packages)}"
+            ),
+        })
+        if not config_thin_pass:
+            issues.append(f"配置表过薄：{'；'.join(thin_config_packages)}，缺少核心模块/附件/软件等分类。")
+            suggestions.append("补充配置表至少覆盖6大类别：核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料。")
+
+    # (9) 原文片段污染检查 — 证据映射表中的片段含评分/商务等非技术内容
+    polluted_snippets: list[str] = []
+    _SNIPPET_POLLUTION_KEYWORDS = ("评分标准", "评分办法", "商务条款", "合同条款",
+                                    "违约责任", "质疑", "投诉", "付款方式")
+    for sec in sections:
+        if "证据映射" not in sec.section_title and "证据映射" not in sec.content[:200]:
+            continue
+        for line in sec.content.splitlines():
+            if not line.strip().startswith("|"):
+                continue
+            for kw in _SNIPPET_POLLUTION_KEYWORDS:
+                if kw in line:
+                    cells = [c.strip() for c in line.split("|") if c.strip()]
+                    param_name = cells[1] if len(cells) > 1 else "未知"
+                    polluted_snippets.append(f"{param_name}含'{kw}'")
+                    break
+    snippet_purity_pass = not polluted_snippets
+    check_items.append({
+        "name": "原文片段污染检查",
+        "status": "通过" if snippet_purity_pass else "需修订",
+        "detail": (
+            "证据映射表原文片段未发现非技术内容污染"
+            if snippet_purity_pass
+            else f"原文片段污染：{'；'.join(polluted_snippets[:5])}"
+        ),
+    })
+    if not polluted_snippets:
+        pass
+    else:
+        issues.append(f"证据映射表中有{len(polluted_snippets)}处原文片段混入了非技术内容。")
+        suggestions.append("回到原文切割层，确保证据片段只包含技术参数相关内容，过滤评分/商务/合同条款。")
 
     overall_status = "通过" if not issues else "需修订"
     if not suggestions and overall_status == "通过":

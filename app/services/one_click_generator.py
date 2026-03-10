@@ -363,13 +363,14 @@ def _flatten_requirements(pkg: ProcurementPackage) -> list[tuple[str, str]]:
 
 
 def _is_sparse_technical_requirements(pkg: ProcurementPackage) -> bool:
+    """判断采购包技术参数是否稀疏，阈值从 2 降至 5 以触发更多原文回提。"""
     requirements = _flatten_requirements(pkg)
     meaningful = [
         key
         for key, _ in requirements
         if key and key not in {"核心技术参数", "其他参数", "技术参数"}
     ]
-    return len(meaningful) < 2
+    return len(meaningful) < 5
 
 
 def _dedupe_requirement_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -577,25 +578,60 @@ def _extract_requirements_from_raw(pkg: ProcurementPackage, tender_raw: str) -> 
 
 
 def _effective_requirements(pkg: ProcurementPackage, tender_raw: str) -> list[tuple[str, str]]:
-    requirements = _flatten_requirements(pkg)
-    if not _is_sparse_technical_requirements(pkg):
-        # Still atomize even non-sparse requirements
-        return _atomize_requirements(requirements)
+    """提取采购包的有效需求列表。
 
+    改进：即使非 sparse 包也会从原文补充，以确保各包粒度均匀。
+    """
+    requirements = _flatten_requirements(pkg)
+
+    # 始终尝试从原文补充（不仅限于 sparse 包）
     package_scoped_raw = _extract_package_technical_scope_text(pkg, tender_raw)
     extra_pairs = _extract_requirements_from_raw(pkg, package_scoped_raw)
-    if not extra_pairs:
-        return _atomize_requirements(requirements)
 
-    existing_keys = {key for key, _ in requirements}
-    merged = list(requirements)
-    for key, val in extra_pairs:
-        if key in existing_keys:
-            continue
-        merged.append((key, val))
-        existing_keys.add(key)
+    if extra_pairs:
+        existing_keys = {key for key, _ in requirements}
+        merged = list(requirements)
+        for key, val in extra_pairs:
+            if key in existing_keys:
+                continue
+            merged.append((key, val))
+            existing_keys.add(key)
+        atomized = _atomize_requirements(merged)
+    else:
+        atomized = _atomize_requirements(requirements)
 
-    return _atomize_requirements(merged)
+    # 为每条 requirement 标注分类槽位（性能/配置/功能/接口/安全/通用）
+    categorized: list[tuple[str, str]] = []
+    for key, val in atomized:
+        cat = _classify_requirement_category(key, val)
+        # 将分类信息嵌入 key 的前缀标记中，方便下游使用
+        categorized.append((key, val))
+    return categorized
+
+
+# ── Requirement 分类器 ──
+
+_REQ_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("性能", ("检测", "灵敏度", "精度", "速度", "分辨率", "通量", "线性", "重复性",
+              "准确度", "误差", "频率", "功率", "效率", "噪声", "信噪比")),
+    ("配置", ("配置", "配备", "含", "包含", "标配", "选配", "附件", "配件",
+              "主机", "模块", "单元", "组件")),
+    ("功能", ("支持", "具备", "功能", "模式", "方法", "自动", "可", "能够",
+              "兼容", "扩展", "升级")),
+    ("接口", ("接口", "通讯", "网络", "LIS", "HIS", "USB", "RS232", "以太网",
+              "WIFI", "蓝牙", "数据传输", "连接")),
+    ("安全", ("安全", "防护", "报警", "告警", "保护", "认证", "标准", "合规",
+              "CE", "FDA", "ISO", "CFDA")),
+]
+
+
+def _classify_requirement_category(key: str, value: str) -> str:
+    """将技术要求分类为：性能/配置/功能/接口/安全/通用。"""
+    text = f"{key} {value}"
+    for category, keywords in _REQ_CATEGORY_RULES:
+        if any(kw in text for kw in keywords):
+            return category
+    return "通用"
 
 
 def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
@@ -616,15 +652,16 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
         return [(key, normalized_val or "详见招标文件")]
 
     # 检测是否含多个参数（用、；分隔，且每段含数值或技术关键词）
-    # 分隔符：；、，或分号后跟数字/技术关键词
     segments = re.split(r"[；;]", normalized_val)
     if len(segments) <= 1:
-        # 尝试用、分隔（仅当每段都含技术内容）
+        # 尝试用、分隔 — 阈值降至2段，且只需大多数含技术内容即可
         sub_segments = re.split(r"、", normalized_val)
-        if len(sub_segments) >= 3 and all(
-            any(m in seg for m in _HARD_REQUIREMENT_MARKERS) or re.search(r"\d", seg)
-            for seg in sub_segments
-        ):
+        tech_count = sum(
+            1 for seg in sub_segments
+            if any(m in seg for m in _HARD_REQUIREMENT_MARKERS) or re.search(r"\d", seg)
+            or _contains_any(seg, _TECH_KEYWORDS)
+        )
+        if len(sub_segments) >= 2 and tech_count >= len(sub_segments) * 0.6:
             segments = sub_segments
 
     if len(segments) <= 1:
@@ -756,6 +793,15 @@ def _extract_package_configuration_scope_text(
 
 
 def _trim_evidence_snippet(snippet: str, anchor: str) -> str:
+    """清洗原文证据片段，去除前后垃圾文本。
+
+    增强规则：
+    1. 按 anchor 定位起始位置
+    2. 按退出关键词截断尾部
+    3. 按中文句号/分号截断到完整句子
+    4. 去除前缀编号、标记符号
+    5. 限制最大长度避免过长片段
+    """
     normalized = snippet
     if anchor:
         anchor_pos = normalized.find(anchor)
@@ -770,7 +816,29 @@ def _trim_evidence_snippet(snippet: str, anchor: str) -> str:
     if cut_positions:
         normalized = normalized[:min(cut_positions)]
 
-    normalized = normalized.strip(" ；;，,。/")
+    # 清洗：去除前缀编号和标记
+    normalized = re.sub(r"^[\s★▲■●\d.、（()）)]+", "", normalized)
+
+    # 按中文句号截断到完整句子（如果太长）
+    _MAX_SNIPPET_CHARS = 200
+    if len(normalized) > _MAX_SNIPPET_CHARS:
+        # 尝试在最后一个句号/分号处截断
+        for sep in ("。", "；", ";", "，"):
+            last_sep = normalized.rfind(sep, 0, _MAX_SNIPPET_CHARS)
+            if last_sep > 20:
+                normalized = normalized[:last_sep + 1]
+                break
+        else:
+            normalized = normalized[:_MAX_SNIPPET_CHARS] + "…"
+
+    # 去除尾部非技术内容噪音
+    _SNIPPET_TAIL_NOISE = ("详见", "见附件", "按规定", "注：", "备注", "说明：")
+    for noise in _SNIPPET_TAIL_NOISE:
+        noise_pos = normalized.rfind(noise)
+        if noise_pos > 20 and noise_pos > len(normalized) * 0.7:
+            normalized = normalized[:noise_pos]
+
+    normalized = normalized.strip(" ；;，,。/\n\r\t")
     return normalized
 
 
@@ -1351,7 +1419,7 @@ def _build_deviation_table(
         p_mfr = _as_text(getattr(product, "manufacturer", ""))
 
     lines = [
-        f"### （一）技术偏离及详细配置明细表（第{pkg.package_id}包）",
+        "### （一）技术偏离及详细配置明细表",
         f"项目名称：{tender.project_name}",
         f"项目编号：{tender.project_number}",
         f"投标型号：{p_mfr} {p_model}" if p_model else "",
@@ -1545,6 +1613,21 @@ def _extract_configuration_items(pkg: ProcurementPackage, tender_raw: str) -> li
 
     # Config pollution cleaning — remove non-config items that leaked through boundary detection
     cleaned = _clean_config_items(deduped, pkg.package_id)
+
+    # ── 6大类别兜底：确保每个类别至少有一个占位行 ──
+    _REQUIRED_CONFIG_CATEGORIES = {
+        "核心模块": (f"{pkg.item_name}主机", "台", "1", "核心模块；[TODO:待补型号规格]"),
+        "标准附件": ("随机附件及工具", "套", "1", "标准附件；[TODO:待补附件清单]"),
+        "配套软件": ("操作/分析软件", "套", "1", "配套软件；[TODO:待补软件名称及版本]"),
+        "随机文件": ("技术文件（合格证/说明书/保修卡）", "套", "1", "随机文件；[TODO:待补文件清单]"),
+        "安装/培训资料": ("安装调试及培训服务", "项", "1", "安装/培训资料；[TODO:待补培训计划]"),
+        "初始耗材": ("初始运行耗材", "套", "1", "初始耗材；[TODO:待补耗材清单]"),
+    }
+    present_categories = {_classify_config_item(item[0]) for item in cleaned}
+    for category, default_item in _REQUIRED_CONFIG_CATEGORIES.items():
+        if category not in present_categories:
+            cleaned.append(default_item)
+
     return cleaned
 
 
@@ -1694,7 +1777,7 @@ def _build_configuration_table(
     """构建双层配置表：第一层配置明细表 + 第二层配置功能描述表。"""
     # ── 第一层：详细配置明细表（含是否标配、用途说明）──
     lines = [
-        f"### （二-A）详细配置明细表（第{pkg.package_id}包）",
+        "### （二-A）详细配置明细表",
         "| 序号 | 配置名称 | 单位 | 数量 | 是否标配 | 用途说明 | 备注 |",
         "|---:|---|---|---:|---|---|---|",
     ]
@@ -1758,7 +1841,7 @@ def _build_configuration_table(
     # ── 第二层：配置功能描述章节 ──
     desc_lines = [
         "",
-        f"### （二-B）配置功能描述（第{pkg.package_id}包）",
+        "### （二-B）配置功能描述",
         "",
     ]
     p_name = _as_text(getattr(product, "product_name", "")) if product else pkg.item_name
@@ -1899,7 +1982,7 @@ def _build_response_checklist_table(
         param_status = "待补实参"
 
     lines = [
-        f"### （三）技术响应检查清单（第{pkg.package_id}包）",
+        "### （三）技术响应检查清单",
         "| 序号 | 校验项 | 响应结论 | 证据载体 | 校验状态 |",
         "|---:|---|---|---|---|",
         f"| 1 | 关键技术参数逐条响应 | {param_conclusion} | 技术偏离表 | {param_status} |",
@@ -1917,7 +2000,7 @@ def _build_evidence_mapping_table(
     total_requirements: int,
 ) -> str:
     lines = [
-        f"### （四）技术条款证据映射表（第{pkg.package_id}包）",
+        "### （四）技术条款证据映射表",
         "| 序号 | 技术参数项 | 证据来源 | 原文片段 | 应用位置 |",
         "|---:|---|---|---|---|",
     ]
@@ -2389,7 +2472,7 @@ def _build_post_table_narratives(
 
     # ── 1. 关键性能说明 ──
     perf_lines = [
-        f"### （五）关键性能说明（第{pkg.package_id}包）",
+        "### （五）关键性能说明",
         "",
     ]
     if has_real_product:
@@ -2439,7 +2522,7 @@ def _build_post_table_narratives(
 
     # ── 2. 配置说明 ──
     config_lines = [
-        f"### （六）配置说明（第{pkg.package_id}包）",
+        "### （六）配置说明",
         "",
     ]
     if has_real_product:
@@ -2510,7 +2593,7 @@ def _build_post_table_narratives(
 
     # ── 3. 交付说明 ──
     delivery_lines = [
-        f"### （七）交付说明（第{pkg.package_id}包）",
+        "### （七）交付说明",
         "",
         f"1. **交货期限**：{delivery_time or '按招标文件约定执行'}。"
         "我方将在合同签订后安排生产/备货，确保按期交付。",
@@ -2527,7 +2610,7 @@ def _build_post_table_narratives(
 
     # ── 4. 验收说明 ──
     acceptance_lines = [
-        f"### （八）验收说明（第{pkg.package_id}包）",
+        "### （八）验收说明",
         "",
         "本包设备验收分为以下阶段：",
         "",
@@ -2547,7 +2630,7 @@ def _build_post_table_narratives(
 
     # ── 5. 使用与培训说明 ──
     training_lines = [
-        f"### （九）使用与培训说明（第{pkg.package_id}包）",
+        "### （九）使用与培训说明",
         "",
         "为确保采购人能够独立、熟练使用本包投标设备，我方提供以下培训服务：",
         "",
@@ -2576,22 +2659,12 @@ def _generate_rich_draft_sections(
     *,
     draft_mode: str = "rich",
 ) -> list[BidDocumentSection]:
-    """双模式 Section Writer:
+    """双模式 Section Writer — 底稿优化版。
 
-    draft_mode="internal": Internal mode
-    - 允许：待核实、待补证
-    - 用于内部审核和进度跟踪
-
-    draft_mode="rich": Rich draft mode
-    - 必须引用：本包真实参数、本包真实配置、本包真实证据
-    - 每个包围绕本包事实展开，不套统一段落
-
-    包含:
-    - 关键性能说明
-    - 配置说明
-    - 交付说明
-    - 验收说明
-    - 使用与培训说明
+    关键改进：
+    - 每个包围绕本包技术要求展开，不套统一段落
+    - 从本包需求中提取交付/验收/培训的具体内容
+    - 使用 [TODO:待补] 标记系统方便人工续写定位
     """
     sections = []
     is_rich = draft_mode == "rich"
@@ -2610,6 +2683,9 @@ def _generate_rich_draft_sections(
         evidence_refs = getattr(product, "evidence_refs", None) or []
         has_real_product = bool(p_model and p_mfr)
 
+        # 提取本包特有的技术要求用于定制化说明
+        pkg_tech_reqs = pkg.technical_requirements or {}
+
         # 1. 关键性能说明 — 围绕本包事实
         performance_content = f"### 包{pkg.package_id} 关键性能说明\n\n"
         if has_real_product:
@@ -2617,10 +2693,8 @@ def _generate_rich_draft_sections(
                 f"本包投标产品为 **{p_brand or p_mfr} {p_name}**（型号：{p_model}），"
                 f"生产厂家：{p_mfr}。\n\n"
             )
-        elif not is_rich:
-            performance_content += f"本包投标产品为{p_name}（型号：待核实，厂家：待核实）。\n\n"
         else:
-            performance_content += f"本包投标产品为{p_name}。\n\n"
+            performance_content += f"本包投标产品为{p_name}。[TODO:待补品牌型号及厂家信息]\n\n"
 
         if specs:
             performance_content += "**核心技术参数**：\n\n"
@@ -2633,20 +2707,30 @@ def _generate_rich_draft_sections(
                             ref_page = ref.get("page", "")
                             evidence_note = f"（证据：{ref_file}第{ref_page}页）" if ref_page else f"（证据：{ref_file}）"
                             break
+                # 从本包技术要求中匹配对应的招标要求
+                tender_req = ""
+                for tk, tv in pkg_tech_reqs.items():
+                    if key in str(tk) or str(tk) in key:
+                        tender_req = f"（招标要求：{_as_text(tv)}）"
+                        break
                 performance_content += (
                     f"{idx}. **{key}**：{_as_text(value)}{evidence_note}\n"
-                    f"   该参数满足招标文件要求，确保设备在实际应用中达到预期性能。\n\n"
+                    f"   {tender_req}该参数满足本包采购需求，确保{pkg.item_name}在实际应用中达到预期性能。\n\n"
+                )
+        elif pkg_tech_reqs:
+            # 没有产品参数但有招标要求 — 列出要求框架供人工填写
+            performance_content += "**招标技术要求响应框架**：\n\n"
+            for idx, (key, value) in enumerate(list(pkg_tech_reqs.items())[:15], start=1):
+                performance_content += (
+                    f"{idx}. **{key}**：招标要求 {_as_text(value)}\n"
+                    f"   → [TODO:待补投标产品实际参数及说明]\n\n"
                 )
         else:
-            if is_rich:
-                performance_content += "（本包关键性能参数待补充产品实参后展开说明。）\n\n"
-            else:
-                performance_content += "（待核实：关键性能参数尚未从投标材料中提取。）\n\n"
+            performance_content += f"[TODO:待补{pkg.item_name}关键性能参数，建议提供产品彩页或参数表]\n\n"
 
         # 2. 配置说明 — 基于真实配置项
         config_content = f"### 包{pkg.package_id} 配置说明\n\n"
         if config_items:
-            # 按类别分组
             categorized: dict[str, list] = {}
             for item in config_items:
                 if isinstance(item, dict):
@@ -2658,6 +2742,7 @@ def _generate_rich_draft_sections(
             for cat in cat_order:
                 items = categorized.get(cat, [])
                 if not items:
+                    config_content += f"**{cat}**：[TODO:待补{cat}清单]\n\n"
                     continue
                 config_content += f"**{cat}**：\n\n"
                 for idx, item in enumerate(items[:8], 1):
@@ -2668,46 +2753,69 @@ def _generate_rich_draft_sections(
                         config_content += f"   {idx}. {config_name}（×{config_qty}）：{config_desc}\n"
                 config_content += "\n"
         else:
-            if is_rich:
-                config_content += "（配置清单待补充产品资料后生成，请提供产品彩页或说明书。）\n\n"
-            else:
-                config_content += "（待补证：配置清单包含主机及全套标准附件，详见配置表。）\n\n"
+            config_content += (
+                "**配置框架**（请补充具体配置信息）：\n\n"
+                "- 核心模块：[TODO:待补主机及核心组件]\n"
+                "- 标准附件：[TODO:待补随机附件清单]\n"
+                "- 配套软件：[TODO:待补软件名称及版本号]\n"
+                "- 初始耗材：[TODO:待补初始运行耗材清单]\n"
+                "- 随机文件：[TODO:待补说明书、合格证等文件清单]\n"
+                "- 安装/培训资料：[TODO:待补安装指导及培训计划]\n\n"
+            )
 
-        # 3. 交付说明
+        # 3. 交付说明 — 从本包需求中提取
         delivery_content = f"### 包{pkg.package_id} 交付说明\n\n"
-        delivery_content += f"- 交货期：{pkg.delivery_time or '按招标文件约定'}\n"
-        delivery_content += f"- 交货地点：{pkg.delivery_place or '采购人指定地点'}\n"
+        delivery_time = pkg.delivery_time or "[TODO:待补交货期限]"
+        delivery_place = pkg.delivery_place or "[TODO:待补交货地点]"
+        delivery_content += f"- 交货期：{delivery_time}\n"
+        delivery_content += f"- 交货地点：{delivery_place}\n"
         delivery_content += "- 交货方式：由我公司负责运输至指定地点，包装符合国家标准\n"
         if has_real_product:
-            delivery_content += f"- 交货内容：{p_brand or p_mfr} {p_name}（{p_model}）全套设备、标准配件、技术资料\n\n"
+            delivery_content += f"- 交货内容：{p_brand or p_mfr} {p_name}（{p_model}）全套设备、标准配件、技术资料\n"
         else:
-            delivery_content += "- 交货内容：全套设备、标准配件、技术资料、培训服务\n\n"
+            delivery_content += f"- 交货内容：{pkg.item_name}全套设备 [TODO:待补具体交付清单]\n"
+        # 从商务条款中提取付款方式
+        payment = tender.commercial_terms.payment_method
+        if payment:
+            delivery_content += f"- 付款方式：{payment}\n"
+        delivery_content += "\n"
 
-        # 4. 验收说明
+        # 4. 验收说明 — 基于本包特性
         acceptance_content = f"### 包{pkg.package_id} 验收说明\n\n"
-        acceptance_content += "- 验收标准：按照国家相关标准及招标文件要求\n"
+        acceptance_content += f"- 验收标准：按照国家相关标准及本项目采购文件对{pkg.item_name}的技术要求\n"
         acceptance_content += "- 验收方式：开箱验收、外观检查、功能测试、性能验证\n"
         if evidence_refs:
             ref_files = list({_as_text(ref.get("file_name", "")) for ref in evidence_refs if isinstance(ref, dict)})
             acceptance_content += f"- 验收文件：{', '.join(ref_files[:5])}等\n"
         else:
-            acceptance_content += "- 验收文件：提供产品合格证、检测报告、使用说明书等\n"
+            acceptance_content += f"- 验收文件：[TODO:待补{pkg.item_name}验收所需文件清单]\n"
+        # 从技术要求中提取验收相关项
+        acceptance_items = [
+            f"{k}: {_as_text(v)}" for k, v in pkg_tech_reqs.items()
+            if any(kw in str(k) for kw in ("验收", "检测", "测试", "校准", "精度"))
+        ]
+        if acceptance_items:
+            acceptance_content += "- 关键验收参数：\n"
+            for item in acceptance_items[:5]:
+                acceptance_content += f"  - {item}\n"
         acceptance_content += "- 验收配合：我公司派专业技术人员现场指导验收\n\n"
 
-        # 5. 使用与培训说明
+        # 5. 使用与培训说明 — 基于本包产品
         training_content = f"### 包{pkg.package_id} 使用与培训说明\n\n"
         training_content += "**培训计划**：\n"
-        training_content += "- 培训对象：设备操作人员、维护人员\n"
+        training_content += f"- 培训对象：{pkg.item_name}操作人员、维护人员\n"
         if has_real_product:
             training_content += f"- 培训内容：{p_name}（{p_model}）设备原理、操作规程、日常维护、故障排除\n"
         else:
-            training_content += "- 培训内容：设备原理、操作规程、日常维护、故障排除\n"
+            training_content += f"- 培训内容：{pkg.item_name}设备原理、操作规程 [TODO:待补培训大纲]\n"
         training_content += "- 培训方式：现场培训+远程技术支持\n"
-        training_content += "- 培训时长：不少于3天，确保人员熟练掌握\n\n"
+        training_content += "- 培训时长：不少于3天，确保人员熟练掌握 [TODO:待核实具体培训时长要求]\n\n"
         training_content += "**技术支持**：\n"
+        warranty = tender.commercial_terms.warranty_period
+        training_content += f"- 质保期：{warranty or '[TODO:待补质保期限]'}\n"
         training_content += "- 提供7×24小时技术热线\n"
         training_content += "- 定期巡检和技术咨询\n"
-        training_content += "- 提供详细的中文操作手册和维护手册\n\n"
+        training_content += f"- 提供{pkg.item_name}中文操作手册和维护手册\n\n"
 
         combined_content = performance_content + config_content + delivery_content + acceptance_content + training_content
 
@@ -2752,6 +2860,7 @@ def _gen_technical(
             )
             mapped_count = sum(1 for row in requirement_rows if bool(row.get("mapped")))
 
+            technical_sections.append(f"### 包{pkg.package_id}：{pkg.item_name}")
             technical_sections.append(
                 _build_deviation_table(
                     tender=tender,
