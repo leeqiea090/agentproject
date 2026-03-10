@@ -22,7 +22,6 @@ def split_text(
         chunk = cleaned[start:end]
 
         if end < total_length:
-            # Prefer natural boundaries to reduce semantic breaks.
             boundary = max(chunk.rfind("\n\n"), chunk.rfind("\n"), chunk.rfind("。"))
             if boundary > int(chunk_size * 0.6):
                 end = start + boundary + 1

@@ -158,6 +158,57 @@
       transition: width .4s ease;
     }
 
+    .live-progress {
+      width: 100%;
+      display: none;
+      border-radius: 12px;
+      padding: 14px 16px;
+      background: #f8fbff;
+      border: 1px solid #dbeafe;
+    }
+    .live-progress-title {
+      font-size: 0.78rem;
+      color: #64748b;
+      margin-bottom: 8px;
+    }
+    .live-progress-current {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #1e3a8a;
+      margin-bottom: 8px;
+    }
+    .live-progress-sub {
+      font-size: 0.82rem;
+      color: #64748b;
+      margin-bottom: 12px;
+    }
+    .step-track {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .step-pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      background: #e2e8f0;
+      color: #64748b;
+      transition: all .2s ease;
+    }
+    .step-pill.active {
+      background: #dbeafe;
+      color: #1d4ed8;
+      font-weight: 700;
+    }
+    .step-pill.done {
+      background: #dcfce7;
+      color: #047857;
+    }
+    .step-pill.error {
+      background: #fee2e2;
+      color: #b91c1c;
+    }
+
     .footer {
       margin-top: 28px;
       font-size: 0.75rem;
@@ -190,6 +241,14 @@
     <!-- 状态消息 -->
     <div class="status-box" id="statusBox"></div>
 
+    <!-- 实时进度 -->
+    <div class="live-progress" id="liveProgress">
+      <div class="live-progress-title">当前进度</div>
+      <div class="live-progress-current" id="liveProgressCurrent">正在准备开始…</div>
+      <div class="live-progress-sub" id="liveProgressSub">系统会持续刷新当前处理阶段。</div>
+      <div class="step-track" id="stepTrack"></div>
+    </div>
+
     <!-- 生成按钮 -->
     <button class="btn btn-primary" id="btnGenerate" onclick="startGenerate()">
       ✨ 一键生成投标文件
@@ -215,6 +274,25 @@ const progressWrap = document.getElementById('progressWrap');
 const progressBar  = document.getElementById('progressBar');
 const downloadLink = document.getElementById('downloadLink');
 const uploadZone   = document.getElementById('uploadZone');
+const liveProgress = document.getElementById('liveProgress');
+const liveProgressCurrent = document.getElementById('liveProgressCurrent');
+const liveProgressSub = document.getElementById('liveProgressSub');
+const stepTrack = document.getElementById('stepTrack');
+
+const STEP_ORDER = ['queued', 'extracting', 'parsing', 'structuring', 'generating', 'building', 'completed'];
+const STEP_LABELS = {
+  queued: '准备开始',
+  extracting: '文档解析',
+  parsing: '需求抽取',
+  structuring: '条款整理',
+  generating: '章节生成',
+  building: '输出文档',
+  completed: '处理完成',
+  error: '处理失败',
+};
+
+let pollTimer = null;
+let activeJobId = '';
 
 // 拖拽高亮
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
@@ -229,9 +307,7 @@ fileInput.addEventListener('change', updateFileName);
 function updateFileName() {
   const f = fileInput.files[0];
   fileChosen.textContent = f ? `已选择：${f.name}` : '';
-  // 重置下载按钮
-  downloadLink.style.display = 'none';
-  setStatus('', '');
+  resetRunState();
 }
 
 function setStatus(type, msg) {
@@ -246,22 +322,35 @@ function setProgress(pct) {
   progressBar.style.width = pct + '%';
 }
 
-// 模拟进度（因为后端是同步阻塞，用伪进度动画给用户反馈）
-let progressTimer = null;
-function startFakeProgress() {
-  let pct = 0;
-  progressTimer = setInterval(() => {
-    // 缓慢爬升到 90%，剩余留给真实完成
-    if (pct < 90) {
-      pct += (90 - pct) * 0.035;
-      setProgress(pct);
-    }
-  }, 400);
+function resetRunState() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  activeJobId = '';
+  downloadLink.style.display = 'none';
+  setStatus('', '');
+  setProgress(0);
+  liveProgress.style.display = 'none';
+  stepTrack.innerHTML = '';
 }
-function stopFakeProgress(success) {
-  clearInterval(progressTimer);
-  setProgress(success ? 100 : 0);
-  if (!success) progressWrap.style.display = 'none';
+
+function renderStepTrack(stepCode, status) {
+  const activeIndex = STEP_ORDER.indexOf(stepCode);
+  stepTrack.innerHTML = STEP_ORDER.map((code, index) => {
+    let cls = 'step-pill';
+    if (status === 'error' && index === Math.max(activeIndex, 0)) cls += ' error';
+    else if (status === 'completed' || (activeIndex > -1 && index < activeIndex)) cls += ' done';
+    else if (code === stepCode) cls += ' active';
+    return `<span class="${cls}">${STEP_LABELS[code]}</span>`;
+  }).join('');
+}
+
+function updateLiveProgress(data) {
+  liveProgress.style.display = 'block';
+  liveProgressCurrent.textContent = data.message || '正在处理中…';
+  liveProgressSub.textContent = `当前阶段：${data.step_label || STEP_LABELS[data.step_code] || '处理中'} · 任务ID：${data.job_id}`;
+  renderStepTrack(data.step_code, data.status);
 }
 
 async function startGenerate() {
@@ -279,15 +368,14 @@ async function startGenerate() {
 
   // UI 状态
   btnGen.disabled = true;
-  downloadLink.style.display = 'none';
-  setStatus('info', '<span class="spinner"></span>正在解析招标文件并生成投标文件，请耐心等待（约 1–3 分钟）…');
-  startFakeProgress();
+  resetRunState();
+  setStatus('info', '<span class="spinner"></span>正在创建生成任务…');
 
   try {
     const formData = new FormData();
     formData.append('file', f);
 
-    const resp = await fetch('/api/tender/one-click', {
+    const resp = await fetch('/api/tender/one-click/start', {
       method: 'POST',
       body: formData,
     });
@@ -297,29 +385,68 @@ async function startGenerate() {
       throw new Error(err.detail || resp.statusText);
     }
 
-    // 将返回的 blob 转为本地链接
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-
-    // 从 Content-Disposition 或自动命名文件
-    let filename = '投标文件.docx';
-    const cd = resp.headers.get('Content-Disposition') || '';
-    const m = cd.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)/i);
-    if (m) filename = decodeURIComponent(m[1].trim());
-
-    stopFakeProgress(true);
-    setStatus('ok', '✅ 投标文件生成成功！点击下方按钮下载。');
-
-    downloadLink.href = url;
-    downloadLink.download = filename;
-    downloadLink.style.display = 'block';
+    const job = await resp.json();
+    activeJobId = job.job_id;
+    setProgress(job.progress || 1);
+    updateLiveProgress(job);
+    setStatus('info', `<span class="spinner"></span>${job.message || '正在处理中…'}`);
+    await pollJobStatus(activeJobId);
+    pollTimer = setInterval(() => {
+      pollJobStatus(activeJobId).catch(handlePollingError);
+    }, 1200);
 
   } catch (err) {
-    stopFakeProgress(false);
     setStatus('error', `❌ 生成失败：${err.message}`);
-  } finally {
     btnGen.disabled = false;
+  } finally {
+    if (!activeJobId) btnGen.disabled = false;
   }
+}
+
+function handlePollingError(err) {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  setStatus('error', `❌ 状态刷新失败：${err.message}`);
+  btnGen.disabled = false;
+}
+
+async function pollJobStatus(jobId) {
+  const resp = await fetch(`/api/tender/one-click/status/${jobId}`, { cache: 'no-store' });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || resp.statusText);
+  }
+
+  const data = await resp.json();
+  setProgress(data.progress || 0);
+  updateLiveProgress(data);
+
+  if (data.status === 'completed') {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    setStatus('ok', '✅ 投标文件生成成功！点击下方按钮下载。');
+    downloadLink.href = data.download_url;
+    downloadLink.download = data.filename || '投标文件.docx';
+    downloadLink.style.display = 'block';
+    btnGen.disabled = false;
+    return;
+  }
+
+  if (data.status === 'error') {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    setStatus('error', `❌ ${data.error || data.message || '生成失败'}`);
+    btnGen.disabled = false;
+    return;
+  }
+
+  setStatus('info', `<span class="spinner"></span>${data.message || '正在处理中…'}`);
 }
 </script>
 </body>

@@ -13,6 +13,8 @@ from app.schemas import BidDocumentSection, ProcurementPackage, TenderDocument
 logger = logging.getLogger(__name__)
 
 _MAX_TECH_ROWS_PER_PACKAGE = 80
+_PACKAGE_SCOPE_BEFORE_LINES = 8
+_PACKAGE_SCOPE_AFTER_LINES = 120
 
 _COMPANY = "[投标方公司名称]"
 _LEGAL_REP = "[法定代表人]"
@@ -49,6 +51,71 @@ _TEMPLATE_POLLUTION_INFIX_KEYWORDS = (
     "trace:",
 )
 _HARD_REQUIREMENT_MARKERS = ("≥", "≤", ">=", "<=", "不低于", "不少于", "不高于", "不大于", "至少")
+_TECH_SECTION_HINTS = ("技术参数", "技术要求", "采购需求", "性能要求", "配置要求", "参数要求", "技术指标")
+_GENERIC_TECH_KEYS = ("技术参数", "主要技术参数", "性能要求", "技术指标", "参数要求", "核心技术参数")
+_CONFIG_REQUIREMENT_KEYS = ("设备配置", "配置与配件", "设备配置与配件", "配置清单", "主要配置", "标准配置")
+_TECH_KEYWORDS = (
+    "激光", "荧光", "通道", "散射", "检测", "样本", "进样", "上样", "分析", "分辨率",
+    "灵敏度", "软件", "模块", "配置", "波长", "流速", "补偿", "绝对计数", "体积",
+    "温度", "接口", "兼容", "系统", "主机", "试剂", "耗材", "数据", "报表",
+)
+_NON_TECH_KEYS = (
+    "项目名称", "项目编号", "采购人", "采购单位", "代理机构", "采购方式", "预算", "最高限价",
+    "联系人", "联系电话", "地址", "日期", "时间", "供应商", "投标人", "评分", "资格",
+    "商务", "售后", "付款", "质保", "交货地点", "交货时间", "开标", "响应文件",
+)
+_NON_TECH_CONTENT_HINTS = (
+    "投标文件格式特殊要求", "投标文件格式", "响应文件格式", "正本与副本", "A4纸", "装订成册",
+    "签字确认", "科室负责人", "目录编制", "页码要求",
+)
+_TECH_EXIT_HINTS = (
+    "评分标准", "评分办法", "评分", "分值", "得分", "扣分", "商务部分", "商务条款",
+    "合同条款", "付款方式", "包装运输方案", "配货单", "设备配置及参数清单", "耗材名称",
+    "投标人须知", "乙方承诺", "甲方", "乙方", "争议的解决", "违约责任", "中国政府采购网",
+    "技术部分 /", "技术部分", "投标文件格式特殊要求", "投标文件格式", "响应文件格式",
+    "正本与副本", "装订成册",
+)
+_TECH_KEY_EXCLUDES = {
+    "乙方承诺",
+    "甲方承诺",
+    "序号",
+    "耗材名称",
+    "设备配置及参数清单",
+    "包装运输方案",
+}
+_REGION_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("北京市", ("北京",)),
+    ("天津市", ("天津",)),
+    ("上海市", ("上海",)),
+    ("重庆市", ("重庆",)),
+    ("河北省", ("河北", "石家庄")),
+    ("山西省", ("山西", "太原")),
+    ("辽宁省", ("辽宁", "沈阳")),
+    ("吉林省", ("吉林", "长春")),
+    ("黑龙江省", ("黑龙江", "哈尔滨")),
+    ("江苏省", ("江苏", "南京")),
+    ("浙江省", ("浙江", "杭州")),
+    ("安徽省", ("安徽", "合肥")),
+    ("福建省", ("福建", "福州", "厦门")),
+    ("江西省", ("江西", "南昌")),
+    ("山东省", ("山东", "济南", "青岛")),
+    ("河南省", ("河南", "郑州")),
+    ("湖北省", ("湖北", "武汉")),
+    ("湖南省", ("湖南", "长沙")),
+    ("广东省", ("广东", "广州", "深圳")),
+    ("海南省", ("海南", "海口")),
+    ("四川省", ("四川", "成都")),
+    ("贵州省", ("贵州", "贵阳")),
+    ("云南省", ("云南", "昆明")),
+    ("陕西省", ("陕西", "西安")),
+    ("甘肃省", ("甘肃", "兰州")),
+    ("青海省", ("青海", "西宁")),
+    ("内蒙古自治区", ("内蒙古", "呼和浩特")),
+    ("广西壮族自治区", ("广西", "南宁")),
+    ("西藏自治区", ("西藏", "拉萨")),
+    ("宁夏回族自治区", ("宁夏", "银川")),
+    ("新疆维吾尔自治区", ("新疆", "乌鲁木齐")),
+)
 
 
 def _today() -> str:
@@ -60,6 +127,19 @@ def _safe_text(text: str | None, default: str = "详见招标文件") -> str:
         return default
     stripped = str(text).strip()
     return stripped or default
+
+
+def _normalize_commitment_term(text: str | None, default: str = "按招标文件及合同约定执行") -> str:
+    normalized = _safe_text(text, default)
+    if not normalized:
+        return default
+    if any(token in normalized for token in ("[待填写]", "____", "＿", "乙方", "甲方在支付", "本合同项下")):
+        return default
+    if re.search(r"为\s{2,}[年月日天个]", normalized):
+        return default
+    if len(normalized) > 48 and any(token in normalized for token in ("合同", "发票", "违约")):
+        return default
+    return normalized
 
 
 def _as_text(value: Any) -> str:
@@ -90,6 +170,8 @@ def _tender_context_text(tender: TenderDocument) -> str:
         [
             tender.project_name,
             tender.project_number,
+            tender.purchaser,
+            tender.agency,
             tender.procurement_type,
             tender.special_requirements,
             eval_items,
@@ -101,6 +183,10 @@ def _tender_context_text(tender: TenderDocument) -> str:
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+def _contains_non_technical_content(text: str) -> bool:
+    return _contains_any(text, _NON_TECH_KEYS) or _contains_any(text, _NON_TECH_CONTENT_HINTS)
 
 
 def _is_medical_project(tender: TenderDocument) -> bool:
@@ -131,13 +217,62 @@ def _has_imported_clues(tender: TenderDocument) -> bool:
     return _contains_any(context, ("进口", "原装", "境外"))
 
 
+def _detect_procurement_region(tender: TenderDocument) -> str:
+    preferred_contexts = [
+        _safe_text(tender.purchaser, ""),
+        _safe_text(tender.project_name, ""),
+    ]
+    fallback_contexts = [
+        _safe_text(tender.special_requirements, ""),
+        _safe_text(tender.agency, ""),
+    ]
+
+    for context in [*preferred_contexts, *fallback_contexts]:
+        for region, keywords in _REGION_KEYWORDS:
+            if _contains_any(context, keywords):
+                return region
+    return ""
+
+
+def _supplier_commitment_title(tender: TenderDocument) -> str:
+    region = _detect_procurement_region(tender)
+    return f"{region}政府采购供应商资格承诺函" if region else "政府采购供应商资格承诺函"
+
+
 def _package_scope(tender: TenderDocument) -> str:
     if not tender.packages:
         return "全部包"
     return "、".join(f"包{pkg.package_id}" for pkg in tender.packages)
 
 
-def _package_detail_lines(tender: TenderDocument) -> str:
+def _infer_package_quantity(pkg: ProcurementPackage, tender_raw: str) -> int:
+    package_scope = _extract_package_scope_text(pkg, tender_raw)
+    search_texts = [package_scope, tender_raw]
+    patterns = (
+        r"设备总台数\s*[:：;；]?\s*(\d+)\s*台",
+        r"采购数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)?",
+        r"数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)",
+    )
+
+    for text in search_texts:
+        if not text.strip():
+            continue
+        for raw_line in text.splitlines():
+            normalized = _normalize_requirement_line(raw_line)
+            if not normalized:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, normalized)
+                if not match:
+                    continue
+                quantity = int(match.group(1))
+                if quantity > 0:
+                    return quantity
+
+    return max(1, pkg.quantity)
+
+
+def _package_detail_lines(tender: TenderDocument, tender_raw: str) -> str:
     if not tender.packages:
         return "- 包信息：详见招标文件。"
 
@@ -145,14 +280,15 @@ def _package_detail_lines(tender: TenderDocument) -> str:
     for pkg in tender.packages:
         delivery = _safe_text(pkg.delivery_time, "按招标文件约定")
         place = _safe_text(pkg.delivery_place, "采购人指定地点")
+        quantity = _infer_package_quantity(pkg, tender_raw)
         lines.append(
-            f"- 包{pkg.package_id}：{pkg.item_name}；数量：{pkg.quantity}；预算：{_fmt_money(pkg.budget)}元；"
+            f"- 包{pkg.package_id}：{pkg.item_name}；数量：{quantity}；预算：{_fmt_money(pkg.budget)}元；"
             f"交货期：{delivery}；交货地点：{place}"
         )
     return "\n".join(lines)
 
 
-def _quote_overview_table(tender: TenderDocument) -> str:
+def _quote_overview_table(tender: TenderDocument, tender_raw: str) -> str:
     headers = [
         "| 序号(包号) | 货物名称 | 数量 | 预算金额(元) | 投标报价(元) | 交货期 |",
         "|---|---|---:|---:|---:|---|",
@@ -163,8 +299,9 @@ def _quote_overview_table(tender: TenderDocument) -> str:
         total_budget = 0.0
         for idx, pkg in enumerate(tender.packages, start=1):
             total_budget += pkg.budget
+            quantity = _infer_package_quantity(pkg, tender_raw)
             rows.append(
-                f"| {idx}（{pkg.package_id}） | {pkg.item_name} | {pkg.quantity} | "
+                f"| {idx}（{pkg.package_id}） | {pkg.item_name} | {quantity} | "
                 f"{_fmt_money(pkg.budget)} | [待填写] | {_safe_text(pkg.delivery_time, '按招标文件约定')} |"
             )
         rows.append(
@@ -181,8 +318,205 @@ def _flatten_requirements(pkg: ProcurementPackage) -> list[tuple[str, str]]:
     for key, value in pkg.technical_requirements.items():
         k = _safe_text(str(key), "技术参数")
         v = _safe_text(_as_text(value), "详见招标文件")
-        items.append((k, v))
-    return items
+        items.extend(_expand_requirement_entry(k, v))
+    return _dedupe_requirement_pairs(items)
+
+
+def _is_sparse_technical_requirements(pkg: ProcurementPackage) -> bool:
+    requirements = _flatten_requirements(pkg)
+    meaningful = [
+        key
+        for key, _ in requirements
+        if key and key not in {"核心技术参数", "其他参数", "技术参数"}
+    ]
+    return len(meaningful) < 2
+
+
+def _dedupe_requirement_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    deduped: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for key, val in pairs:
+        dedup_key = f"{key}::{val}"
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        deduped.append((key, val))
+    return deduped
+
+
+def _expand_requirement_entry(key: str, value: str) -> list[tuple[str, str]]:
+    if not any(marker in key for marker in _GENERIC_TECH_KEYS):
+        return [(key, value)]
+    if "；" not in value and ";" not in value:
+        return [(key, value)]
+
+    expanded: list[tuple[str, str]] = []
+    for fragment in re.split(r"[；;]", value):
+        pair = _extract_requirement_pair(fragment)
+        if pair:
+            expanded.append(pair)
+
+    if len(expanded) < 2:
+        return [(key, value)]
+    return _dedupe_requirement_pairs(expanded)
+
+
+def _normalize_requirement_line(line: str) -> str:
+    normalized = line.replace("\t", " ").replace("\r", " ").strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"^[★▲■●]\s*", "", normalized)
+    normalized = re.sub(r"^\d+(?:\.\d+){0,5}\s*", "", normalized)
+    normalized = re.sub(r"^[（(]?\d+[）)]\s*", "", normalized)
+    normalized = re.sub(r"^\d+(?=[A-Za-z\u4e00-\u9fa5])", "", normalized)
+    normalized = re.sub(r"^[（(]?[一二三四五六七八九十\d]+[）).、]\s*", "", normalized)
+    normalized = re.sub(r"^(?:[-*•]|第\d+[项条]?)\s*", "", normalized)
+    return normalized.strip(" ;；")
+
+
+def _is_outline_token(text: str) -> bool:
+    return bool(re.fullmatch(r"[（(]?\d+(?:\.\d+){0,5}[）)]?", text.strip()))
+
+
+def _looks_like_technical_requirement(text: str) -> bool:
+    if any(marker in text for marker in _HARD_REQUIREMENT_MARKERS):
+        return True
+    if _contains_any(text, _TECH_KEYWORDS):
+        return True
+    return bool(re.search(r"\d", text) and _contains_any(text, ("支持", "具备", "配置", "提供", "采用", "满足")))
+
+
+def _extract_requirement_pair(fragment: str) -> tuple[str, str] | None:
+    normalized = _normalize_requirement_line(fragment)
+    normalized = re.sub(r"^(?:采购需求|技术参数|技术要求|性能要求|配置要求|参数要求|技术指标)[:：]?\s*", "", normalized)
+    if len(normalized) < 4 or len(normalized) > 120:
+        return None
+    if _contains_non_technical_content(normalized):
+        return None
+    if not _looks_like_technical_requirement(normalized):
+        return None
+
+    table_cells = [cell.strip() for cell in normalized.split("|") if cell.strip()]
+    if len(table_cells) >= 2:
+        key_cell = table_cells[0]
+        val_cell = table_cells[1]
+        if _is_outline_token(key_cell) and len(table_cells) >= 3:
+            key_cell = table_cells[1]
+            val_cell = table_cells[2]
+        normalized = f"{key_cell}：{val_cell}"
+
+    match = re.match(r"^(?P<key>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-]{2,30})[：:]\s*(?P<val>.+)$", normalized)
+    if match:
+        key = match.group("key").strip()
+        key = re.sub(r"^[★▲■●]\s*", "", key)
+        key = re.sub(r"^\d+(?=[A-Za-z\u4e00-\u9fa5])", "", key)
+        val = match.group("val").strip(" ；;。")
+        if (
+            key
+            and val
+            and not _contains_non_technical_content(key)
+            and not _contains_non_technical_content(val)
+            and key not in _TECH_KEY_EXCLUDES
+            and not re.fullmatch(r"[（(]?\d+分[）)]?", key)
+            and not _is_outline_token(key)
+        ):
+            return key, val
+
+    comp_match = re.match(
+        r"^(?P<key>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-]{2,30})\s*(?P<val>(?:≥|≤|>=|<=|不低于|不少于|不高于|不大于|至少|不超过).+)$",
+        normalized,
+    )
+    if comp_match:
+        key = comp_match.group("key").strip()
+        key = re.sub(r"^[★▲■●]\s*", "", key)
+        key = re.sub(r"^\d+(?=[A-Za-z\u4e00-\u9fa5])", "", key)
+        val = comp_match.group("val").strip(" ；;。")
+        if (
+            key in _TECH_KEY_EXCLUDES
+            or re.fullmatch(r"[（(]?\d+分[）)]?", key)
+            or _is_outline_token(key)
+            or _contains_non_technical_content(key)
+            or _contains_non_technical_content(val)
+        ):
+            return None
+        return key, val
+
+    return None
+
+
+def _extract_requirements_from_raw(pkg: ProcurementPackage, tender_raw: str) -> list[tuple[str, str]]:
+    if not tender_raw.strip():
+        return []
+
+    item_tokens = [token for token in re.split(r"[，,、；;（）()\\s/]+", pkg.item_name) if len(token) >= 2]
+    relevant_window = 0
+    in_tech_scope = False
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for raw_line in tender_raw.splitlines():
+        normalized = _normalize_requirement_line(raw_line)
+        if not normalized:
+            relevant_window = max(0, relevant_window - 1)
+            in_tech_scope = False if relevant_window == 0 else in_tech_scope
+            continue
+
+        if _contains_any(normalized, _TECH_EXIT_HINTS):
+            in_tech_scope = False
+            relevant_window = 0
+            continue
+
+        if _contains_any(normalized, _TECH_SECTION_HINTS):
+            in_tech_scope = True
+            relevant_window = 18
+
+        if item_tokens and any(token in normalized for token in item_tokens):
+            relevant_window = 12
+
+        scoped = in_tech_scope or relevant_window > 0
+        if relevant_window > 0:
+            relevant_window -= 1
+
+        if not scoped and not _looks_like_technical_requirement(normalized):
+            continue
+
+        fragments = [frag for frag in re.split(r"[；;。]", normalized) if frag.strip()]
+        for fragment in fragments:
+            if _contains_any(fragment, _TECH_EXIT_HINTS):
+                continue
+            pair = _extract_requirement_pair(fragment)
+            if not pair:
+                continue
+            key, val = pair
+            dedup_key = f"{key}::{val}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            pairs.append(pair)
+            if len(pairs) >= _MAX_TECH_ROWS_PER_PACKAGE:
+                return pairs
+
+    return pairs
+
+
+def _effective_requirements(pkg: ProcurementPackage, tender_raw: str) -> list[tuple[str, str]]:
+    requirements = _flatten_requirements(pkg)
+    if not _is_sparse_technical_requirements(pkg):
+        return requirements
+
+    package_scoped_raw = _extract_package_scope_text(pkg, tender_raw)
+    extra_pairs = _extract_requirements_from_raw(pkg, package_scoped_raw)
+    if not extra_pairs:
+        return requirements
+
+    existing_keys = {key for key, _ in requirements}
+    merged = list(requirements)
+    for key, val in extra_pairs:
+        if key in existing_keys:
+            continue
+        merged.append((key, val))
+        existing_keys.add(key)
+
+    return merged
 
 
 def _markdown_cell(text: str) -> str:
@@ -209,10 +543,115 @@ def _extract_match_tokens(*texts: str) -> list[str]:
     return tokens
 
 
-def _extract_evidence_snippet(tender_raw: str, req_key: str, req_val: str) -> tuple[str, str, bool]:
-    source = "招标原文片段"
+def _trim_evidence_snippet(snippet: str, anchor: str) -> str:
+    normalized = snippet
+    if anchor:
+        anchor_pos = normalized.find(anchor)
+        if anchor_pos >= 0:
+            normalized = normalized[anchor_pos:]
+
+    cut_positions: list[int] = []
+    for marker in _TECH_EXIT_HINTS:
+        pos = normalized.find(marker)
+        if pos > max(8, len(anchor)):
+            cut_positions.append(pos)
+    if cut_positions:
+        normalized = normalized[:min(cut_positions)]
+
+    normalized = normalized.strip(" ；;，,。/")
+    return normalized
+
+
+def _extract_package_scope_text(pkg: ProcurementPackage, tender_raw: str) -> str:
     text = tender_raw or ""
     if not text.strip():
+        return text
+
+    lines = text.splitlines()
+    if not lines:
+        return text
+
+    item_tokens = [pkg.item_name, *_extract_match_tokens(pkg.item_name)]
+    package_markers = {
+        f"包{pkg.package_id}",
+        f"第{pkg.package_id}包",
+        f"{pkg.package_id}包",
+    }
+    candidate_indexes: list[tuple[int, int]] = []
+
+    for idx, raw_line in enumerate(lines):
+        normalized = _normalize_requirement_line(raw_line)
+        if not normalized:
+            continue
+
+        score = 0
+        if any(token and token in normalized for token in item_tokens):
+            score += 3
+        if any(marker in normalized for marker in package_markers):
+            score += 2
+        lookahead = " ".join(lines[idx:min(len(lines), idx + 12)])
+        if score and _contains_any(lookahead, _TECH_SECTION_HINTS):
+            score += 2
+
+        if score:
+            candidate_indexes.append((score, idx))
+
+    if not candidate_indexes:
+        return text
+
+    scopes: list[str] = []
+    seen_scopes: set[str] = set()
+    for _, idx in sorted(candidate_indexes, reverse=True)[:3]:
+        current_line = _normalize_requirement_line(lines[idx])
+        start = idx
+        if not any(marker in current_line for marker in package_markers):
+            while start > 0 and idx - start < _PACKAGE_SCOPE_BEFORE_LINES:
+                previous = _normalize_requirement_line(lines[start - 1])
+                if previous and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", previous) and not any(
+                    marker in previous for marker in package_markers
+                ):
+                    break
+                start -= 1
+
+        end = idx + 1
+        while end < len(lines) and end - idx < _PACKAGE_SCOPE_AFTER_LINES:
+            following = _normalize_requirement_line(lines[end])
+            if following and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", following) and not any(
+                marker in following for marker in package_markers
+            ):
+                break
+            end += 1
+
+        scope = "\n".join(lines[start:end]).strip()
+        if not scope or scope in seen_scopes:
+            continue
+        seen_scopes.add(scope)
+        scopes.append(scope)
+
+    return "\n".join(scopes) if scopes else text
+
+
+def _find_evidence_position(text: str, candidates: list[str]) -> tuple[int, str]:
+    idx = -1
+    matched = ""
+    candidates = [
+        candidate.strip()
+        for candidate in candidates
+        if candidate and candidate.strip()
+    ]
+    lowered = text.lower()
+    for candidate in candidates:
+        pos = lowered.find(candidate.lower())
+        if pos >= 0:
+            idx = pos
+            matched = candidate
+            break
+    return idx, matched
+
+
+def _extract_evidence_snippet(package_raw: str, req_key: str, req_val: str, fallback_raw: str = "") -> tuple[str, str, bool]:
+    source = "招标原文片段"
+    if not package_raw.strip() and not fallback_raw.strip():
         quote = f"{_markdown_cell(req_key)}：{_markdown_cell(req_val)}（依据结构化解析结果）"
         return source, quote, False
 
@@ -223,17 +662,19 @@ def _extract_evidence_snippet(tender_raw: str, req_key: str, req_val: str) -> tu
         *_extract_match_tokens(req_key, req_val)[:8],
     ]
 
+    search_texts: list[str] = []
+    if package_raw.strip():
+        search_texts.append(package_raw)
+    if fallback_raw.strip() and fallback_raw != package_raw:
+        search_texts.append(fallback_raw)
+
     idx = -1
     matched = ""
-    lowered = text.lower()
-    for candidate in candidates:
-        keyword = candidate.strip()
-        if not keyword:
-            continue
-        pos = lowered.find(keyword.lower())
-        if pos >= 0:
-            idx = pos
-            matched = keyword
+    text = ""
+    for candidate_text in search_texts:
+        idx, matched = _find_evidence_position(candidate_text, candidates)
+        if idx >= 0:
+            text = candidate_text
             break
 
     if idx < 0:
@@ -244,6 +685,7 @@ def _extract_evidence_snippet(tender_raw: str, req_key: str, req_val: str) -> tu
     end = min(len(text), idx + max(24, len(matched)) + 36)
     snippet = text[start:end].replace("\n", " ").replace("\r", " ")
     snippet = re.sub(r"\s+", " ", snippet).strip()
+    snippet = _trim_evidence_snippet(snippet, matched)
     if len(snippet) > 120:
         snippet = snippet[:120] + "..."
     return source, _markdown_cell(snippet), True
@@ -257,16 +699,27 @@ def _build_response_commitment(req_key: str, req_val: str) -> str:
     return f"承诺满足“{key}：{value}”，交付时提供对应技术资料并配合验收。"
 
 
+def _format_payment_execution_line(payment: str) -> str:
+    if payment == "按招标文件及合同约定执行":
+        return "6. 商务执行：付款方式按招标文件及合同约定执行。"
+    return f"6. 商务执行：付款方式按“{payment}”执行。"
+
+
+def _build_response_value(req_val: str) -> str:
+    return _markdown_cell(req_val)
+
+
 def _build_requirement_rows(pkg: ProcurementPackage, tender_raw: str) -> tuple[list[dict[str, Any]], int]:
-    requirements = _flatten_requirements(pkg)
+    requirements = _effective_requirements(pkg, tender_raw)
+    package_scoped_raw = _extract_package_scope_text(pkg, tender_raw)
     rows: list[dict[str, Any]] = []
     for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
-        source, quote, mapped = _extract_evidence_snippet(tender_raw, req_key, req_val)
+        source, quote, mapped = _extract_evidence_snippet(package_scoped_raw, req_key, req_val, tender_raw)
         rows.append(
             {
                 "key": req_key,
                 "requirement": req_val,
-                "response": _build_response_commitment(req_key, req_val),
+                "response": _build_response_value(req_val),
                 "evidence_source": source,
                 "evidence_quote": quote,
                 "mapped": mapped,
@@ -292,7 +745,7 @@ def _build_deviation_table(
 
     if not requirement_rows:
         lines.append(
-            "| 1 | 详见招标文件采购需求 | 承诺按采购需求逐条响应并配合验收 | 无偏离 | 结构化解析结果（建议复核原文） |"
+            "| 1 | 详见招标文件采购需求 | 详见拟投产品参数资料 | 无偏离 | 结构化解析结果（建议复核原文） |"
         )
         return "\n".join(lines)
 
@@ -311,36 +764,93 @@ def _build_deviation_table(
     return "\n".join(lines)
 
 
-def _build_configuration_table(pkg: ProcurementPackage) -> str:
-    return "\n".join(
-        [
-            f"### （二）详细配置明细表（第{pkg.package_id}包）",
-            "| 序号 | 配置名称 | 单位 | 数量 | 备注 |",
-            "|---:|---|---|---:|---|",
-            f"| 1 | {pkg.item_name}主机 | 台 | {pkg.quantity} | 核心设备 |",
-            "| 2 | 配套软件系统 | 套 | 1 | 含安装、调试、授权 |",
-            "| 3 | 随机附件及工具 | 套 | 1 | 按出厂标准配置 |",
-            "| 4 | 技术文件（合格证/说明书等） | 套 | 1 | 交货时随货提供 |",
-            "| 5 | 培训与验收服务 | 项 | 1 | 含现场培训与验收配合 |",
-        ]
-    )
+def _extract_configuration_items(pkg: ProcurementPackage, tender_raw: str) -> list[tuple[str, str, str, str]]:
+    requirements = _effective_requirements(pkg, tender_raw)
+    parsed_items: list[tuple[str, str, str, str]] = []
+
+    for key, val in requirements:
+        if not any(marker in key for marker in _CONFIG_REQUIREMENT_KEYS):
+            continue
+        fragments = [frag.strip() for frag in re.split(r"[，,；;、]", val) if frag.strip()]
+        for fragment in fragments:
+            normalized = _normalize_requirement_line(fragment)
+            if not normalized:
+                continue
+            match = re.match(
+                r"^(?P<name>.+?)(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>台|套|个|把|本|件|组|副|支|块|张|台套)?$",
+                normalized,
+            )
+            if match:
+                name = match.group("name").strip(" ：:")
+                qty = match.group("qty")
+                unit = match.group("unit") or "项"
+            else:
+                name = normalized.strip(" ：:")
+                qty = "1"
+                unit = "项"
+
+            if not name:
+                continue
+
+            remark = "按招标文件配置要求"
+            if "主机" in name:
+                remark = "核心设备"
+            elif "软件" in name:
+                remark = "配套软件"
+            elif "文件" in name or "说明书" in name:
+                remark = "随机技术文件"
+            parsed_items.append((name, unit, qty, remark))
+
+    seen: set[str] = set()
+    deduped: list[tuple[str, str, str, str]] = []
+    for item in parsed_items:
+        dedup_key = "::".join(item[:3])
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        deduped.append(item)
+    return deduped
 
 
-def _build_main_parameter_table(pkg: ProcurementPackage) -> str:
+def _build_configuration_table(pkg: ProcurementPackage, tender_raw: str) -> str:
     lines = [
-        f"#### 包{pkg.package_id}：{pkg.item_name}",
+        f"### （二）详细配置明细表（第{pkg.package_id}包）",
+        "| 序号 | 配置名称 | 单位 | 数量 | 备注 |",
+        "|---:|---|---|---:|---|",
+    ]
+
+    config_items = _extract_configuration_items(pkg, tender_raw)
+    if not config_items:
+        quantity = _infer_package_quantity(pkg, tender_raw)
+        lines.extend(
+            [
+                f"| 1 | {pkg.item_name}主机 | 台 | {quantity} | 核心设备 |",
+                "| 2 | 随机附件及工具 | 套 | 1 | 按招标文件配置要求 |",
+                "| 3 | 技术文件（合格证/说明书等） | 套 | 1 | 交货时随货提供 |",
+            ]
+        )
+        return "\n".join(lines)
+
+    for idx, (name, unit, qty, remark) in enumerate(config_items, start=1):
+        lines.append(f"| {idx} | {_markdown_cell(name)} | {unit} | {qty} | {remark} |")
+    return "\n".join(lines)
+
+
+def _build_main_parameter_table(pkg: ProcurementPackage, tender_raw: str) -> str:
+    lines = [
+        f"### 包{pkg.package_id}：{pkg.item_name}",
         "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
         "|---:|---|---|---|---|",
     ]
 
-    requirements = _flatten_requirements(pkg)
+    requirements = _effective_requirements(pkg, tender_raw)
     if not requirements:
-        lines.append("| 1 | 核心技术参数 | 详见招标文件 | 承诺逐条满足并提交技术资料 | 无偏离 |")
+        lines.append("| 1 | 核心技术参数 | 详见招标文件 | 详见拟投产品参数资料 | 无偏离 |")
         return "\n".join(lines)
 
     for idx, (key, val) in enumerate(requirements[:_MAX_TECH_ROWS_PER_PACKAGE], start=1):
         lines.append(
-            f"| {idx} | {_markdown_cell(key)} | {_markdown_cell(val)} | {_build_response_commitment(key, val)} | 无偏离 |"
+            f"| {idx} | {_markdown_cell(key)} | {_markdown_cell(val)} | {_build_response_value(val)} | 无偏离 |"
         )
 
     if len(requirements) > _MAX_TECH_ROWS_PER_PACKAGE:
@@ -366,7 +876,7 @@ def _build_response_checklist_table(
         "| 序号 | 校验项 | 响应结论 | 证据载体 | 校验状态 |",
         "|---:|---|---|---|---|",
         "| 1 | 关键技术参数逐条响应 | 已形成偏离表逐项响应 | 技术偏离表 | 已完成 |",
-        "| 2 | 配置清单完整性 | 主机/软件/附件/技术文件均已列示 | 配置明细表 | 已完成 |",
+        "| 2 | 配置清单完整性 | 已按招标文件配置项展开列示 | 配置明细表 | 已完成 |",
         "| 3 | 交付与培训要求 | 已承诺按招标文件执行 | 报价书与服务方案 | 已完成 |",
         "| 4 | 质保与售后要求 | 已在售后章节明确响应时限与保障 | 售后服务方案 | 已完成 |",
         f"| 5 | 技术条款证据映射 | {evidence_result} | 技术条款证据映射表 | {evidence_status} |",
@@ -408,6 +918,14 @@ def _sanitize_generated_content(section_title: str, content: str) -> tuple[str, 
     for line in normalized.split("\n"):
         stripped = line.strip()
         lower = stripped.lower()
+        if stripped.startswith("#### "):
+            line = "### " + stripped[5:]
+            stripped = line.strip()
+            lower = stripped.lower()
+        if stripped.startswith(">"):
+            line = re.sub(r"^>\s*", "", stripped)
+            stripped = line.strip()
+            lower = stripped.lower()
         if stripped in {section_title, f"# {section_title}", f"## {section_title}"}:
             removed_lines.append(stripped)
             continue
@@ -565,7 +1083,7 @@ def _build_consortium_declaration_block(tender: TenderDocument, today: str) -> s
 日期：{today}"""
 
 
-def _build_detail_quote_table(tender: TenderDocument) -> str:
+def _build_detail_quote_table(tender: TenderDocument, tender_raw: str) -> str:
     lines = [
         "| 序号 | 货物名称 | 规格型号 | 生产厂家 | 品牌 | 单价(元) | 数量 | 总价(元) |",
         "|---:|---|---|---|---|---:|---|---:|",
@@ -579,9 +1097,10 @@ def _build_detail_quote_table(tender: TenderDocument) -> str:
     total_budget = 0.0
     for idx, pkg in enumerate(tender.packages, start=1):
         total_budget += pkg.budget
+        quantity = _infer_package_quantity(pkg, tender_raw)
         lines.append(
             f"| {idx} | {pkg.item_name} | [品牌型号] | [生产厂家] | [品牌] | [待填写] | "
-            f"{pkg.quantity} | [待填写] |"
+            f"{quantity} | [待填写] |"
         )
 
     lines.append(
@@ -597,6 +1116,7 @@ def _gen_qualification(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSe
     today = _today()
     purchaser = _safe_text(tender.purchaser, "[采购人名称]")
     license_block = _build_qualification_license_block(tender)
+    supplier_commitment_title = _supplier_commitment_title(tender)
     content = f"""## 一、符合《中华人民共和国政府采购法》第二十二条规定声明
 {purchaser}：
 
@@ -615,7 +1135,7 @@ def _gen_qualification(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSe
 日期：{today}  
 （加盖公章）
 
-## 二、黑龙江省政府采购供应商资格承诺函
+## 二、{supplier_commitment_title}
 我方作为政府采购供应商，现就供应商资格事项作出如下承诺：
 1. 具有独立承担民事责任的能力，且经营状态合法有效；
 2. 具有良好的商业信誉，未被列入失信被执行人名单；
@@ -712,10 +1232,10 @@ def _gen_compliance(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSecti
     _ = llm
     today = _today()
     purchaser = _safe_text(tender.purchaser, "[采购人名称]")
-    payment = _safe_text(tender.commercial_terms.payment_method, "按招标文件约定执行")
+    payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
     validity = _safe_text(tender.commercial_terms.validity_period, "90日历天")
-    warranty = _safe_text(tender.commercial_terms.warranty_period, "按招标文件约定执行")
-    bond = _safe_text(tender.commercial_terms.performance_bond, "按招标文件约定执行")
+    warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
+    bond = _normalize_commitment_term(tender.commercial_terms.performance_bond, "按招标文件约定执行")
     consortium_block = _build_consortium_declaration_block(tender, today)
     enterprise_declaration_block = _build_enterprise_declaration_block(tender, today)
     medical_extra_block = ""
@@ -788,8 +1308,8 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str) -> 
     _ = llm
     today = _today()
     purchaser = _safe_text(tender.purchaser, "[采购人名称]")
-    package_details = _package_detail_lines(tender)
-    quote_table = _quote_overview_table(tender)
+    package_details = _package_detail_lines(tender, tender_raw)
+    quote_table = _quote_overview_table(tender, tender_raw)
 
     technical_sections: list[str] = []
     if tender.packages:
@@ -805,7 +1325,7 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str) -> 
                     total_requirements=total_requirements,
                 )
             )
-            technical_sections.append(_build_configuration_table(pkg))
+            technical_sections.append(_build_configuration_table(pkg, tender_raw))
             technical_sections.append(
                 _build_response_checklist_table(
                     pkg=pkg,
@@ -827,7 +1347,7 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str) -> 
                     "### （一）技术偏离及详细配置明细表",
                     "| 序号 | 招标技术参数要求 | 投标产品响应参数 | 偏离情况 | 响应依据/证据映射 |",
                     "|---:|---|---|---|---|",
-                    "| 1 | 详见招标文件 | 承诺逐条满足并按条款验收 | 无偏离 | 结构化解析结果（建议复核原文） |",
+                    "| 1 | 详见招标文件 | 详见拟投产品参数资料 | 无偏离 | 结构化解析结果（建议复核原文） |",
                     "",
                     "### （二）详细配置明细表",
                     "| 序号 | 配置名称 | 单位 | 数量 | 备注 |",
@@ -874,31 +1394,31 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str) -> 
 ## 三、技术偏离及详细配置明细表
 {"\n\n".join(technical_sections)}
 
-> 说明：本章已按“逐包、逐参数、逐校验项”强制结构化编制。若采购文件另有固定格式，以采购文件格式为准。
-> 本章已提供技术条款证据映射，供评审与复核使用。
+说明：本章已按“逐包、逐参数、逐校验项”强制结构化编制。若采购文件另有固定格式，以采购文件格式为准。
+说明：本章已提供技术条款证据映射，供评审与复核使用。
 """
     return BidDocumentSection(section_title="第三章 商务及技术部分", content=content.strip())
 
 
-def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSection:
+def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str) -> BidDocumentSection:
     """第四章：报价书附件（技术参数明细 + 售后服务方案）"""
     _ = llm
     today = _today()
-    warranty = _safe_text(tender.commercial_terms.warranty_period, "按招标文件约定执行")
-    payment = _safe_text(tender.commercial_terms.payment_method, "按招标文件约定执行")
+    warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
+    payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
 
     parameter_tables: list[str] = []
     if tender.packages:
         for pkg in tender.packages:
-            parameter_tables.append(_build_main_parameter_table(pkg))
+            parameter_tables.append(_build_main_parameter_table(pkg, tender_raw))
     else:
         parameter_tables.append(
             "\n".join(
                 [
-                    "#### 包信息",
+                    "### 包信息",
                     "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
                     "|---:|---|---|---|---|",
-                    "| 1 | 核心参数 | 详见招标文件 | 承诺逐条满足并提交技术资料 | 无偏离 |",
+                    "| 1 | 核心参数 | 详见招标文件 | 详见拟投产品参数资料 | 无偏离 |",
                 ]
             )
         )
@@ -911,7 +1431,7 @@ def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSection
 项目名称：{tender.project_name}  
 项目编号：{tender.project_number}
 
-{_build_detail_quote_table(tender)}
+{_build_detail_quote_table(tender, tender_raw)}
 
 ## 二、技术服务和售后服务的内容及措施
 ### （一）技术服务
@@ -927,7 +1447,7 @@ def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSection
 3. 维护保养：每年至少2次预防性巡检维护，形成维护记录；
 4. 配件保障：提供常用备件保障及更换服务，确保设备持续稳定运行；
 5. 质保期外服务：继续提供长期技术支持，收费标准公开透明；
-6. 商务执行：付款方式按“{payment}”及合同约定执行。
+{_format_payment_execution_line(payment)}
 
 投标人名称：{_COMPANY}  
 授权代表：{_AUTHORIZED_REP}  
@@ -936,7 +1456,7 @@ def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSection
 ## 三、产品彩页
 （此处留空，待上传产品彩页）
 
-## 四、节能认证证书
+## 四、节能/环保/能效认证证书（如适用）
 （此处留空，待上传节能/环保/能效认证证书）
 
 ## 五、检测/质评数据节选
@@ -968,7 +1488,7 @@ def generate_bid_sections(
         _gen_qualification(llm, tender),
         _gen_compliance(llm, tender),
         _gen_technical(llm, tender, tender_raw),
-        _gen_appendix(llm, tender),
+        _gen_appendix(llm, tender, tender_raw),
     ]
     sections = _apply_template_pollution_guard(sections)
 

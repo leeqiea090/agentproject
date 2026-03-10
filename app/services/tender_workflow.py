@@ -1,4 +1,4 @@
-"""招投标四阶段正式工作流服务。"""
+"""招投标正式工作流服务。"""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.schemas import BidDocumentSection, CompanyProfile, ProductSpecification, TenderDocument
-from app.services.one_click_generator import generate_bid_sections
+from app.services.one_click_generator import _apply_template_pollution_guard, generate_bid_sections
 from app.services.retriever import search_knowledge
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,14 @@ _PLACEHOLDER_PATTERNS = (
     "（此处留空",
     "(此处留空",
 )
+_MEDICAL_KEYWORDS = ("医疗", "器械", "检验", "试剂", "诊断", "流式", "医院")
+_SME_KEYWORDS = ("中小企业", "小微", "监狱企业", "残疾人福利性单位", "价格扣除", "声明函")
+_IMPORTED_KEYWORDS = ("进口", "原装", "境外", "国外")
+_CONSORTIUM_KEYWORDS = ("联合体", "共同投标")
+_STAGE_STATUS_COMPLETED = "completed"
+_STAGE_STATUS_WARNING = "warning"
+_STAGE_STATUS_BLOCKED = "blocked"
+_STAGE_STATUS_SKIPPED = "skipped"
 
 
 def _llm_call(llm: ChatOpenAI, system_prompt: str, user_prompt: str) -> str:
@@ -61,6 +69,24 @@ def _ensure_str_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _stage_record(
+    stage_code: str,
+    stage_name: str,
+    status: str,
+    summary: str,
+    data: dict[str, Any] | None = None,
+    issues: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "stage_code": stage_code,
+        "stage_name": stage_name,
+        "status": status,
+        "summary": summary,
+        "data": data or {},
+        "issues": issues or [],
+    }
 
 
 def _to_int_or_none(value: Any) -> int | None:
@@ -119,6 +145,362 @@ def _prepare_citations(hits: list[dict[str, Any]], limit: int = 5) -> list[dict[
             break
 
     return citations
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _workflow_context_text(tender: TenderDocument) -> str:
+    parts = [
+        tender.project_name,
+        tender.project_number,
+        tender.purchaser,
+        tender.agency,
+        tender.procurement_type,
+        tender.special_requirements,
+        " ".join(pkg.item_name for pkg in tender.packages),
+        " ".join(" ".join(str(v) for v in pkg.technical_requirements.values()) for pkg in tender.packages),
+        " ".join(f"{k}:{v}" for k, v in tender.evaluation_criteria.items()),
+    ]
+    return " ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _snippet_around(text: str, keyword: str, radius: int = 56) -> str:
+    if not text.strip() or not keyword.strip():
+        return ""
+
+    lowered = text.lower()
+    pos = lowered.find(keyword.lower())
+    if pos < 0:
+        return ""
+
+    start = max(0, pos - radius)
+    end = min(len(text), pos + len(keyword) + radius)
+    snippet = text[start:end].replace("\n", " ").replace("\r", " ")
+    snippet = re.sub(r"\s+", " ", snippet).strip()
+    if len(snippet) > 160:
+        snippet = snippet[:160] + "..."
+    return snippet
+
+
+def _evidence_candidates(item: str) -> list[str]:
+    candidates: list[str] = []
+
+    def _append(candidate: str) -> None:
+        normalized = candidate.strip()
+        if len(normalized) < 2:
+            return
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    _append(item)
+    compact = re.sub(r"[，,、；;：:（）()\[\]【】\s]+", "", item)
+    _append(compact)
+
+    parts = re.split(r"[：:]", item, maxsplit=1)
+    for part in parts:
+        _append(part)
+
+    for token in re.split(r"[，,、；;：:（）()\[\]【】\s]+", item):
+        _append(token)
+
+    return candidates
+
+
+def _locate_evidence_snippet(text: str, item: str) -> str:
+    for candidate in _evidence_candidates(item):
+        snippet = _snippet_around(text, candidate)
+        if snippet:
+            return snippet
+    return ""
+
+
+def _branch_decision(
+    decision_name: str,
+    decision: str,
+    basis: str,
+    clause_type: str,
+) -> dict[str, str]:
+    return {
+        "decision_name": decision_name,
+        "decision": decision,
+        "basis": basis,
+        "clause_type": clause_type,
+    }
+
+
+def _classify_clauses(
+    tender: TenderDocument,
+    analysis_result: dict[str, Any],
+    selected_packages: list[str],
+    raw_text: str,
+) -> dict[str, Any]:
+    required_materials = _ensure_str_list(analysis_result.get("required_materials"))
+    scoring_rules = _ensure_str_list(analysis_result.get("scoring_rules"))
+    target_packages = selected_packages or [pkg.package_id for pkg in tender.packages]
+    package_map = {pkg.package_id: pkg for pkg in tender.packages}
+    target_package_docs = [package_map[pkg_id] for pkg_id in target_packages if pkg_id in package_map]
+    context = _workflow_context_text(tender)
+
+    qualification_clauses = required_materials[:8]
+    technical_clauses: list[str] = []
+    commercial_clauses: list[str] = []
+    for pkg in target_package_docs:
+        for key, value in (pkg.technical_requirements or {}).items():
+            technical_clauses.append(f"{key}：{value}")
+        commercial_clauses.append(f"包{pkg.package_id} 交货期：{pkg.delivery_time or '按招标文件约定'}")
+        commercial_clauses.append(f"包{pkg.package_id} 交货地点：{pkg.delivery_place or '采购人指定地点'}")
+
+    commercial_terms = tender.commercial_terms.model_dump()
+    for key, value in commercial_terms.items():
+        if value:
+            commercial_clauses.append(f"{key}：{value}")
+
+    policy_clauses = scoring_rules[:6]
+    special_requirements = tender.special_requirements.strip()
+    if special_requirements:
+        policy_clauses.append(special_requirements)
+
+    if "不接受联合体" in context:
+        consortium_decision = "不接受联合体"
+    elif _contains_any(context, _CONSORTIUM_KEYWORDS):
+        consortium_decision = "接受联合体"
+    else:
+        consortium_decision = "未明确，需人工确认"
+
+    if _contains_any(context, _SME_KEYWORDS):
+        sme_decision = "适用中小企业政策分支"
+    else:
+        sme_decision = "不涉及中小企业政策分支"
+
+    if _contains_any(context, _MEDICAL_KEYWORDS):
+        medical_decision = "需走医疗器械合规分支"
+    else:
+        medical_decision = "非医疗专项分支"
+
+    if _contains_any(context, _IMPORTED_KEYWORDS):
+        imported_decision = "需准备进口或原产地相关说明"
+    else:
+        imported_decision = "默认按国产/未明确处理"
+
+    package_decision = "、".join(f"包{pkg.package_id}" for pkg in target_package_docs) or "全部包"
+    branch_decisions = [
+        _branch_decision(
+            "联合体投标分支",
+            consortium_decision,
+            _snippet_around(raw_text, "联合体") or special_requirements or "依据结构化招标信息推断",
+            "资格/组织形式",
+        ),
+        _branch_decision(
+            "中小企业政策分支",
+            sme_decision,
+            _snippet_around(raw_text, "中小企业") or special_requirements or "依据评分标准及特殊要求推断",
+            "政策性条款",
+        ),
+        _branch_decision(
+            "医疗器械合规分支",
+            medical_decision,
+            _snippet_around(raw_text, "医疗器械") or " ".join(pkg.item_name for pkg in target_package_docs) or "依据采购标的推断",
+            "行业合规",
+        ),
+        _branch_decision(
+            "进口货物分支",
+            imported_decision,
+            _snippet_around(raw_text, "进口") or " ".join(pkg.item_name for pkg in target_package_docs) or "依据采购标的推断",
+            "货物属性",
+        ),
+        _branch_decision(
+            "包件响应分支",
+            f"本次响应范围：{package_decision}",
+            package_decision,
+            "投标范围",
+        ),
+    ]
+
+    summary = (
+        f"已完成条款分类，覆盖资格、技术、商务、政策 4 类；"
+        f"已生成 {len(branch_decisions)} 条分支决策。"
+    )
+
+    return {
+        "clause_categories": {
+            "qualification": qualification_clauses,
+            "technical": technical_clauses[:20],
+            "commercial": commercial_clauses[:12],
+            "policy": policy_clauses[:12],
+        },
+        "branch_decisions": branch_decisions,
+        "summary": summary,
+    }
+
+
+def _build_evidence_bindings(
+    tender: TenderDocument,
+    raw_text: str,
+    analysis_result: dict[str, Any],
+    clause_result: dict[str, Any],
+) -> dict[str, Any]:
+    required_materials = _ensure_str_list(analysis_result.get("required_materials"))
+    scoring_rules = _ensure_str_list(analysis_result.get("scoring_rules"))
+    clause_categories = clause_result.get("clause_categories", {})
+    technical_items = []
+    if isinstance(clause_categories, dict):
+        technical_items = _ensure_str_list(clause_categories.get("technical"))
+
+    candidate_items = [
+        *required_materials[:4],
+        *technical_items[:4],
+        *scoring_rules[:4],
+    ]
+    deduped_items: list[str] = []
+    for item in candidate_items:
+        normalized = str(item).strip()
+        if normalized and normalized not in deduped_items:
+            deduped_items.append(normalized)
+
+    bindings: list[dict[str, Any]] = []
+    matched_count = 0
+    for idx, item in enumerate(deduped_items, start=1):
+        snippet = _locate_evidence_snippet(raw_text, item)
+        matched = bool(snippet)
+        if matched:
+            matched_count += 1
+        bindings.append(
+            {
+                "seq": idx,
+                "requirement": item,
+                "matched": matched,
+                "source": "招标原文",
+                "quote": snippet or f"{item}（未在原文中定位到同名片段，需人工复核）",
+            }
+        )
+
+    total = len(bindings)
+    binding_rate = 1.0 if total == 0 else matched_count / total
+    issues = []
+    if total == 0:
+        issues.append("未形成证据绑定项，需补充需求抽取结果。")
+    elif binding_rate < 0.5:
+        issues.append("证据绑定率偏低，建议补充原文定位规则或人工复核。")
+
+    summary = (
+        f"已完成 {matched_count}/{total} 项证据绑定。"
+        if total
+        else "暂无可绑定的结构化需求。"
+    )
+
+    return {
+        "bindings": bindings,
+        "matched_count": matched_count,
+        "total": total,
+        "binding_rate": round(binding_rate, 4),
+        "summary": summary,
+        "issues": issues,
+    }
+
+
+def _sanitize_for_external_delivery(sections: list[BidDocumentSection]) -> tuple[list[BidDocumentSection], dict[str, Any]]:
+    cleaned_sections = _apply_template_pollution_guard(sections)
+    changed_sections: list[str] = []
+    placeholder_sections: list[str] = []
+
+    for original, cleaned in zip(sections, cleaned_sections, strict=False):
+        if original.content != cleaned.content:
+            changed_sections.append(cleaned.section_title)
+        if any(pattern in cleaned.content for pattern in _PLACEHOLDER_PATTERNS):
+            placeholder_sections.append(cleaned.section_title)
+
+    status = "通过" if not placeholder_sections else "需人工终审"
+    summary = (
+        f"已完成外发净化，共清理 {len(changed_sections)} 个章节。"
+        if changed_sections
+        else "章节内容未发现明显模板污染。"
+    )
+    if placeholder_sections:
+        summary += f" 仍有 {len(placeholder_sections)} 个章节包含占位符。"
+
+    return cleaned_sections, {
+        "status": status,
+        "changed_sections": changed_sections,
+        "placeholder_sections": placeholder_sections,
+        "summary": summary,
+    }
+
+
+def _build_regression_report(
+    stages: list[dict[str, Any]],
+    consistency_result: dict[str, Any] | None,
+    review_result: dict[str, Any] | None,
+    sanitize_result: dict[str, Any] | None,
+    evidence_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    stage_count = len(stages) + 1
+    completed_count = len([stage for stage in stages if stage.get("status") == _STAGE_STATUS_COMPLETED])
+    warning_count = len([stage for stage in stages if stage.get("status") == _STAGE_STATUS_WARNING])
+    blocked_count = len([stage for stage in stages if stage.get("status") == _STAGE_STATUS_BLOCKED])
+
+    evidence_rate = 0.0
+    if evidence_result:
+        try:
+            evidence_rate = float(evidence_result.get("binding_rate", 0.0))
+        except (TypeError, ValueError):
+            evidence_rate = 0.0
+
+    compliance_score = 0.0
+    ready_for_submission = False
+    if review_result:
+        try:
+            compliance_score = float(review_result.get("compliance_score", 0.0))
+        except (TypeError, ValueError):
+            compliance_score = 0.0
+        ready_for_submission = bool(review_result.get("ready_for_submission", False))
+
+    consistency_ok = bool(consistency_result) and consistency_result.get("overall_status") == "通过"
+    outbound_ok = bool(sanitize_result) and sanitize_result.get("status") == "通过"
+    regression_checks = [
+        {
+            "name": "九阶段链路完整性",
+            "status": "通过" if stage_count == 9 and blocked_count == 0 else "需修订",
+            "detail": f"阶段总数 {stage_count}，阻断阶段 {blocked_count} 个。",
+        },
+        {
+            "name": "证据绑定覆盖率",
+            "status": "通过" if evidence_rate >= 0.5 else "需修订",
+            "detail": f"当前覆盖率 {evidence_rate:.0%}。",
+        },
+        {
+            "name": "一致性校验结果",
+            "status": "通过" if consistency_ok else "需修订",
+            "detail": consistency_result.get("summary", "未执行") if consistency_result else "未执行",
+        },
+        {
+            "name": "合规得分门槛",
+            "status": "通过" if compliance_score >= 80 else "需修订",
+            "detail": f"当前合规得分 {compliance_score:.1f}。",
+        },
+        {
+            "name": "外发安全性",
+            "status": "通过" if outbound_ok else "需修订",
+            "detail": sanitize_result.get("summary", "未执行") if sanitize_result else "未执行",
+        },
+    ]
+
+    passed_count = len([item for item in regression_checks if item["status"] == "通过"])
+    score = round(min(100.0, passed_count * 20 + compliance_score * 0.2 + evidence_rate * 10), 2)
+    overall_status = "通过" if ready_for_submission and blocked_count == 0 and outbound_ok else "需修订"
+    summary = (
+        f"回归评测完成：{passed_count}/{len(regression_checks)} 项通过，"
+        f"阶段完成 {completed_count} 项，告警 {warning_count} 项。"
+    )
+
+    return {
+        "overall_status": overall_status,
+        "score": score,
+        "ready_for_delivery": ready_for_submission and outbound_ok,
+        "checks": regression_checks,
+        "summary": summary,
+    }
 
 
 def _retrieve_citations(query: str, preferred_source: str | None = None, top_k: int = _DEFAULT_CITATION_TOP_K) -> list[dict[str, Any]]:
@@ -421,7 +803,7 @@ def _default_step4_if_blocked(reason: str) -> dict[str, Any]:
 
 
 class TenderWorkflowAgent:
-    """四阶段招投标工作流 Agent。"""
+    """九阶段招投标工作流 Agent。"""
 
     def __init__(self, llm: ChatOpenAI):
         self.llm = llm
@@ -668,6 +1050,36 @@ class TenderWorkflowAgent:
             "summary": summary,
         }
 
+    def step3_classify_clauses(
+        self,
+        tender: TenderDocument,
+        analysis_result: dict[str, Any],
+        selected_packages: list[str],
+        raw_text: str,
+    ) -> dict[str, Any]:
+        """第三步：条款分类与分支决策。"""
+        return _classify_clauses(
+            tender=tender,
+            analysis_result=analysis_result,
+            selected_packages=selected_packages,
+            raw_text=raw_text,
+        )
+
+    def step4_bind_evidence(
+        self,
+        tender: TenderDocument,
+        raw_text: str,
+        analysis_result: dict[str, Any],
+        clause_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """第四步：将关键需求绑定到招标原文证据。"""
+        return _build_evidence_bindings(
+            tender=tender,
+            raw_text=raw_text,
+            analysis_result=analysis_result,
+            clause_result=clause_result,
+        )
+
     def step3_integrate_bid(
         self,
         tender: TenderDocument,
@@ -745,6 +1157,21 @@ class TenderWorkflowAgent:
             "integration_notes": integration_notes,
             "summary": f"已完成标书整合，共生成 {len(sections)} 个章节。",
         }, sections
+
+    def step6_validate_consistency(
+        self,
+        analysis_result: dict[str, Any],
+        validation_result: dict[str, Any],
+        sections: list[BidDocumentSection],
+        generation_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """第六步：一致性校验。"""
+        return _second_validation(
+            analysis_result=analysis_result,
+            validation_result=validation_result,
+            sections=sections,
+            generation_result=generation_result,
+        )
 
     def step4_review_bid(
         self,
@@ -865,3 +1292,27 @@ class TenderWorkflowAgent:
             "secondary_validation": second_validation,
             "conclusion": conclusion,
         }
+
+    def step8_sanitize_outbound(
+        self,
+        sections: list[BidDocumentSection],
+    ) -> tuple[list[BidDocumentSection], dict[str, Any]]:
+        """第八步：外发净化。"""
+        return _sanitize_for_external_delivery(sections)
+
+    def step9_regression(
+        self,
+        stages: list[dict[str, Any]],
+        consistency_result: dict[str, Any] | None,
+        review_result: dict[str, Any] | None,
+        sanitize_result: dict[str, Any] | None,
+        evidence_result: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """第九步：评测回归。"""
+        return _build_regression_report(
+            stages=stages,
+            consistency_result=consistency_result,
+            review_result=review_result,
+            sanitize_result=sanitize_result,
+            evidence_result=evidence_result,
+        )

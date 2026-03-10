@@ -206,7 +206,7 @@ class BidDownloadRequest(BaseModel):
     format: str = Field(default="pdf", description="文件格式：pdf/docx")
 
 
-# --- 四阶段工作流相关 ---
+# --- 正式工作流相关 ---
 
 class WorkflowMaterialCheckItem(BaseModel):
     """资料校验项"""
@@ -222,6 +222,16 @@ class WorkflowCitation(BaseModel):
     chunk_index: int | None = Field(default=None, description="来源分块序号")
     score: float | None = Field(default=None, description="检索相关度得分")
     quote: str = Field(default="", description="引用片段摘要")
+
+
+class WorkflowStageRecord(BaseModel):
+    """工作流阶段记录"""
+    stage_code: str = Field(description="阶段编码")
+    stage_name: str = Field(description="阶段名称")
+    status: str = Field(description="阶段状态：completed/warning/blocked/skipped")
+    summary: str = Field(default="", description="阶段摘要")
+    data: dict[str, Any] = Field(default_factory=dict, description="阶段结构化输出")
+    issues: list[str] = Field(default_factory=list, description="阶段发现的问题")
 
 
 class TenderWorkflowStep1Result(BaseModel):
@@ -287,7 +297,7 @@ class TenderWorkflowStep4Result(BaseModel):
 
 
 class TenderWorkflowRequest(BaseModel):
-    """四阶段工作流请求"""
+    """正式工作流请求"""
     tender_id: str = Field(description="招标文件ID")
     company_profile_id: str | None = Field(default=None, description="企业信息ID，可为空")
     selected_packages: list[str] = Field(default_factory=list, description="投标包号列表，留空表示全部包")
@@ -297,15 +307,40 @@ class TenderWorkflowRequest(BaseModel):
 
 
 class TenderWorkflowResponse(BaseModel):
-    """四阶段工作流响应"""
+    """九阶段工作流响应（兼容原四阶段摘要字段）"""
     workflow_id: str = Field(description="工作流ID")
     tender_id: str = Field(description="招标文件ID")
     status: str = Field(description="整体状态：completed/blocked/error")
+    stages: list[WorkflowStageRecord] = Field(default_factory=list, description="九阶段流程结果")
     analysis: TenderWorkflowStep1Result = Field(description="步骤1结果")
     material_validation: TenderWorkflowStep2Result = Field(description="步骤2结果")
     generation: TenderWorkflowStep3Result = Field(description="步骤3结果")
     review: TenderWorkflowStep4Result = Field(description="步骤4结果")
     generated_time: datetime = Field(description="生成时间")
+
+
+class OneClickJobStartResponse(BaseModel):
+    """一键生成任务启动响应"""
+    job_id: str = Field(description="任务ID")
+    status: str = Field(description="任务状态：queued/running/completed/error")
+    step_code: str = Field(description="当前步骤编码")
+    step_label: str = Field(description="当前步骤名称")
+    message: str = Field(description="当前步骤文案")
+    progress: int = Field(description="进度百分比 0~100")
+
+
+class OneClickJobStatusResponse(BaseModel):
+    """一键生成任务状态响应"""
+    job_id: str = Field(description="任务ID")
+    status: str = Field(description="任务状态：queued/running/completed/error")
+    step_code: str = Field(description="当前步骤编码")
+    step_label: str = Field(description="当前步骤名称")
+    message: str = Field(description="当前步骤文案")
+    progress: int = Field(description="进度百分比 0~100")
+    filename: str = Field(default="", description="生成完成后的下载文件名")
+    download_url: str = Field(default="", description="下载地址")
+    error: str = Field(default="", description="错误信息")
+    updated_time: datetime = Field(description="状态更新时间")
 
 
 # --- 通用响应 ---

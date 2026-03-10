@@ -91,6 +91,12 @@ def _clean_markdown_content(section_title: str, content: str) -> str:
         stripped = line.strip()
         if stripped.startswith("```"):
             continue
+        if stripped.startswith(">"):
+            line = re.sub(r"^>\s*", "", stripped)
+            stripped = line.strip()
+        if stripped.startswith("#### "):
+            line = "### " + stripped[5:]
+            stripped = line.strip()
 
         if can_skip_heading and stripped:
             raw_heading = re.sub(r"^#+\s*", "", stripped)
@@ -205,8 +211,12 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
             continue
 
         # 标题
+        if stripped.startswith(">"):
+            stripped = re.sub(r"^>\s*", "", stripped)
         if stripped.startswith("### "):
             _add_heading(doc, stripped[4:], 3)
+        elif stripped.startswith("#### "):
+            _add_heading(doc, stripped[5:], 3)
         elif stripped.startswith("## "):
             _add_heading(doc, stripped[3:], 2)
         elif stripped.startswith("# "):

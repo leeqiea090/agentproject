@@ -90,11 +90,10 @@ def run_with_tools(
             else:
                 try:
                     tool_result = tool.invoke(tool_args)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     tool_result = f"Tool '{tool_name}' execution error: {exc}"
 
             messages.append(ToolMessage(content=str(tool_result), tool_call_id=call_id))
 
-    # Final pass so the model can summarize tool outputs.
     final_msg = model.invoke(messages)
     return _message_to_text(final_msg)

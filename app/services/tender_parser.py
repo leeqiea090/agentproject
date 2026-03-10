@@ -144,6 +144,134 @@ class TenderParser:
             return tender_text[:self.max_parse_chars]
         return tender_text
 
+    @staticmethod
+    def _needs_technical_enrichment(tender_doc: TenderDocument) -> bool:
+        for pkg in tender_doc.packages:
+            tech = pkg.technical_requirements or {}
+            if len(tech) < 2:
+                return True
+        return False
+
+    def _enrich_package_requirements(self, tender_doc: TenderDocument, tender_text: str) -> TenderDocument:
+        if not tender_doc.packages:
+            return tender_doc
+
+        updated_packages: list[ProcurementPackage] = []
+        changed = False
+        for pkg in tender_doc.packages:
+            tech = pkg.technical_requirements or {}
+            if len(tech) >= 2:
+                updated_packages.append(pkg)
+                continue
+
+            try:
+                extracted = self.extract_technical_requirements(tender_text, pkg.package_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("采购包%s技术参数补充提取失败：%s", pkg.package_id, exc)
+                extracted = {}
+
+            if extracted:
+                updated_packages.append(pkg.model_copy(update={"technical_requirements": extracted}))
+                changed = True
+            else:
+                updated_packages.append(pkg)
+
+        if changed:
+            return tender_doc.model_copy(update={"packages": updated_packages})
+        return tender_doc
+
+    @staticmethod
+    def _extract_package_scope(tender_text: str, package_id: str, item_name: str) -> str:
+        lines = tender_text.splitlines()
+        if not lines:
+            return tender_text
+
+        item_tokens = [token for token in re.split(r"[，,、；;（）()\\s/]+", item_name) if len(token) >= 2]
+        markers = (f"包{package_id}", f"第{package_id}包", f"{package_id}包")
+        candidate_indexes: list[int] = []
+
+        for idx, raw_line in enumerate(lines):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if any(marker in line for marker in markers) or any(token in line for token in item_tokens):
+                candidate_indexes.append(idx)
+
+        if not candidate_indexes:
+            return tender_text
+
+        scopes: list[str] = []
+        same_package_markers = (f"包{package_id}", f"第{package_id}包", f"{package_id}包")
+        for idx in candidate_indexes[:3]:
+            current_line = lines[idx].strip()
+            start = idx
+            if not any(marker in current_line for marker in same_package_markers):
+                while start > 0 and idx - start < 6:
+                    previous = lines[start - 1].strip()
+                    if previous and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", previous) and not any(
+                        marker in previous for marker in same_package_markers
+                    ):
+                        break
+                    start -= 1
+
+            end = idx + 1
+            while end < len(lines) and end - idx < 100:
+                following = lines[end].strip()
+                if following and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", following) and not any(
+                    marker in following for marker in same_package_markers
+                ):
+                    break
+                end += 1
+            scopes.append("\n".join(lines[start:end]).strip())
+        return "\n".join(scope for scope in scopes if scope)
+
+    @classmethod
+    def _infer_package_quantity_from_text(cls, tender_text: str, package_id: str, item_name: str, current_quantity: int) -> int:
+        scope = cls._extract_package_scope(tender_text, package_id, item_name)
+        patterns = (
+            r"设备总台数\s*[:：;；]?\s*(\d+)\s*台",
+            r"采购数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)?",
+            r"数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)",
+        )
+
+        for text in (scope, tender_text):
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                for pattern in patterns:
+                    match = re.search(pattern, line)
+                    if not match:
+                        continue
+                    quantity = int(match.group(1))
+                    if quantity > 0:
+                        return quantity
+
+        return max(1, current_quantity)
+
+    def _enrich_package_quantities(self, tender_doc: TenderDocument, tender_text: str) -> TenderDocument:
+        if not tender_doc.packages:
+            return tender_doc
+
+        updated_packages: list[ProcurementPackage] = []
+        changed = False
+        for pkg in tender_doc.packages:
+            inferred_quantity = self._infer_package_quantity_from_text(
+                tender_text=tender_text,
+                package_id=pkg.package_id,
+                item_name=pkg.item_name,
+                current_quantity=pkg.quantity,
+            )
+            if inferred_quantity != pkg.quantity:
+                updated_packages.append(pkg.model_copy(update={"quantity": inferred_quantity}))
+                changed = True
+            else:
+                updated_packages.append(pkg)
+
+        if changed:
+            return tender_doc.model_copy(update={"packages": updated_packages})
+        return tender_doc
+
     def extract_text_from_pdf(self, pdf_path: str | Path) -> str:
         """从PDF文件中提取文本"""
         try:
@@ -214,6 +342,9 @@ class TenderParser:
             try:
                 parsed_data = self._parse_with_llm(candidate_text)
                 tender_doc = TenderDocument(**parsed_data)
+                if self._needs_technical_enrichment(tender_doc):
+                    tender_doc = self._enrich_package_requirements(tender_doc, candidate_text)
+                tender_doc = self._enrich_package_quantities(tender_doc, candidate_text)
                 logger.info(f"成功解析招标文件: {tender_doc.project_name}（输入长度={limit}）")
                 return tender_doc
             except Exception as exc:  # noqa: BLE001
@@ -241,6 +372,9 @@ class TenderParser:
         try:
             parsed_data = self._parse_with_llm(tender_text)
             tender_doc = TenderDocument(**parsed_data)
+            if self._needs_technical_enrichment(tender_doc):
+                tender_doc = self._enrich_package_requirements(tender_doc, tender_text)
+            tender_doc = self._enrich_package_quantities(tender_doc, tender_text)
             logger.info(f"成功解析招标文本: {tender_doc.project_name}")
             return tender_doc
         except Exception as e:  # noqa: BLE001
