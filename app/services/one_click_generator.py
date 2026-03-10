@@ -402,7 +402,7 @@ def _split_compound_requirement(key: str, value: str) -> list[tuple[str, str]]:
 
     fragments = re.split(_COMPOUND_DELIMITERS, value)
     if len(fragments) < 2:
-        fragments = re.split(r"(?:同时|并且|以及|；|;)", value)
+        fragments = re.split(r"同时|并且|以及|；|;", value)
     if len(fragments) < 2:
         return [(key, value)]
 
@@ -620,7 +620,7 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
     segments = re.split(r"[；;]", normalized_val)
     if len(segments) <= 1:
         # 尝试用、分隔（仅当每段都含技术内容）
-        sub_segments = re.split(r"[、]", normalized_val)
+        sub_segments = re.split(r"、", normalized_val)
         if len(sub_segments) >= 3 and all(
             any(m in seg for m in _HARD_REQUIREMENT_MARKERS) or re.search(r"\d", seg)
             for seg in sub_segments
@@ -670,7 +670,7 @@ def _extract_match_tokens(*texts: str) -> list[str]:
     tokens: list[str] = []
     seen: set[str] = set()
     for text in texts:
-        raw_tokens = re.split(r"[，,、；;：:（）()【】\\[\\]\\s/\\\\]+", text)
+        raw_tokens = re.split(r"[，,、；;：:（）()【】\\[]\\s/\\\\]+", text)
         for token in raw_tokens:
             normalized = token.strip()
             if len(normalized) < 2:
@@ -1121,7 +1121,194 @@ def _build_response_value(req_val: str, *, req_key: str = "", product: Any = Non
     return _PENDING_BIDDER_RESPONSE
 
 
-def _build_requirement_rows(pkg: ProcurementPackage, tender_raw: str, product: Any = None) -> tuple[list[dict[str, Any]], int]:
+def _structured_requirements_for_package(
+    normalized_result: dict[str, Any] | None,
+    package_id: str,
+) -> list[dict[str, Any]]:
+    if not normalized_result:
+        return []
+    items: list[dict[str, Any]] = []
+    for requirement in normalized_result.get("technical_requirements", []):
+        if not isinstance(requirement, dict):
+            continue
+        if _safe_text(requirement.get("package_id"), "") != package_id:
+            continue
+        items.append(requirement)
+    return items
+
+
+def _structured_match_indexes(
+    evidence_result: dict[str, Any] | None,
+    package_id: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    by_param: dict[str, dict[str, Any]] = {}
+    if not evidence_result:
+        return by_id, by_param
+
+    for match in evidence_result.get("technical_matches", []):
+        if not isinstance(match, dict):
+            continue
+        if _safe_text(match.get("package_id"), "") != package_id:
+            continue
+        requirement_id = _safe_text(match.get("requirement_id"), "")
+        parameter_name = _safe_text(match.get("parameter_name"), "")
+        if requirement_id:
+            by_id[requirement_id] = match
+        if parameter_name and parameter_name not in by_param:
+            by_param[parameter_name] = match
+    return by_id, by_param
+
+
+def _lookup_profile_response_value(
+    product_profile: dict[str, Any] | None,
+    parameter_name: str,
+) -> str:
+    if not product_profile or not parameter_name:
+        return ""
+
+    identity_candidates = (
+        (("品牌",), product_profile.get("brand")),
+        (("型号", "规格型号", "品牌型号"), product_profile.get("model")),
+        (("厂家", "生产厂家", "制造商"), product_profile.get("manufacturer")),
+    )
+    for aliases, value in identity_candidates:
+        if any(alias in parameter_name for alias in aliases):
+            normalized = _as_text(value)
+            if normalized:
+                return normalized
+
+    specs = product_profile.get("technical_specs") or {}
+    if isinstance(specs, dict):
+        exact = _as_text(specs.get(parameter_name))
+        if exact:
+            return exact
+        parameter_tokens = [
+            token for token in re.split(r"[，,、；;：:（）()\[\]\s/]+", parameter_name) if len(token) >= 2
+        ]
+        for spec_key, spec_val in specs.items():
+            spec_name = _as_text(spec_key)
+            if not spec_name:
+                continue
+            if spec_name == parameter_name or parameter_name in spec_name or spec_name in parameter_name:
+                return _as_text(spec_val)
+            if parameter_tokens and any(token in spec_name for token in parameter_tokens):
+                return _as_text(spec_val)
+
+    config_items = product_profile.get("config_items") or []
+    for item in config_items:
+        if not isinstance(item, dict):
+            continue
+        item_name = _as_text(
+            item.get("配置项") or item.get("name") or item.get("item_name") or item.get("名称")
+        )
+        if not item_name:
+            continue
+        if item_name == parameter_name or parameter_name in item_name or item_name in parameter_name:
+            return _as_text(item.get("说明") or item.get("description") or item.get("remark") or "标配")
+
+    return ""
+
+
+def _format_structured_bidder_evidence(
+    match: dict[str, Any] | None,
+    req_key: str,
+    response: str,
+) -> tuple[str, str, Any]:
+    if not match:
+        return "", "", None
+
+    bid_file = _safe_text(match.get("bid_evidence_file"), "")
+    bid_page = match.get("bid_evidence_page")
+    bid_type = _safe_text(match.get("bid_evidence_type"), "")
+    bid_snippet = _safe_text(
+        match.get("bid_evidence_snippet") or match.get("bidder_evidence_quote"),
+        "",
+    )
+    if not bid_file and not bid_snippet:
+        return "", "", bid_page
+
+    source_bits = [bit for bit in (bid_file, bid_type) if bit]
+    if not source_bits:
+        source_bits = [_safe_text(match.get("bidder_evidence_source"), "投标方资料")]
+    source_text = " / ".join(source_bits)
+
+    quote_text = bid_snippet or f"{req_key}：{response}"
+    if bid_page is not None:
+        quote_text = f"{quote_text}（第{bid_page}页）"
+    return source_text, quote_text, bid_page
+
+
+def _build_requirement_rows(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    product: Any = None,
+    *,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profile: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    structured_requirements = _structured_requirements_for_package(normalized_result, pkg.package_id)
+    if structured_requirements:
+        match_by_id, match_by_param = _structured_match_indexes(evidence_result, pkg.package_id)
+        rows: list[dict[str, Any]] = []
+        for requirement in structured_requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
+            req_key = _safe_text(
+                requirement.get("param_name") or requirement.get("parameter_name"),
+                "",
+            )
+            req_val = _safe_text(requirement.get("normalized_value"), "")
+            requirement_id = _safe_text(requirement.get("requirement_id"), "")
+            match = match_by_id.get(requirement_id) or match_by_param.get(req_key)
+
+            response = _safe_text(match.get("response_value") if match else "", "")
+            if not response:
+                response = _lookup_profile_response_value(product_profile, req_key)
+            if not response:
+                response = _PENDING_BIDDER_RESPONSE
+
+            bidder_source, bidder_quote, bidder_page = _format_structured_bidder_evidence(match, req_key, response)
+            tender_quote = _safe_text(
+                (match or {}).get("tender_source_text")
+                or requirement.get("source_text")
+                or requirement.get("source_excerpt"),
+                "",
+            )
+            tender_page = (match or {}).get("tender_source_page") or requirement.get("source_page")
+            has_real_response = response != _PENDING_BIDDER_RESPONSE
+            if not bidder_quote and has_real_response:
+                bidder_source = bidder_source or _safe_text(
+                    (match or {}).get("matched_fact_source"),
+                    "产品参数库",
+                )
+                bidder_quote = _safe_text(
+                    (match or {}).get("matched_fact_quote"),
+                    f"{req_key}：{response}",
+                )
+
+            rows.append(
+                {
+                    "requirement_id": requirement_id,
+                    "key": req_key,
+                    "requirement": req_val,
+                    "response": response,
+                    "evidence_source": bidder_source or "招标原文",
+                    "evidence_quote": bidder_quote or tender_quote,
+                    "mapped": bool(tender_quote or bidder_quote),
+                    "has_real_response": has_real_response,
+                    "bidder_evidence": bidder_quote,
+                    "bidder_evidence_source": bidder_source,
+                    "bidder_evidence_page": bidder_page,
+                    "source_page": tender_page,
+                    "tender_quote": tender_quote,
+                    "deviation_status": _safe_text(
+                        (match or {}).get("deviation_status"),
+                        "无偏离" if has_real_response and bidder_quote else "待核实",
+                    ),
+                }
+            )
+        return rows, len(structured_requirements)
+
     requirements = _effective_requirements(pkg, tender_raw)
     package_scoped_raw = _extract_package_technical_scope_text(pkg, tender_raw)
     rows: list[dict[str, Any]] = []
@@ -1158,11 +1345,9 @@ def _build_deviation_table(
     """构建 8 列技术偏离表（升级版）。"""
     # 产品身份信息
     p_model = ""
-    p_name = ""
     p_mfr = ""
     if product is not None:
         p_model = _as_text(getattr(product, "model", "")) or _as_text(getattr(product, "product_name", ""))
-        p_name = _as_text(getattr(product, "product_name", ""))
         p_mfr = _as_text(getattr(product, "manufacturer", ""))
 
     lines = [
@@ -1186,27 +1371,32 @@ def _build_deviation_table(
         clause_no = f"{pkg.package_id}.{idx}"
         req = f"{_markdown_cell(str(row['key']))}：{_markdown_cell(str(row['requirement']))}"
         has_real = row.get("has_real_response", False)
-        bidder_ev = row.get("bidder_evidence", "")
+        bidder_ev = _safe_text(row.get("bidder_evidence"), "")
+        bidder_source = _safe_text(row.get("bidder_evidence_source"), "")
+        bidder_page = row.get("bidder_evidence_page")
         model_cell = _markdown_cell(p_model) if p_model else "[待填写]"
         response_cell = _markdown_cell(str(row['response']))
 
         if has_real and bidder_ev:
-            evidence_text = (
-                f"{_markdown_cell(str(row['evidence_source']))}；"
-                f"{_markdown_cell(bidder_ev)}"
-            )
-            deviation = "无偏离"
+            source_text = bidder_source or _safe_text(row.get("evidence_source"), "投标方资料")
+            evidence_text = f"{_markdown_cell(source_text)}；{_markdown_cell(bidder_ev)}"
+            deviation = _safe_text(row.get("deviation_status"), "无偏离")
             remark = "已匹配产品参数"
         else:
+            tender_quote = _safe_text(row.get("tender_quote"), "")
             evidence_text = (
-                f"{_markdown_cell(str(row['evidence_source']))}；"
-                "投标方证据待补充"
+                f"{_markdown_cell(_safe_text(row.get('evidence_source'), '招标原文'))}；"
+                f"{_markdown_cell(tender_quote or '投标方证据待补充')}"
             )
-            deviation = "待核实"
+            deviation = _safe_text(row.get("deviation_status"), "待核实")
             remark = "需补充投标方证据"
 
-        # 页码：使用证据引用的索引作为参考
-        page_ref = f"第{idx}项" if has_real else "—"
+        if bidder_page is not None:
+            page_ref = str(bidder_page)
+        elif row.get("source_page") is not None:
+            page_ref = str(row.get("source_page"))
+        else:
+            page_ref = "—"
 
         lines.append(
             f"| {clause_no} | {req} | {model_cell} | {response_cell} | {deviation} | {evidence_text} | {page_ref} | {remark} |"
@@ -1221,25 +1411,30 @@ def _build_deviation_table(
 
 
 def _classify_config_item(name: str) -> str:
-    """按关键词对配置项进行类别归类。"""
+    """按关键词对配置项进行类别归类。
+
+    增强分类：核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料
+    """
     n = name.strip()
-    if any(k in n for k in ("主机", "整机", "仪器", "设备", "分析仪", "检测仪")):
-        return "核心设备"
-    if any(k in n for k in ("软件", "系统", "模块", "程序")):
+    if any(k in n for k in ("主机", "整机", "仪器", "设备", "分析仪", "检测仪", "模块", "单元")):
+        return "核心模块"
+    if any(k in n for k in ("软件", "系统", "程序", "平台", "中间件")):
         return "配套软件"
-    if any(k in n for k in ("试剂", "耗材", "液", "管路", "滤芯", "滤器")):
-        return "配套耗材"
-    if any(k in n for k in ("说明书", "文件", "手册", "合格证", "报告", "彩页")):
-        return "随机技术文件"
+    if any(k in n for k in ("试剂", "耗材", "液", "管路", "滤芯", "滤器", "消耗品", "墨盒", "色带")):
+        return "初始耗材"
+    if any(k in n for k in ("说明书", "文件", "手册", "合格证", "报告", "彩页", "装箱单", "保修卡")):
+        return "随机文件"
+    if any(k in n for k in ("安装", "培训", "调试", "指导", "服务")):
+        return "安装/培训资料"
     if any(k in n for k in ("工具", "扳手", "螺丝", "钥匙")):
         return "随机工具"
-    if any(k in n for k in ("附件", "配件", "接头", "适配", "支架", "台车", "推车")):
-        return "标配附件"
+    if any(k in n for k in ("附件", "配件", "接头", "适配", "支架", "台车", "推车", "底座", "托盘")):
+        return "标准附件"
     if any(k in n for k in ("电源线", "数据线", "连接线", "电缆", "网线")):
-        return "连接线缆"
+        return "标准附件"
     if any(k in n for k in ("UPS", "稳压", "电源", "不间断")):
-        return "电源保障"
-    return "按招标文件配置要求"
+        return "标准附件"
+    return "标准附件"
 
 
 def _config_dedup_tokens(name: str) -> set[str]:
@@ -1360,11 +1555,12 @@ def _clean_config_items(
     """Config Cleaner: 统一的配置项清理规则。
 
     清理规则:
-    1. 过滤表头噪音 (序号、配置名称等)
-    2. 过滤模板说明行 (如"按招标文件要求")
-    3. 过滤重复项 (已在上游完成)
+    1. 过滤表头噪音 (序号、配置名称等表头文字)
+    2. 过滤模板说明行 (如"按招标文件要求"、"详见附件")
+    3. 过滤重复项 (基于 Jaccard 相似度二次去重)
     4. 过滤跨包污染项 (包含其他包号)
     5. 过滤非配置内容 (评分标准、商务条款等)
+    6. 过滤纯数字/纯符号/过短项
     """
     _CONFIG_POLLUTION_TOKENS = (
         "评分标准", "评分办法", "商务条款", "合同条款", "投标人须知",
@@ -1376,20 +1572,24 @@ def _clean_config_items(
 
     _TABLE_HEADER_TOKENS = (
         "序号", "配置名称", "名称", "数量", "单位", "备注", "说明", "规格",
-        "品牌", "型号", "产地", "价格", "小计", "合计",
+        "品牌", "型号", "产地", "价格", "小计", "合计", "货物名称",
+        "配置项", "分类", "用途", "功能描述",
     )
 
     _TEMPLATE_STATEMENT_PATTERNS = (
         "按招标文件", "按采购文件", "详见招标文件", "详见采购文件",
         "见附件", "见清单", "参见", "如下", "以下",
+        "按招标文件配置要求", "详见技术要求", "按采购需求",
     )
 
     cleaned: list[tuple[str, str, str, str]] = []
+    seen_token_sets: list[set[str]] = []
+
     for item in raw_config_items:
         name, unit, qty, remark = item
 
         # 规则1: 过滤表头
-        if name in _TABLE_HEADER_TOKENS:
+        if name.strip() in _TABLE_HEADER_TOKENS:
             continue
 
         # 规则2: 过滤模板说明行
@@ -1405,7 +1605,7 @@ def _clean_config_items(
             other_package_pattern = r"包\s*(\d+)"
             matches = re.findall(other_package_pattern, name)
             if matches and all(match != package_id for match in matches):
-                continue  # 包含其他包号,跨包污染
+                continue
 
         # 规则5: 最小长度检查
         if len(name) < 2:
@@ -1415,12 +1615,82 @@ def _clean_config_items(
         if re.fullmatch(r"[\d\s\-_]+", name) or re.fullmatch(r"[^\u4e00-\u9fa5\w]+", name):
             continue
 
+        # 规则7: 二次 Jaccard 去重（防止上游遗漏）
+        item_tokens = {t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", name.strip()) if len(t) >= 2}
+        is_dup = False
+        for existing_tokens in seen_token_sets:
+            if not item_tokens or not existing_tokens:
+                continue
+            intersection = item_tokens & existing_tokens
+            union = item_tokens | existing_tokens
+            if union and len(intersection) / len(union) >= 0.85:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+
         cleaned.append(item)
+        seen_token_sets.append(item_tokens)
 
     return cleaned
 
 
-def _build_configuration_table(pkg: ProcurementPackage, tender_raw: str, product: Any = None) -> str:
+def _profile_config_items(product_profile: dict[str, Any] | None) -> list[tuple[str, str, str, str]]:
+    """从产品 profile 提取配置项，覆盖6大类别：
+    核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料
+    """
+    if not product_profile:
+        return []
+
+    structured_items = product_profile.get("config_items") or []
+    parsed: list[tuple[str, str, str, str]] = []
+    for item in structured_items:
+        if not isinstance(item, dict):
+            continue
+        name = _as_text(item.get("配置项") or item.get("name") or item.get("item_name") or item.get("名称"))
+        if not name:
+            continue
+        unit = _as_text(item.get("单位") or item.get("unit") or "项")
+        qty = _as_text(item.get("数量") or item.get("qty") or item.get("quantity") or "1")
+        desc = _as_text(item.get("说明") or item.get("description") or item.get("remark") or "")
+        remark = _classify_config_item(name)
+        if desc:
+            remark = f"{remark}；{desc}"
+        parsed.append((name, unit, qty, remark))
+
+    # 从 technical_specs 补充可能的配置项（如果 config_items 不够丰富）
+    tech_specs = product_profile.get("technical_specs") or {}
+    existing_names = {item[0].strip() for item in parsed}
+    _CONFIG_HINT_KEYS = ("配置", "配备", "含", "包含", "包括", "标配", "选配", "附件")
+    for key, val in tech_specs.items():
+        val_str = str(val)
+        if any(hint in key for hint in _CONFIG_HINT_KEYS) or any(hint in val_str for hint in _CONFIG_HINT_KEYS):
+            if key.strip() not in existing_names:
+                remark = _classify_config_item(key)
+                parsed.append((key, "项", "1", f"{remark}；{val_str}"))
+                existing_names.add(key.strip())
+
+    # 确保覆盖基本类别 — 如果没有随机文件，从 evidence_refs 补充
+    category_present = {_classify_config_item(item[0]) for item in parsed}
+    evidence_refs = product_profile.get("evidence_refs") or []
+    if "随机文件" not in category_present:
+        for ref in evidence_refs:
+            if isinstance(ref, dict):
+                file_name = _as_text(ref.get("file_name", ""))
+                if file_name and file_name not in existing_names:
+                    parsed.append((file_name, "份", "1", "随机文件"))
+                    existing_names.add(file_name)
+
+    return _clean_config_items(parsed)
+
+
+def _build_configuration_table(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    product: Any = None,
+    *,
+    product_profile: dict[str, Any] | None = None,
+) -> str:
     """构建双层配置表：第一层配置明细表 + 第二层配置功能描述表。"""
     # ── 第一层：详细配置明细表（含是否标配、用途说明）──
     lines = [
@@ -1448,7 +1718,9 @@ def _build_configuration_table(pkg: ProcurementPackage, tender_raw: str, product
                 f"| 1 | {p_name or pkg.item_name}主机 | 台 | {_infer_package_quantity(pkg, tender_raw)} | 是 | 核心设备主机 | {'；'.join(identity_parts) if identity_parts else '核心设备'} |"
             )
 
-    config_items = _extract_configuration_items(pkg, tender_raw)
+    config_items = _profile_config_items(product_profile)
+    if not config_items:
+        config_items = _extract_configuration_items(pkg, tender_raw)
     if not config_items and not product_identity_lines:
         quantity = _infer_package_quantity(pkg, tender_raw)
         lines.extend(
@@ -1552,26 +1824,44 @@ def _infer_config_role(name: str, product_name: str) -> str:
     return f"配合{product_name}正常运行使用"
 
 
-def _build_main_parameter_table(pkg: ProcurementPackage, tender_raw: str, product: Any = None) -> str:
+def _build_main_parameter_table(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    product: Any = None,
+    *,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profile: dict[str, Any] | None = None,
+) -> str:
     lines = [
         f"### 包{pkg.package_id}：{pkg.item_name}",
         "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
         "|---:|---|---|---|---|",
     ]
 
-    requirements = _effective_requirements(pkg, tender_raw)
-    if not requirements:
+    requirement_rows, total_requirements = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+    )
+    if not requirement_rows:
         lines.append(f"| 1 | 核心技术参数 | 详见招标文件 | {_PENDING_BIDDER_RESPONSE} | 待核实 |")
         return "\n".join(lines)
 
-    for idx, (key, val) in enumerate(requirements[:_MAX_TECH_ROWS_PER_PACKAGE], start=1):
-        response = _build_response_value(val, req_key=key, product=product)
-        note = "无偏离" if response != _PENDING_BIDDER_RESPONSE else "待核实"
+    for idx, row in enumerate(requirement_rows, start=1):
+        note = _safe_text(
+            row.get("deviation_status"),
+            "无偏离" if row.get("has_real_response") else "待核实",
+        )
         lines.append(
-            f"| {idx} | {_markdown_cell(key)} | {_markdown_cell(val)} | {_markdown_cell(response)} | {note} |"
+            f"| {idx} | {_markdown_cell(str(row['key']))} | {_markdown_cell(str(row['requirement']))} | "
+            f"{_markdown_cell(str(row['response']))} | {note} |"
         )
 
-    if len(requirements) > _MAX_TECH_ROWS_PER_PACKAGE:
+    if total_requirements > len(requirement_rows):
         lines.append(f"|  | 其余参数 | 详见附录参数表 | {_PENDING_BIDDER_RESPONSE} | 待核实 |")
 
     return "\n".join(lines)
@@ -1583,7 +1873,6 @@ def _build_response_checklist_table(
     total_requirements: int,
     requirement_rows: list[dict[str, Any]] | None = None,
 ) -> str:
-    # Count how many rows have real product responses
     real_response_count = 0
     if requirement_rows:
         real_response_count = sum(1 for r in requirement_rows if r.get("has_real_response"))
@@ -1639,19 +1928,19 @@ def _build_evidence_mapping_table(
 
     for idx, row in enumerate(requirement_rows, start=1):
         has_real = row.get("has_real_response", False)
-        bidder_ev = row.get("bidder_evidence", "")
+        bidder_ev = _safe_text(row.get("bidder_evidence"), "")
+        bidder_source = _safe_text(row.get("bidder_evidence_source"), "")
+        tender_quote = _safe_text(row.get("tender_quote"), "")
+        bidder_page = row.get("bidder_evidence_page")
         if has_real and bidder_ev:
-            source_text = f"{_markdown_cell(str(row['evidence_source']))} / 产品参数库"
-            quote_text = (
-                f"{_markdown_cell(str(row['evidence_quote']))}；"
-                f"{_markdown_cell(bidder_ev)}"
-            )
+            page_text = f"（第{bidder_page}页）" if bidder_page is not None else ""
+            source_text = _markdown_cell(bidder_source or _safe_text(row.get("evidence_source"), "投标方资料"))
+            quote_text = f"{_markdown_cell(bidder_ev)}{page_text}"
+            if tender_quote:
+                quote_text = f"{quote_text}；{_markdown_cell(tender_quote)}"
         else:
-            source_text = f"{_markdown_cell(str(row['evidence_source']))} / 待补投标方证据"
-            quote_text = (
-                f"{_markdown_cell(str(row['evidence_quote']))}；"
-                "投标方证据待补充"
-            )
+            source_text = f"{_markdown_cell('招标原文')} / 待补投标方证据"
+            quote_text = f"{_markdown_cell(tender_quote or _safe_text(row.get('evidence_quote'), '未定位到招标原文片段'))}；投标方证据待补充"
         lines.append(
             f"| {idx} | {_markdown_cell(str(row['key']))} | {source_text} | "
             f"{quote_text} | 技术偏离表第{idx}行 |"
@@ -2061,8 +2350,14 @@ def _build_post_table_narratives(
     tender_raw: str,
     product: Any = None,
     requirement_rows: list[dict[str, Any]] | None = None,
+    *,
+    draft_mode: str = "rich",
 ) -> str:
-    """生成表格后的详细技术响应说明章节，大幅增加正文页数。
+    """生成表格后的详细技术响应说明章节。
+
+    双模式 Section Writer:
+    - draft_mode="internal": 允许待核实/待补证，用于内部审核
+    - draft_mode="rich": 必须引用本包真实参数/配置/证据，围绕本包事实展开
 
     包含 5 个子章节：
     1. 关键性能说明
@@ -2075,7 +2370,10 @@ def _build_post_table_narratives(
     p_name = _as_text(getattr(product, "product_name", "")) if product else pkg.item_name
     p_model = _as_text(getattr(product, "model", "")) if product else ""
     p_mfr = _as_text(getattr(product, "manufacturer", "")) if product else ""
+    p_brand = _as_text(getattr(product, "brand", "")) if product else ""
     specs = (getattr(product, "specifications", None) or {}) if product else {}
+    config_items_raw = (getattr(product, "config_items", None) or []) if product else []
+    evidence_refs = (getattr(product, "evidence_refs", None) or []) if product else []
     warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
     delivery_time = ""
     delivery_place = ""
@@ -2084,52 +2382,130 @@ def _build_post_table_narratives(
     if pkg.delivery_place:
         delivery_place = _safe_text(pkg.delivery_place, "采购人指定地点")
 
+    is_rich = draft_mode == "rich"
+    has_real_product = bool(p_model and p_mfr)
+
     sections: list[str] = []
 
     # ── 1. 关键性能说明 ──
     perf_lines = [
         f"### （五）关键性能说明（第{pkg.package_id}包）",
         "",
-        f"本包投标产品为{p_mfr} {p_name}（型号：{p_model or '详见技术偏离表'}），"
-        f"针对采购文件技术要求逐项响应如下：",
-        "",
     ]
+    if has_real_product:
+        perf_lines.append(
+            f"本包投标产品为{p_mfr} {p_name}（型号：{p_model}），"
+            f"品牌：{p_brand or p_mfr}，"
+            f"针对采购文件技术要求逐项响应如下："
+        )
+    else:
+        perf_lines.append(
+            f"本包投标产品为{p_name}（型号：{p_model or '待核实'}），"
+            f"针对采购文件技术要求逐项响应如下："
+        )
+    perf_lines.append("")
+
     # 列出有实参的关键性能
     real_rows = [r for r in requirement_rows if r.get("has_real_response")]
     for idx, row in enumerate(real_rows[:10], start=1):
         key = _as_text(row.get("key", ""))
         response = _as_text(row.get("response", ""))
-        perf_lines.append(f"{idx}. **{key}**：{response}。该参数满足招标文件要求，确保设备在实际应用中达到预期性能。")
-    if not real_rows:
+        evidence = _as_text(row.get("evidence_ref", ""))
+        evidence_note = f"（证据来源：{evidence}）" if evidence and is_rich else ""
+        perf_lines.append(
+            f"{idx}. **{key}**：{response}。"
+            f"该参数满足招标文件要求，确保设备在实际应用中达到预期性能。{evidence_note}"
+        )
+    if not real_rows and specs:
         for idx, (k, v) in enumerate(list(specs.items())[:8], start=1):
             perf_lines.append(f"{idx}. **{k}**：{_as_text(v)}。")
     if not real_rows and not specs:
-        perf_lines.append("（本包关键性能参数待补充产品实参后展开说明。）")
+        if is_rich:
+            perf_lines.append("（本包关键性能参数待补充产品实参后展开说明。）")
+        else:
+            perf_lines.append("（待核实：关键性能参数尚未从投标材料中提取。）")
     perf_lines.append("")
-    perf_lines.append(
-        f"综上，{p_name}的核心性能指标均满足或优于采购文件技术要求，"
-        "能够有效支撑采购人的日常业务需求。"
-    )
+    if has_real_product:
+        perf_lines.append(
+            f"综上，{p_brand or p_mfr} {p_name}（{p_model}）的核心性能指标均满足或优于"
+            "采购文件技术要求，能够有效支撑采购人的日常业务需求。"
+        )
+    else:
+        perf_lines.append(
+            f"综上，{p_name}的核心性能指标均满足或优于采购文件技术要求，"
+            "能够有效支撑采购人的日常业务需求。"
+        )
     sections.append("\n".join(perf_lines))
 
     # ── 2. 配置说明 ──
     config_lines = [
         f"### （六）配置说明（第{pkg.package_id}包）",
         "",
-        f"本包投标设备{p_name}的配置方案严格按照采购文件要求编制，"
-        "主要包括以下几个方面：",
-        "",
-        f"1. **核心设备**：{p_name}主机{_infer_package_quantity(pkg, tender_raw)}台（套），"
-        f"品牌{p_mfr or '[待填写]'}，型号{p_model or '[待填写]'}。",
-        "2. **配套软件**：随机提供设备运行所需的全套软件系统，包括数据采集、"
-        "分析处理和报告管理模块。",
-        "3. **标准附件与耗材**：按采购文件配置清单提供全部标准附件、"
-        "随机工具和初始耗材。",
-        "4. **技术文件**：提供设备使用说明书、合格证、装箱单及相关技术文件。",
-        "",
-        "上述配置方案确保设备到场即可开展安装调试工作，"
-        "各配置项的详细清单见配置明细表。",
     ]
+    if has_real_product:
+        config_lines.append(
+            f"本包投标设备{p_brand or p_mfr} {p_name}（{p_model}）的配置方案"
+            "严格按照采购文件要求编制，主要包括以下几个方面："
+        )
+    else:
+        config_lines.append(
+            f"本包投标设备{p_name}的配置方案严格按照采购文件要求编制，"
+            "主要包括以下几个方面："
+        )
+    config_lines.append("")
+
+    # 按类别组织配置项
+    if config_items_raw:
+        categorized: dict[str, list[dict]] = {}
+        for item in config_items_raw:
+            if not isinstance(item, dict):
+                continue
+            name = _as_text(item.get("配置项") or item.get("name", ""))
+            if not name:
+                continue
+            category = _classify_config_item(name)
+            categorized.setdefault(category, []).append(item)
+
+        cat_order = ["核心模块", "标准附件", "配套软件", "初始耗材", "随机文件", "安装/培训资料"]
+        cat_idx = 1
+        for cat in cat_order:
+            items = categorized.get(cat, [])
+            if not items:
+                continue
+            item_names = "、".join(
+                _as_text(it.get("配置项") or it.get("name", ""))
+                for it in items[:5]
+            )
+            desc = _as_text(items[0].get("说明", "")) if items else ""
+            config_lines.append(f"{cat_idx}. **{cat}**：{item_names}。{desc}")
+            cat_idx += 1
+        # 处理未分类项
+        for cat, items in categorized.items():
+            if cat not in cat_order and items:
+                item_names = "、".join(
+                    _as_text(it.get("配置项") or it.get("name", ""))
+                    for it in items[:5]
+                )
+                config_lines.append(f"{cat_idx}. **{cat}**：{item_names}。")
+                cat_idx += 1
+    else:
+        qty = _infer_package_quantity(pkg, tender_raw)
+        config_lines.extend([
+            f"1. **核心模块**：{p_name}主机{qty}台（套），"
+            f"品牌{p_brand or p_mfr or '[待填写]'}，型号{p_model or '[待填写]'}。",
+            "2. **配套软件**：随机提供设备运行所需的全套软件系统，包括数据采集、"
+            "分析处理和报告管理模块。",
+            "3. **标准附件与初始耗材**：按采购文件配置清单提供全部标准附件、"
+            "随机工具和初始耗材。",
+            "4. **随机文件**：提供设备使用说明书、合格证、装箱单及相关技术文件。",
+            "5. **安装/培训资料**：提供安装指导手册和操作培训教材。",
+        ])
+
+    config_lines.append("")
+    config_lines.append(
+        "上述配置方案确保设备到场即可开展安装调试工作，"
+        "各配置项的详细清单见配置明细表。"
+    )
     sections.append("\n".join(config_lines))
 
     # ── 3. 交付说明 ──
@@ -2197,8 +2573,18 @@ def _build_post_table_narratives(
 def _generate_rich_draft_sections(
     tender: TenderDocument,
     products: dict,
+    *,
+    draft_mode: str = "rich",
 ) -> list[BidDocumentSection]:
-    """Rich Draft Mode: 生成详细说明章节。
+    """双模式 Section Writer:
+
+    draft_mode="internal": Internal mode
+    - 允许：待核实、待补证
+    - 用于内部审核和进度跟踪
+
+    draft_mode="rich": Rich draft mode
+    - 必须引用：本包真实参数、本包真实配置、本包真实证据
+    - 每个包围绕本包事实展开，不套统一段落
 
     包含:
     - 关键性能说明
@@ -2208,53 +2594,114 @@ def _generate_rich_draft_sections(
     - 使用与培训说明
     """
     sections = []
+    is_rich = draft_mode == "rich"
 
     for pkg in tender.packages:
         product = products.get(pkg.package_id)
         if not product:
             continue
 
-        # 1. 关键性能说明
-        performance_content = f"### 包{pkg.package_id} 关键性能说明\n\n"
-        if product.specifications:
-            for key, value in list(product.specifications.items())[:10]:
-                performance_content += f"**{key}**：{value}\n\n"
-                performance_content += f"- 该参数满足招标文件要求，具体响应见技术偏离表。\n"
-                performance_content += f"- 产品在该指标上具备良好的性能表现，能够满足实际使用需求。\n\n"
-        else:
-            performance_content += f"{product.product_name}具备完整的技术功能，各项关键性能指标均满足招标要求。\n\n"
+        p_name = _as_text(getattr(product, "product_name", ""))
+        p_model = _as_text(getattr(product, "model", ""))
+        p_mfr = _as_text(getattr(product, "manufacturer", ""))
+        p_brand = _as_text(getattr(product, "brand", ""))
+        specs = getattr(product, "specifications", None) or {}
+        config_items = getattr(product, "config_items", None) or []
+        evidence_refs = getattr(product, "evidence_refs", None) or []
+        has_real_product = bool(p_model and p_mfr)
 
-        # 2. 配置说明
-        config_content = f"### 包{pkg.package_id} 配置说明\n\n"
-        if product.config_items:
-            for idx, item in enumerate(product.config_items[:15], 1):
-                if isinstance(item, dict):
-                    config_name = item.get("配置项", f"配置{idx}")
-                    config_desc = item.get("说明", "标配")
-                    config_content += f"{idx}. **{config_name}**：{config_desc}\n"
-                    config_content += f"   - 用途：用于设备正常运行和日常维护\n\n"
+        # 1. 关键性能说明 — 围绕本包事实
+        performance_content = f"### 包{pkg.package_id} 关键性能说明\n\n"
+        if has_real_product:
+            performance_content += (
+                f"本包投标产品为 **{p_brand or p_mfr} {p_name}**（型号：{p_model}），"
+                f"生产厂家：{p_mfr}。\n\n"
+            )
+        elif not is_rich:
+            performance_content += f"本包投标产品为{p_name}（型号：待核实，厂家：待核实）。\n\n"
         else:
-            config_content += "配置清单包含主机及全套标准附件，详见配置表。\n\n"
+            performance_content += f"本包投标产品为{p_name}。\n\n"
+
+        if specs:
+            performance_content += "**核心技术参数**：\n\n"
+            for idx, (key, value) in enumerate(list(specs.items())[:10], start=1):
+                evidence_note = ""
+                if is_rich and evidence_refs:
+                    for ref in evidence_refs:
+                        if isinstance(ref, dict) and key in _as_text(ref.get("description", "")):
+                            ref_file = _as_text(ref.get("file_name", ""))
+                            ref_page = ref.get("page", "")
+                            evidence_note = f"（证据：{ref_file}第{ref_page}页）" if ref_page else f"（证据：{ref_file}）"
+                            break
+                performance_content += (
+                    f"{idx}. **{key}**：{_as_text(value)}{evidence_note}\n"
+                    f"   该参数满足招标文件要求，确保设备在实际应用中达到预期性能。\n\n"
+                )
+        else:
+            if is_rich:
+                performance_content += "（本包关键性能参数待补充产品实参后展开说明。）\n\n"
+            else:
+                performance_content += "（待核实：关键性能参数尚未从投标材料中提取。）\n\n"
+
+        # 2. 配置说明 — 基于真实配置项
+        config_content = f"### 包{pkg.package_id} 配置说明\n\n"
+        if config_items:
+            # 按类别分组
+            categorized: dict[str, list] = {}
+            for item in config_items:
+                if isinstance(item, dict):
+                    item_name = _as_text(item.get("配置项") or item.get("name", f"配置项"))
+                    category = _classify_config_item(item_name)
+                    categorized.setdefault(category, []).append(item)
+
+            cat_order = ["核心模块", "标准附件", "配套软件", "初始耗材", "随机文件", "安装/培训资料"]
+            for cat in cat_order:
+                items = categorized.get(cat, [])
+                if not items:
+                    continue
+                config_content += f"**{cat}**：\n\n"
+                for idx, item in enumerate(items[:8], 1):
+                    if isinstance(item, dict):
+                        config_name = _as_text(item.get("配置项") or item.get("name", ""))
+                        config_desc = _as_text(item.get("说明") or item.get("description", "标配"))
+                        config_qty = _as_text(item.get("数量") or item.get("qty", "1"))
+                        config_content += f"   {idx}. {config_name}（×{config_qty}）：{config_desc}\n"
+                config_content += "\n"
+        else:
+            if is_rich:
+                config_content += "（配置清单待补充产品资料后生成，请提供产品彩页或说明书。）\n\n"
+            else:
+                config_content += "（待补证：配置清单包含主机及全套标准附件，详见配置表。）\n\n"
 
         # 3. 交付说明
         delivery_content = f"### 包{pkg.package_id} 交付说明\n\n"
         delivery_content += f"- 交货期：{pkg.delivery_time or '按招标文件约定'}\n"
         delivery_content += f"- 交货地点：{pkg.delivery_place or '采购人指定地点'}\n"
         delivery_content += "- 交货方式：由我公司负责运输至指定地点，包装符合国家标准\n"
-        delivery_content += "- 交货内容：全套设备、标准配件、技术资料、培训服务\n\n"
+        if has_real_product:
+            delivery_content += f"- 交货内容：{p_brand or p_mfr} {p_name}（{p_model}）全套设备、标准配件、技术资料\n\n"
+        else:
+            delivery_content += "- 交货内容：全套设备、标准配件、技术资料、培训服务\n\n"
 
         # 4. 验收说明
         acceptance_content = f"### 包{pkg.package_id} 验收说明\n\n"
         acceptance_content += "- 验收标准：按照国家相关标准及招标文件要求\n"
         acceptance_content += "- 验收方式：开箱验收、外观检查、功能测试、性能验证\n"
-        acceptance_content += "- 验收文件：提供产品合格证、检测报告、使用说明书等\n"
+        if evidence_refs:
+            ref_files = list({_as_text(ref.get("file_name", "")) for ref in evidence_refs if isinstance(ref, dict)})
+            acceptance_content += f"- 验收文件：{', '.join(ref_files[:5])}等\n"
+        else:
+            acceptance_content += "- 验收文件：提供产品合格证、检测报告、使用说明书等\n"
         acceptance_content += "- 验收配合：我公司派专业技术人员现场指导验收\n\n"
 
         # 5. 使用与培训说明
         training_content = f"### 包{pkg.package_id} 使用与培训说明\n\n"
         training_content += "**培训计划**：\n"
         training_content += "- 培训对象：设备操作人员、维护人员\n"
-        training_content += "- 培训内容：设备原理、操作规程、日常维护、故障排除\n"
+        if has_real_product:
+            training_content += f"- 培训内容：{p_name}（{p_model}）设备原理、操作规程、日常维护、故障排除\n"
+        else:
+            training_content += "- 培训内容：设备原理、操作规程、日常维护、故障排除\n"
         training_content += "- 培训方式：现场培训+远程技术支持\n"
         training_content += "- 培训时长：不少于3天，确保人员熟练掌握\n\n"
         training_content += "**技术支持**：\n"
@@ -2272,7 +2719,16 @@ def _generate_rich_draft_sections(
     return sections
 
 
-def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str, products: dict | None = None, mode: str = "internal") -> BidDocumentSection:
+def _gen_technical(
+    llm: ChatOpenAI,
+    tender: TenderDocument,
+    tender_raw: str,
+    products: dict | None = None,
+        *,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, dict[str, Any]] | None = None,
+) -> BidDocumentSection:
     """第三章：商务及技术部分 - 支持双模式"""
     _ = llm
     products = products or {}
@@ -2285,7 +2741,15 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str, pro
     if tender.packages:
         for pkg in tender.packages:
             product = products.get(pkg.package_id)
-            requirement_rows, total_requirements = _build_requirement_rows(pkg, tender_raw, product=product)
+            product_profile = (product_profiles or {}).get(pkg.package_id)
+            requirement_rows, total_requirements = _build_requirement_rows(
+                pkg,
+                tender_raw,
+                product=product,
+                normalized_result=normalized_result,
+                evidence_result=evidence_result,
+                product_profile=product_profile,
+            )
             mapped_count = sum(1 for row in requirement_rows if bool(row.get("mapped")))
 
             technical_sections.append(
@@ -2297,7 +2761,14 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str, pro
                     product=product,
                 )
             )
-            technical_sections.append(_build_configuration_table(pkg, tender_raw, product=product))
+            technical_sections.append(
+                _build_configuration_table(
+                    pkg,
+                    tender_raw,
+                    product=product,
+                    product_profile=product_profile,
+                )
+            )
             technical_sections.append(
                 _build_response_checklist_table(
                     pkg=pkg,
@@ -2383,7 +2854,16 @@ def _gen_technical(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str, pro
     return BidDocumentSection(section_title="第三章 商务及技术部分", content=content.strip())
 
 
-def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str, products: dict | None = None) -> BidDocumentSection:
+def _gen_appendix(
+    llm: ChatOpenAI,
+    tender: TenderDocument,
+    tender_raw: str,
+    products: dict | None = None,
+    *,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, dict[str, Any]] | None = None,
+) -> BidDocumentSection:
     """第四章：报价书附件（技术参数明细 + 售后服务方案）"""
     _ = llm
     products = products or {}
@@ -2394,7 +2874,16 @@ def _gen_appendix(llm: ChatOpenAI, tender: TenderDocument, tender_raw: str, prod
     parameter_tables: list[str] = []
     if tender.packages:
         for pkg in tender.packages:
-            parameter_tables.append(_build_main_parameter_table(pkg, tender_raw, product=products.get(pkg.package_id)))
+            parameter_tables.append(
+                _build_main_parameter_table(
+                    pkg,
+                    tender_raw,
+                    product=products.get(pkg.package_id),
+                    normalized_result=normalized_result,
+                    evidence_result=evidence_result,
+                    product_profile=(product_profiles or {}).get(pkg.package_id),
+                )
+            )
     else:
         parameter_tables.append(
             "\n".join(
@@ -2455,6 +2944,10 @@ def generate_bid_sections(
     llm: ChatOpenAI,
     products: dict | None = None,
     mode: str = "rich_draft",  # 新增参数: "internal" | "rich_draft"
+    *,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> list[BidDocumentSection]:
     """
     根据招标文件生成全部投标文件章节 - 支持双模式。
@@ -2487,8 +2980,24 @@ def generate_bid_sections(
     sections = [
         _gen_qualification(llm, tender),
         _gen_compliance(llm, tender),
-        _gen_technical(llm, tender, tender_raw, products=products, mode=mode),
-        _gen_appendix(llm, tender, tender_raw, products=products),
+        _gen_technical(
+            llm,
+            tender,
+            tender_raw,
+            products=products,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
+        ),
+        _gen_appendix(
+            llm,
+            tender,
+            tender_raw,
+            products=products,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
+        ),
     ]
 
     # Rich draft mode 需要额外的详细说明章节

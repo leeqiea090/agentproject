@@ -310,6 +310,55 @@ def test_requirement_rows_keep_response_values_pending_until_bidder_facts_are_bo
     assert all("承诺满足" not in row["response"] for row in rows)
 
 
+def test_requirement_rows_can_consume_structured_workflow_matches() -> None:
+    tender = _sample_tender()
+    pkg = tender.packages[0]
+
+    rows, total = _build_requirement_rows(
+        pkg,
+        tender_raw="",
+        normalized_result={
+            "technical_requirements": [
+                {
+                    "requirement_id": "T-1-1",
+                    "package_id": "1",
+                    "param_name": "激光器",
+                    "normalized_value": "≥3",
+                    "source_text": "激光器≥3",
+                    "source_page": 12,
+                }
+            ]
+        },
+        evidence_result={
+            "technical_matches": [
+                {
+                    "requirement_id": "T-1-1",
+                    "package_id": "1",
+                    "parameter_name": "激光器",
+                    "response_value": "3个独立激光器",
+                    "deviation_status": "无偏离",
+                    "bid_evidence_file": "产品彩页.pdf",
+                    "bid_evidence_page": 8,
+                    "bid_evidence_type": "产品规格",
+                    "bid_evidence_snippet": "激光器：3个独立激光器",
+                    "bidder_evidence_quote": "激光器：3个独立激光器",
+                    "bidder_evidence_source": "包1 产品参数",
+                    "tender_source_text": "激光器≥3",
+                    "tender_source_page": 12,
+                    "proven": True,
+                }
+            ]
+        },
+        product_profile={"technical_specs": {"激光器": "3个独立激光器"}},
+    )
+
+    assert total == 1
+    assert rows[0]["response"] == "3个独立激光器"
+    assert rows[0]["evidence_source"] == "产品彩页.pdf / 产品规格"
+    assert rows[0]["bidder_evidence_page"] == 8
+    assert rows[0]["tender_quote"] == "激光器≥3"
+
+
 def test_generated_sections_do_not_use_commitment_sentences_as_response_values() -> None:
     tender = _sample_tender()
     pkg = tender.packages[0]
@@ -394,10 +443,33 @@ def test_configuration_table_can_extract_items_from_raw_configuration_section() 
         ),
     )
 
-    assert "主机 | 台 | 1 | 是 | 核心检测/分析设备 | 核心设备" in table
+    assert "主机 | 台 | 1 | 是 | 核心检测/分析设备 | 核心模块" in table
     assert "上样组件 | 套 | 1 |" in table
     assert "说明书 | 份 | 1 |" in table
     assert "随机附件及工具" not in table
+
+
+def test_configuration_table_can_use_product_profile_config_items() -> None:
+    tender = _sample_tender(project_name="检验科设备采购项目")
+    pkg = tender.packages[0]
+    pkg.item_name = "进口全自动电泳仪"
+
+    table = _build_configuration_table(
+        pkg,
+        tender_raw="",
+        product_profile={
+            "config_items": [
+                {"配置项": "主机", "单位": "台", "数量": "1", "说明": "核心检测设备"},
+                {"配置项": "上样组件", "单位": "套", "数量": "1", "说明": "自动上样模块"},
+                {"配置项": "说明书", "单位": "份", "数量": "1", "说明": "中文操作资料"},
+            ]
+        },
+    )
+
+    assert "主机 | 台 | 1 | 是 |" in table
+    assert "核心模块；核心检测设备" in table or "核心模块" in table
+    assert "上样组件 | 套 | 1 |" in table
+    assert "说明书 | 份 | 1 |" in table
 
 
 def test_requirement_rows_trim_evidence_before_configuration_and_complaint_sections() -> None:

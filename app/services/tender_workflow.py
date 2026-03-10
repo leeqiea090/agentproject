@@ -986,6 +986,28 @@ def _normalize_requirements(
             logger.warning("包%s 原子化拆分失败：%s", pkg.package_id, exc)
         # --- End atomization ---
 
+        # --- 过滤总括条款：禁止笼统概述直接进入最终技术表 ---
+        _BLANKET_PATTERNS = (
+            "满足招标文件所有要求",
+            "符合国家标准",
+            "按招标文件要求提供",
+            "详见招标文件",
+            "满足采购文件全部要求",
+            "完全响应招标文件",
+            "以上参数均满足",
+            "所有技术参数满足",
+        )
+        filtered_tech_items: list[tuple[str, str]] = []
+        for key, value in tech_items:
+            combined = f"{key} {value}"
+            # 跳过纯总括性条款
+            if any(bp in combined for bp in _BLANKET_PATTERNS) and len(value.strip()) < 30:
+                logger.debug("包%s 过滤总括条款：%s = %s", pkg.package_id, key, value)
+                continue
+            filtered_tech_items.append((key, value))
+        tech_items = filtered_tech_items
+        # --- End blanket clause filter ---
+
         for idx, (key, value) in enumerate(tech_items, start=1):
             comparator, threshold, unit = _parse_threshold(_safe_text(value))
             # 增强: 提取 source_page 和 source_text
@@ -1002,20 +1024,20 @@ def _normalize_requirements(
                     "requirement_id": f"T-{pkg.package_id}-{idx}",
                     "package_id": pkg.package_id,
                     "clause_no": f"{pkg.package_id}.{idx}",
-                    "param_name": key,  # 改名为 param_name 与目标一致
-                    "parameter_name": key,  # 保留兼容性
-                    "operator": comparator or "",  # 添加 operator 字段
-                    "comparator": comparator,  # 保留兼容性
+                    "param_name": key,
+                    "parameter_name": key,
+                    "operator": comparator or "",
+                    "comparator": comparator,
                     "threshold": threshold or "",
                     "unit": unit or "",
                     "normalized_value": _safe_text(value),
                     "response_field_hint": key,
                     "response_value_type": "numeric" if comparator and threshold else "text",
-                    "is_material_requirement": _looks_material_requirement(f"{key} {value}"),  # 改名为 is_material_requirement
-                    "is_material": _looks_material_requirement(f"{key} {value}"),  # 保留兼容性
-                    "source_page": source_page,  # 新增字段
-                    "source_text": source_excerpt or "",  # 新增字段,改名为 source_text
-                    "source_excerpt": source_excerpt or "",  # 保留兼容性
+                    "is_material_requirement": _looks_material_requirement(f"{key} {value}"),
+                    "is_material": _looks_material_requirement(f"{key} {value}"),
+                    "source_page": source_page,
+                    "source_text": source_excerpt or "",
+                    "source_excerpt": source_excerpt or "",
                 }
             )
 
@@ -1130,32 +1152,189 @@ def _expand_extracted_facts(
     }
 
 
-def _build_product_profile(product: ProductSpecification) -> dict[str, Any]:
-    """Product Profile Builder: 构建统一的投标产品事实对象。
+def _extract_specs_from_bid_material(material: dict[str, Any]) -> dict[str, Any]:
+    """从单份投标材料中提取技术参数和证据引用。"""
+    extracted = {
+        "specs": {},
+        "config_items": [],
+        "evidence_refs": [],
+        "brand": "",
+        "model": "",
+        "manufacturer": "",
+    }
+    file_type = _safe_text(material.get("file_type"))
+    file_name = _safe_text(material.get("file_name", ""))
+    page_count = material.get("page_count", 0)
+    extracted_specs = material.get("extracted_specs") or {}
+    extracted_text = _safe_text(material.get("extracted_text", ""))
+    key_pages = material.get("key_pages") or []
 
-    目标:
-    - 整理投标产品资料为统一事实对象
-    - 补充 brand, technical_specs, config_items, functional_notes等字段
-    - 确保 writer 能拿到完整的产品真值
+    # 从 extracted_specs 合并参数
+    if extracted_specs:
+        extracted["specs"].update(extracted_specs)
+
+    # 从 extracted_text 中提取品牌/型号/厂家
+    if extracted_text:
+        brand_match = re.search(r"(?:品牌|Brand)[：:\s]*([^\n，,；;]{2,30})", extracted_text)
+        if brand_match:
+            extracted["brand"] = brand_match.group(1).strip()
+        model_match = re.search(r"(?:型号|Model|规格型号)[：:\s]*([^\n，,；;]{2,40})", extracted_text)
+        if model_match:
+            extracted["model"] = model_match.group(1).strip()
+        mfr_match = re.search(r"(?:生产厂家|制造商|Manufacturer|厂家)[：:\s]*([^\n，,；;]{2,40})", extracted_text)
+        if mfr_match:
+            extracted["manufacturer"] = mfr_match.group(1).strip()
+
+        # 从说明书/彩页中提取配置项
+        if file_type in ("brochure", "manual", "spec_sheet"):
+            config_pattern = re.findall(
+                r"(?:标准配置|标配|随机附件|装箱清单|配置清单)[：:]\s*(.+?)(?:\n\n|\Z)",
+                extracted_text,
+                re.DOTALL,
+            )
+            for block in config_pattern:
+                for line in block.strip().splitlines():
+                    line = line.strip(" -·•●○◆▪※")
+                    if line and len(line) >= 2:
+                        extracted["config_items"].append({
+                            "配置项": line,
+                            "说明": "标配",
+                            "数量": "1",
+                            "来源": file_name,
+                        })
+
+    # 构建证据引用
+    for kp in key_pages:
+        if isinstance(kp, dict) and kp.get("page"):
+            extracted["evidence_refs"].append({
+                "file_name": file_name,
+                "file_type": file_type,
+                "page": kp["page"],
+                "description": _safe_text(kp.get("content", "")),
+            })
+
+    # 如果没有 key_pages 但有页数信息，生成通用引用
+    if not key_pages and page_count > 0:
+        type_label = {
+            "brochure": "产品彩页",
+            "manual": "产品说明书",
+            "registration": "注册证",
+            "test_report": "检测/质评报告",
+            "spec_sheet": "厂家参数页",
+        }.get(file_type, file_name)
+        extracted["evidence_refs"].append({
+            "file_name": file_name,
+            "file_type": file_type,
+            "page": 1,
+            "description": f"{type_label}（共{page_count}页）",
+        })
+
+    return extracted
+
+
+def _build_product_profile(product: ProductSpecification) -> dict[str, Any]:
+    """Product Profile Builder: 从投标材料中提取真实产品事实构建统一对象。
+
+    输入（投标材料）:
+    - 彩页 (brochure)
+    - 说明书 (manual)
+    - 注册证 (registration)
+    - 检测/质评报告 (test_report)
+    - 厂家参数页 (spec_sheet)
+
+    输出:
+    - brand: 品牌名称
+    - model: 产品型号
+    - manufacturer: 生产厂家
+    - technical_specs: 技术参数（从材料中提取的真实值）
+    - config_items: 配置项清单
+    - evidence_refs: 证据引用（文件名+页码）
 
     硬规则:
     - 没有 brand/model 时,技术章节只能出 internal draft
     - 没有 technical_specs 时,不允许写"实际响应值"
     """
+    # 从 bid_materials 中提取事实
+    bid_materials = []
+    if hasattr(product, "bid_materials"):
+        bid_materials = product.bid_materials or []
+
+    merged_specs: dict[str, Any] = {}
+    merged_config_items: list[dict[str, Any]] = []
+    merged_evidence_refs: list[dict[str, Any]] = []
+    material_brand = ""
+    material_model = ""
+    material_manufacturer = ""
+
+    for material in bid_materials:
+        mat_dict = material.model_dump() if hasattr(material, "model_dump") else (material if isinstance(material, dict) else {})
+        extracted = _extract_specs_from_bid_material(mat_dict)
+        merged_specs.update(extracted["specs"])
+        merged_config_items.extend(extracted["config_items"])
+        merged_evidence_refs.extend(extracted["evidence_refs"])
+        if extracted["brand"] and not material_brand:
+            material_brand = extracted["brand"]
+        if extracted["model"] and not material_model:
+            material_model = extracted["model"]
+        if extracted["manufacturer"] and not material_manufacturer:
+            material_manufacturer = extracted["manufacturer"]
+
+    # 合并：材料提取值 > product 字段值 > 推断值
+    final_brand = product.brand or material_brand or (product.manufacturer.split()[0] if product.manufacturer else "")
+    final_model = product.model or material_model
+    final_manufacturer = product.manufacturer or material_manufacturer
+    final_specs = product.specifications or product.technical_specs or {}
+    if merged_specs:
+        combined_specs = dict(final_specs)
+        combined_specs.update(merged_specs)
+        final_specs = combined_specs
+
+    final_config = product.config_items or []
+    if merged_config_items:
+        existing_names = {_safe_text(item.get("配置项") or item.get("name", "")) for item in final_config if isinstance(item, dict)}
+        for new_item in merged_config_items:
+            name = _safe_text(new_item.get("配置项", ""))
+            if name and name not in existing_names:
+                final_config.append(new_item)
+                existing_names.add(name)
+
+    final_evidence = product.evidence_refs or []
+    if merged_evidence_refs:
+        existing_refs = {
+            f"{_safe_text(ref.get('file_name', ''))}:{ref.get('page', '')}"
+            for ref in final_evidence if isinstance(ref, dict)
+        }
+        for new_ref in merged_evidence_refs:
+            key = f"{_safe_text(new_ref.get('file_name', ''))}:{new_ref.get('page', '')}"
+            if key not in existing_refs:
+                final_evidence.append(new_ref)
+                existing_refs.add(key)
+
     profile = {
-        "brand": product.brand or (product.manufacturer.split()[0] if product.manufacturer else ""),
-        "model": product.model,
-        "manufacturer": product.manufacturer,
+        "brand": final_brand,
+        "model": final_model,
+        "manufacturer": final_manufacturer,
         "product_name": product.product_name,
-        "technical_specs": product.specifications or product.technical_specs or {},
-        "config_items": product.config_items or [],
-        "functional_notes": product.functional_notes or f"{product.product_name}具备完整的技术功能，能够满足采购文件要求。",
+        "technical_specs": final_specs,
+        "config_items": final_config,
+        "functional_notes": product.functional_notes or (
+            f"{product.product_name}具备完整的技术功能，能够满足采购文件要求。"
+            if not final_specs else
+            f"{product.product_name}（{final_model}）核心参数已从投标材料中提取，详见技术偏离表。"
+        ),
         "acceptance_notes": product.acceptance_notes or "按照采购文件及国家相关标准进行验收。",
         "training_notes": product.training_notes or "提供设备操作培训，确保用户熟练掌握。",
-        "evidence_refs": product.evidence_refs or [],
-        "has_complete_identity": bool(product.model and product.manufacturer),
-        "has_technical_specs": bool(product.specifications or product.technical_specs),
-        "ready_for_external": bool(product.model and product.manufacturer and (product.specifications or product.technical_specs)),
+        "evidence_refs": final_evidence,
+        "bid_material_types": [
+            (m.model_dump() if hasattr(m, "model_dump") else m).get("file_type", "")
+            for m in bid_materials
+        ],
+        "has_complete_identity": bool(final_model and final_manufacturer),
+        "has_technical_specs": bool(final_specs),
+        "has_bid_materials": len(bid_materials) > 0,
+        "ready_for_external": bool(
+            final_model and final_manufacturer and final_specs and final_evidence
+        ),
     }
 
     # 如果 config_items 为空,从 specifications 中提取基础配置
@@ -1780,9 +1959,11 @@ def _bind_bid_evidence(
 ) -> list[dict[str, Any]]:
     """BidEvidenceBinder: 绑定投标方证据 (投标侧)。
 
-    目标:
-    - 提取投标方的产品彩页、说明书、注册证等证据
-    - 优先展示在 external draft 的证据列
+    正式版主要引用此层，输出具体的:
+    - 彩页第 X 页
+    - 说明书第 X 页
+    - 注册证第 X 页
+    - 检测报告第 X 页
 
     输出字段:
     - requirement_id
@@ -1791,6 +1972,14 @@ def _bind_bid_evidence(
     - evidence_snippet
     - evidence_type
     """
+    _FILE_TYPE_LABELS = {
+        "brochure": "产品彩页",
+        "manual": "产品说明书",
+        "registration": "注册证",
+        "test_report": "检测/质评报告",
+        "spec_sheet": "厂家参数页",
+    }
+
     bid_evidence_list = []
 
     for req in requirements:
@@ -1809,41 +1998,110 @@ def _bind_bid_evidence(
         evidence_snippet = ""
         evidence_type = ""
 
-        # 优先级1: 产品注册证
-        if product and _contains_any(requirement_text, ("注册证", "备案证", "医疗器械")) and product.registration_number.strip():
-            evidence_file = "注册证.pdf"
-            evidence_snippet = product.registration_number
-            evidence_type = "注册证"
+        # ── 从 bid_materials 中精确匹配证据页码 ──
+        bid_materials = []
+        if product and hasattr(product, "bid_materials"):
+            bid_materials = product.bid_materials or []
 
-        # 优先级2: 产品彩页/说明书 - 从 technical_specs 匹配
-        elif product and product.specifications:
-            for spec_key, spec_val in product.specifications.items():
-                if spec_key and _parameter_name_matches(spec_key, parameter_name):
-                    evidence_file = "产品彩页.pdf"
-                    evidence_snippet = f"{spec_key}：{spec_val}"
-                    evidence_type = "产品规格"
+        material_matched = False
+        if bid_materials:
+            # 按优先级匹配：注册证 > 检测报告 > 彩页 > 说明书 > 厂家参数页
+            priority_order = ["registration", "test_report", "brochure", "manual", "spec_sheet"]
+
+            # 注册证类需求优先匹配注册证
+            if _contains_any(requirement_text, ("注册证", "备案证", "医疗器械")):
+                priority_order = ["registration", "test_report", "brochure", "manual", "spec_sheet"]
+            # 参数类需求优先匹配彩页/说明书
+            elif _contains_any(requirement_text, ("参数", "规格", "性能", "技术")):
+                priority_order = ["brochure", "spec_sheet", "manual", "test_report", "registration"]
+            # 检测类需求优先匹配检测报告
+            elif _contains_any(requirement_text, ("检测", "检验", "质评", "报告")):
+                priority_order = ["test_report", "brochure", "manual", "spec_sheet", "registration"]
+
+            for target_type in priority_order:
+                for mat in bid_materials:
+                    mat_dict = mat.model_dump() if hasattr(mat, "model_dump") else (mat if isinstance(mat, dict) else {})
+                    mat_type = _safe_text(mat_dict.get("file_type", ""))
+                    if mat_type != target_type:
+                        continue
+
+                    mat_name = _safe_text(mat_dict.get("file_name", ""))
+                    mat_specs = mat_dict.get("extracted_specs") or {}
+                    mat_text = _safe_text(mat_dict.get("extracted_text", ""))
+                    key_pages = mat_dict.get("key_pages") or []
+
+                    # 检查 extracted_specs 是否匹配参数名
+                    spec_matched_value = ""
+                    for spec_key, spec_val in mat_specs.items():
+                        if spec_key and _parameter_name_matches(spec_key, parameter_name):
+                            spec_matched_value = f"{spec_key}：{spec_val}"
+                            break
+
+                    # 检查 key_pages 是否包含相关内容
+                    matched_page = None
+                    for kp in key_pages:
+                        if isinstance(kp, dict):
+                            kp_content = _safe_text(kp.get("content", ""))
+                            if parameter_name and parameter_name in kp_content:
+                                matched_page = kp.get("page")
+                                break
+
+                    # 如果没有精确页码匹配，检查文本是否包含参数名
+                    if not matched_page and parameter_name and parameter_name in mat_text:
+                        matched_page = key_pages[0].get("page") if key_pages else 1
+
+                    if spec_matched_value or matched_page:
+                        type_label = _FILE_TYPE_LABELS.get(mat_type, mat_name)
+                        evidence_file = mat_name or f"{type_label}.pdf"
+                        evidence_page = matched_page
+                        evidence_snippet = spec_matched_value or f"详见{type_label}"
+                        evidence_type = type_label
+                        page_ref = f"第{matched_page}页" if matched_page else ""
+                        if page_ref:
+                            evidence_snippet = f"{evidence_snippet}（{type_label}{page_ref}）"
+                        material_matched = True
+                        break
+
+                if material_matched:
                     break
 
-        # 优先级3: 产品授权书
-        elif product and _contains_any(requirement_text, ("授权", "授权书", "代理")) and product.authorization_letter.strip():
-            evidence_file = "授权书.pdf"
-            evidence_snippet = product.authorization_letter
-            evidence_type = "授权文件"
+        # ── 原有匹配逻辑作为兜底 ──
+        if not material_matched:
+            # 优先级1: 产品注册证
+            if product and _contains_any(requirement_text, ("注册证", "备案证", "医疗器械")) and product.registration_number.strip():
+                evidence_file = "注册证.pdf"
+                evidence_snippet = product.registration_number
+                evidence_type = "注册证"
 
-        # 优先级4: 认证证书
-        elif product and product.certifications and _contains_any(requirement_text, ("认证", "证书", "环保", "节能")):
-            evidence_file = "认证证书.pdf"
-            evidence_snippet = "；".join(product.certifications[:3])
-            evidence_type = "认证证书"
+            # 优先级2: 产品彩页/说明书 - 从 technical_specs 匹配
+            elif product and product.specifications:
+                for spec_key, spec_val in product.specifications.items():
+                    if spec_key and _parameter_name_matches(spec_key, parameter_name):
+                        evidence_file = "产品彩页.pdf"
+                        evidence_snippet = f"{spec_key}：{spec_val}"
+                        evidence_type = "产品规格"
+                        break
 
-        # 优先级5: 企业证照
-        elif company and _contains_any(requirement_text, ("营业执照", "许可证", "资质")) and company.licenses:
-            evidence_file = "企业证照.pdf"
-            evidence_snippet = "；".join(lic.license_type for lic in company.licenses[:3])
-            evidence_type = "企业证照"
+            # 优先级3: 产品授权书
+            elif product and _contains_any(requirement_text, ("授权", "授权书", "代理")) and product.authorization_letter.strip():
+                evidence_file = "授权书.pdf"
+                evidence_snippet = product.authorization_letter
+                evidence_type = "授权文件"
 
-        # 如果有 evidence_refs,提取页码
-        if product and product.evidence_refs:
+            # 优先级4: 认证证书
+            elif product and product.certifications and _contains_any(requirement_text, ("认证", "证书", "环保", "节能")):
+                evidence_file = "认证证书.pdf"
+                evidence_snippet = "；".join(product.certifications[:3])
+                evidence_type = "认证证书"
+
+            # 优先级5: 企业证照
+            elif company and _contains_any(requirement_text, ("营业执照", "许可证", "资质")) and company.licenses:
+                evidence_file = "企业证照.pdf"
+                evidence_snippet = "；".join(lic.license_type for lic in company.licenses[:3])
+                evidence_type = "企业证照"
+
+        # 从 evidence_refs 补充页码（兜底）
+        if product and product.evidence_refs and not evidence_page:
             for ref in product.evidence_refs:
                 if isinstance(ref, dict) and _contains_any(_safe_text(ref.get("description", "")), (parameter_name,)):
                     evidence_page = ref.get("page")
@@ -1857,6 +2115,7 @@ def _bind_bid_evidence(
             "evidence_page": evidence_page,
             "evidence_snippet": evidence_snippet or "需补充产品参数或证照",
             "evidence_type": evidence_type or "待补充",
+            "from_bid_material": material_matched,
         })
 
     return bid_evidence_list
@@ -1999,6 +2258,42 @@ def _build_evidence_bindings(
         company=company,
         products=products,
     )
+    technical_requirements = [
+        item
+        for item in normalized_result.get("technical_requirements", [])
+        if isinstance(item, dict)
+    ]
+    tender_source_evidence = _bind_tender_source_evidence(technical_requirements, raw_text)
+    bid_side_evidence = _bind_bid_evidence(technical_requirements, company, products)
+    tender_source_map = {
+        _safe_text(item.get("requirement_id")): item
+        for item in tender_source_evidence
+        if isinstance(item, dict) and _safe_text(item.get("requirement_id"))
+    }
+    bid_side_map = {
+        _safe_text(item.get("requirement_id")): item
+        for item in bid_side_evidence
+        if isinstance(item, dict) and _safe_text(item.get("requirement_id"))
+    }
+    enriched_technical_matches: list[dict[str, Any]] = []
+    for match in match_result.get("technical_matches", []):
+        if not isinstance(match, dict):
+            continue
+        requirement_id = _safe_text(match.get("requirement_id"))
+        tender_meta = tender_source_map.get(requirement_id, {})
+        bid_meta = bid_side_map.get(requirement_id, {})
+        enriched_technical_matches.append(
+            {
+                **match,
+                "tender_source_page": tender_meta.get("tender_source_page"),
+                "tender_source_text": _safe_text(tender_meta.get("tender_source_text"), ""),
+                "bid_evidence_file": _safe_text(bid_meta.get("evidence_file"), ""),
+                "bid_evidence_page": bid_meta.get("evidence_page"),
+                "bid_evidence_type": _safe_text(bid_meta.get("evidence_type"), ""),
+                "bid_evidence_snippet": _safe_text(bid_meta.get("evidence_snippet"), ""),
+            }
+        )
+    match_result["technical_matches"] = enriched_technical_matches
 
     bindings: list[dict[str, Any]] = []
     matched_count = 0
@@ -2244,6 +2539,8 @@ def _build_evidence_bindings(
     return {
         "bindings": bindings,
         "technical_matches": match_result.get("technical_matches", []),
+        "tender_source_evidence": tender_source_evidence,
+        "bid_side_evidence": bid_side_evidence,
         "match_rate": match_result.get("match_rate", 1.0),
         "matched_count": matched_count,
         "bidder_matched_count": bidder_matched_count,
@@ -3229,20 +3526,25 @@ def _sanitize_for_external_delivery(
     min_config_items = _DETAIL_TARGETS["config_items_min"]
     config_rows_by_pkg: dict[str, int] = {}
     for cleaned in cleaned_sections:
-        if "配置清单" not in cleaned.content:
+        if not any(marker in cleaned.content for marker in ("详细配置明细表", "配置清单", "配置说明")):
             continue
         current_pkg = ""
         for line in cleaned.content.splitlines():
             stripped = line.strip()
-            if "配置清单" in stripped and stripped.startswith("#"):
+            if any(marker in stripped for marker in ("详细配置明细表", "配置清单")) and stripped.startswith("#"):
                 pkg_match = re.search(r"[包第]\s*(\d+)\s*[包）)]", stripped)
                 current_pkg = pkg_match.group(1) if pkg_match else "?"
                 config_rows_by_pkg.setdefault(current_pkg, 0)
             elif stripped.startswith("|") and not stripped.startswith("|---") and not stripped.startswith("| 序号"):
                 if current_pkg and "|" in stripped:
                     cells = [c.strip() for c in stripped.split("|")]
-                    # 有效配置行：至少3列，第1列是序号
-                    if len(cells) >= 4 and re.match(r"^\d+$", cells[1].strip()):
+                    # 有效配置行：明细表至少包含配置名称/数量/用途说明等列，且首列为序号
+                    if (
+                        len(cells) >= 7
+                        and re.match(r"^\d+$", cells[1].strip())
+                        and cells[2].strip()
+                        and cells[5].strip()
+                    ):
                         config_rows_by_pkg[current_pkg] = config_rows_by_pkg.get(current_pkg, 0) + 1
 
     for pkg_id, config_count in config_rows_by_pkg.items():
@@ -3276,6 +3578,70 @@ def _sanitize_for_external_delivery(
         blocked_reasons.append(f"发现{single_sentence_count}条响应过于简单（不足20字），需补充详细说明")
     # --- End content-quality hard gates ---
 
+    # --- 增强 Hard Gate: internal 与 external 真正分流 ---
+    # 硬性阻断条件（出现任何一项即禁止 external draft）:
+    _HARD_BLOCK_MARKERS = (
+        "[待填写]",
+        "待核实",
+        "待补投标方证据",
+        "待补充投标方证据",
+        "需补充产品参数或证照",
+        "待补证",
+    )
+    hard_block_sections: dict[str, list[str]] = {}
+    for cleaned in cleaned_sections:
+        found_markers = []
+        for marker in _HARD_BLOCK_MARKERS:
+            if marker in cleaned.content:
+                found_markers.append(marker)
+        if found_markers:
+            hard_block_sections[cleaned.section_title] = found_markers
+
+    if hard_block_sections:
+        sample_sections = list(hard_block_sections.keys())[:3]
+        sample_markers = set()
+        for markers in hard_block_sections.values():
+            sample_markers.update(markers)
+        blocked_reasons.append(
+            f"发现 {len(hard_block_sections)} 个章节含 internal draft 标记"
+            f"（{', '.join(sorted(sample_markers)[:4])}）"
+            f"，涉及：{';'.join(sample_sections)}"
+        )
+
+    # 检查关键参数未填（技术偏离表中关键列为空）
+    empty_key_param_count = 0
+    for cleaned in cleaned_sections:
+        if "技术偏离" not in cleaned.content:
+            continue
+        for line in cleaned.content.splitlines():
+            if not line.strip().startswith("|") or line.strip().startswith("|---"):
+                continue
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) >= 6:
+                response_cell = cells[4] if len(cells) > 4 else ""
+                if not response_cell or response_cell in ("", " ", "-"):
+                    empty_key_param_count += 1
+    if empty_key_param_count >= 3:
+        blocked_reasons.append(f"技术偏离表中有 {empty_key_param_count} 项关键参数响应为空")
+
+    # 检查证据列页码空白
+    evidence_page_blank_count = 0
+    for cleaned in cleaned_sections:
+        if "证据" not in cleaned.content and "映射" not in cleaned.content:
+            continue
+        for line in cleaned.content.splitlines():
+            if not line.strip().startswith("|") or line.strip().startswith("|---"):
+                continue
+            cells = [c.strip() for c in line.split("|")]
+            # 检查证据/页码列是否空白
+            for idx, cell in enumerate(cells):
+                if idx > 0 and ("页码" in str(cells[0] if idx > 0 else "") or "证据" in str(cells[0] if idx > 0 else "")):
+                    if not cell or cell in ("", " ", "-", "待补充"):
+                        evidence_page_blank_count += 1
+    if evidence_page_blank_count >= 5:
+        blocked_reasons.append(f"证据映射表中有 {evidence_page_blank_count} 项页码空白")
+    # --- End enhanced hard gates ---
+
     if hard_validation_result and hard_validation_result.get("overall_status") != "通过":
         blocked_reasons.append("硬校验未通过")
     if evidence_result and float(evidence_result.get("proven_completion_rate", 1.0)) < _MIN_PROVEN_COMPLETION_RATE:
@@ -3293,6 +3659,9 @@ def _sanitize_for_external_delivery(
             f"（品牌型号/生产厂家等未填写：{';'.join(critical_placeholder_sections[:3])}）"
         )
 
+    # 计算 draft_level: internal / external
+    draft_level = "external" if not blocked_reasons else "internal"
+
     if blocked_reasons:
         status = "阻断外发"
     else:
@@ -3309,13 +3678,16 @@ def _sanitize_for_external_delivery(
     if critical_placeholder_sections:
         summary += f" {len(critical_placeholder_sections)} 个章节含关键占位符（品牌型号/生产厂家等），已阻断外发。"
     if blocked_reasons:
-        summary += f" 当前外发已阻断：{'；'.join(blocked_reasons)}。"
+        summary += f" 当前外发已阻断：{'；'.join(blocked_reasons[:5])}。"
+    summary += f" 当前稿件级别：{draft_level}。"
 
     return cleaned_sections, {
         "status": status,
+        "draft_level": draft_level,
         "changed_sections": changed_sections,
         "placeholder_sections": placeholder_sections,
         "unresolved_marker_sections": unresolved_marker_sections,
+        "hard_block_sections": hard_block_sections,
         "blocked_reasons": blocked_reasons,
         "summary": summary,
     }
@@ -3496,6 +3868,120 @@ def _build_regression_report(
         "value": round(config_pollution_rate, 4),
     })
 
+    config_rows_by_pkg: dict[str, int] = {}
+    deviation_rows_by_pkg: dict[str, int] = {}
+    evidence_rows_by_pkg: dict[str, int] = {}
+    current_mode = ""
+    current_pkg = ""
+    for sec in (sections or []):
+        for line in sec.content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                if "详细配置明细表" in stripped or "配置清单" in stripped:
+                    current_mode = "config"
+                elif "技术偏离" in stripped:
+                    current_mode = "deviation"
+                elif "技术条款证据映射表" in stripped:
+                    current_mode = "mapping"
+                else:
+                    current_mode = ""
+                pkg_match = re.search(r"第\s*(\d+)\s*包", stripped)
+                current_pkg = pkg_match.group(1) if pkg_match else ""
+                if current_mode == "config" and current_pkg:
+                    config_rows_by_pkg.setdefault(current_pkg, 0)
+                if current_mode == "deviation" and current_pkg:
+                    deviation_rows_by_pkg.setdefault(current_pkg, 0)
+                if current_mode == "mapping" and current_pkg:
+                    evidence_rows_by_pkg.setdefault(current_pkg, 0)
+                continue
+
+            if not stripped.startswith("|") or stripped.startswith("|---"):
+                continue
+            if current_mode == "config" and not stripped.startswith("| 序号"):
+                cells = [c.strip() for c in stripped.split("|")]
+                if (
+                    current_pkg
+                    and len(cells) >= 7
+                    and re.match(r"^\d+$", cells[1].strip())
+                    and cells[2].strip()
+                ):
+                    config_rows_by_pkg[current_pkg] = config_rows_by_pkg.get(current_pkg, 0) + 1
+            elif current_mode == "deviation" and not stripped.startswith("| 条款编号") and not stripped.startswith("| 序号"):
+                if current_pkg:
+                    deviation_rows_by_pkg[current_pkg] = deviation_rows_by_pkg.get(current_pkg, 0) + 1
+            elif current_mode == "mapping" and not stripped.startswith("| 序号"):
+                cells = [c.strip() for c in stripped.split("|")]
+                if current_pkg and len(cells) >= 5 and re.match(r"^\d+$", cells[1].strip()):
+                    evidence_rows_by_pkg[current_pkg] = evidence_rows_by_pkg.get(current_pkg, 0) + 1
+
+    min_config_items = _DETAIL_TARGETS["config_items_min"]
+    if config_rows_by_pkg:
+        config_detail_score = sum(
+            min(count / max(1, min_config_items), 1.0)
+            for count in config_rows_by_pkg.values()
+        ) / len(config_rows_by_pkg)
+    else:
+        config_detail_score = 0.0
+    regression_checks.append({
+        "name": "config_detail_score",
+        "status": "通过" if config_detail_score >= 0.8 else "需修订",
+        "detail": (
+            f"配置详细度 {config_detail_score:.0%}（"
+            + "，".join(f"包{pkg}:{count}项" for pkg, count in sorted(config_rows_by_pkg.items()))
+            + "）。"
+            if config_rows_by_pkg
+            else "未检测到可评估的配置明细表。"
+        ),
+        "value": round(config_detail_score, 4),
+    })
+
+    total_tech_requirements = len(tech_reqs)
+    total_deviation_rows = sum(deviation_rows_by_pkg.values())
+    total_mapping_rows = sum(evidence_rows_by_pkg.values())
+    mapping_denominator = max(1, total_tech_requirements, total_deviation_rows, total_mapping_rows)
+    count_gap = (
+        abs(total_tech_requirements - total_deviation_rows)
+        + abs(total_tech_requirements - total_mapping_rows)
+        + abs(total_deviation_rows - total_mapping_rows)
+    )
+    mapping_count_consistency = max(0.0, 1.0 - count_gap / (3 * mapping_denominator))
+    regression_checks.append({
+        "name": "mapping_count_consistency",
+        "status": "通过" if mapping_count_consistency >= 0.8 else "需修订",
+        "detail": (
+            f"技术条款 {total_tech_requirements} 项，偏离表 {total_deviation_rows} 行，证据映射表 {total_mapping_rows} 行。"
+        ),
+        "value": round(mapping_count_consistency, 4),
+    })
+
+    template_like_markers = (
+        "[待填写]",
+        "[品牌型号]",
+        "[生产厂家]",
+        "[品牌]",
+        "待核实",
+        "详见招标文件",
+        "按招标文件配置要求",
+        "配置清单包含主机及全套标准附件",
+        "具备完整的技术功能",
+    )
+    content_lines = [
+        line.strip()
+        for sec in (sections or [])
+        for line in sec.content.splitlines()
+        if line.strip()
+    ]
+    template_line_count = sum(
+        1 for line in content_lines if any(marker in line for marker in template_like_markers)
+    )
+    section_template_similarity = template_line_count / max(1, len(content_lines))
+    regression_checks.append({
+        "name": "section_template_similarity",
+        "status": "通过" if section_template_similarity <= 0.2 else "需修订",
+        "detail": f"模板化行占比 {section_template_similarity:.0%}（{template_line_count}/{len(content_lines)} 行）。",
+        "value": round(section_template_similarity, 4),
+    })
+
     # 6. external_block_rate: 1.0 if blocked, 0.0 if passed
     external_blocked = 1.0 if (sanitize_result and str(sanitize_result.get("status", "")).strip() == "阻断外发") else 0.0
     regression_checks.append({
@@ -3588,6 +4074,122 @@ def _build_regression_report(
         "value": round(evidence_coverage, 4),
     })
     # --- End detail target checks ---
+
+    # --- 8. 新增实用性评测指标 ---
+
+    # 8a. 实际参数覆盖率 (actual_param_coverage): 偏离表中有真实参数值的行 / 总行数
+    actual_param_rows = 0
+    total_deviation_data_rows = sum(deviation_rows_by_pkg.values())
+    _PENDING_MARKERS = ("待核实", "[待填写]", "[待补充]", "[品牌型号]", "[生产厂家]")
+    for sec in (sections or []):
+        in_deviation_section = False
+        for line in sec.content.splitlines():
+            stripped = line.strip()
+            if "技术偏离" in stripped and stripped.startswith("#"):
+                in_deviation_section = True
+                continue
+            if stripped.startswith("#") and in_deviation_section:
+                in_deviation_section = False
+                continue
+            if not in_deviation_section or not stripped.startswith("|") or stripped.startswith("|---"):
+                continue
+            if any(h in stripped for h in ("条款编号", "序号", "参数名称")):
+                continue
+            # 检查响应列是否有真实值
+            cells = [c.strip() for c in stripped.split("|")]
+            if len(cells) >= 5:
+                response_cell = cells[4] if len(cells) > 4 else ""
+                has_real_value = bool(
+                    response_cell
+                    and response_cell not in ("", " ", "-")
+                    and not any(pm in response_cell for pm in _PENDING_MARKERS)
+                )
+                if has_real_value:
+                    actual_param_rows += 1
+
+    actual_param_coverage = actual_param_rows / max(1, total_deviation_data_rows)
+    regression_checks.append({
+        "name": "actual_param_coverage",
+        "status": "通过" if actual_param_coverage >= 0.7 else "需修订",
+        "detail": f"实际参数覆盖率 {actual_param_coverage:.0%}（{actual_param_rows}/{total_deviation_data_rows} 行含真实参数值）。",
+        "value": round(actual_param_coverage, 4),
+    })
+
+    # 8b. 投标侧证据页码覆盖率 (bid_evidence_page_coverage)
+    bid_evidence_items = (evidence_result or {}).get("bid_evidence", [])
+    if not isinstance(bid_evidence_items, list):
+        bid_evidence_items = []
+    items_with_page = sum(
+        1 for item in bid_evidence_items
+        if isinstance(item, dict) and item.get("evidence_page") is not None
+    )
+    total_bid_items = len(bid_evidence_items)
+    bid_page_coverage = items_with_page / max(1, total_bid_items)
+    regression_checks.append({
+        "name": "bid_evidence_page_coverage",
+        "status": "通过" if bid_page_coverage >= 0.5 else "需修订",
+        "detail": f"投标侧证据页码覆盖率 {bid_page_coverage:.0%}（{items_with_page}/{total_bid_items} 项含页码引用）。",
+        "value": round(bid_page_coverage, 4),
+    })
+
+    # 8c. 配置项平均条数 (config_avg_items_per_package)
+    avg_config_items = (
+        sum(config_rows_by_pkg.values()) / len(config_rows_by_pkg)
+        if config_rows_by_pkg else 0.0
+    )
+    config_avg_pass = avg_config_items >= _DETAIL_TARGETS["config_items_min"]
+    regression_checks.append({
+        "name": "config_avg_items_per_package",
+        "status": "通过" if config_avg_pass else "需修订",
+        "detail": (
+            f"配置项平均条数 {avg_config_items:.1f} 条/包"
+            f"（{'，'.join(f'包{pk}:{cnt}项' for pk, cnt in sorted(config_rows_by_pkg.items())) or '无'}）。"
+            f"目标：≥{_DETAIL_TARGETS['config_items_min']}条。"
+        ),
+        "value": round(avg_config_items, 2),
+    })
+
+    # 8d. 模板段落重复率 (template_paragraph_ratio) — 与 section_template_similarity 互补
+    _TEMPLATE_PARAGRAPH_MARKERS = (
+        "具备完整的技术功能",
+        "能够满足采购文件要求",
+        "配置清单包含主机及全套标准附件",
+        "按招标文件配置要求",
+        "由我公司负责运输至指定地点",
+        "按照国家相关标准及招标文件要求",
+        "采用专业包装方式",
+        "安排专业培训师",
+    )
+    para_total = 0
+    para_template = 0
+    for sec in (sections or []):
+        paragraphs = [p.strip() for p in sec.content.split("\n\n") if p.strip() and len(p.strip()) > 20]
+        para_total += len(paragraphs)
+        for para in paragraphs:
+            if sum(1 for m in _TEMPLATE_PARAGRAPH_MARKERS if m in para) >= 2:
+                para_template += 1
+    template_paragraph_ratio = para_template / max(1, para_total)
+    regression_checks.append({
+        "name": "template_paragraph_ratio",
+        "status": "通过" if template_paragraph_ratio <= 0.2 else "需修订",
+        "detail": f"模板段落重复率 {template_paragraph_ratio:.0%}（{para_template}/{para_total} 段含多个模板标记）。",
+        "value": round(template_paragraph_ratio, 4),
+    })
+
+    # 8e. external hard-gate 拦截率 (external_hardgate_block_items)
+    hardgate_blocked_count = len((sanitize_result or {}).get("blocked_reasons", []))
+    hardgate_total_checks = 10  # 总硬门检查项数
+    hardgate_ratio = hardgate_blocked_count / hardgate_total_checks
+    regression_checks.append({
+        "name": "external_hardgate_block_rate",
+        "status": "通过" if hardgate_blocked_count == 0 else "需修订",
+        "detail": (
+            "外发硬门全部通过" if hardgate_blocked_count == 0
+            else f"外发硬门拦截 {hardgate_blocked_count} 项：{'；'.join((sanitize_result or {}).get('blocked_reasons', [])[:3])}"
+        ),
+        "value": round(hardgate_ratio, 4),
+    })
+    # --- End new practical eval metrics ---
 
     passed_count = len([item for item in regression_checks if item["status"] == "通过"])
     score = round(
@@ -4116,6 +4718,158 @@ def _second_validation(
             "detail": "配置表已包含功能描述层" if config_desc_present else "配置表缺少功能描述层（建议增加配置项用途说明和功能角色描述）",
         }
     )
+
+    # ── 新增5项深度检查（判断"够不够细"而非"有没有"）──
+
+    # (1) offered_fact_coverage: 产品事实覆盖率
+    offered_fact_count = 0
+    if evidence_result:
+        offered_fact_count = int(evidence_result.get("offered_fact_count", 0) or 0)
+    tech_req_count = len(technical_matches)
+    offered_coverage = offered_fact_count / max(1, tech_req_count) if tech_req_count else 0.0
+    offered_coverage = min(offered_coverage, 1.0)
+    offered_coverage_pass = offered_coverage >= 0.5
+    check_items.append({
+        "name": "offered_fact_coverage（产品事实覆盖率）",
+        "status": "通过" if offered_coverage_pass else "需修订",
+        "detail": f"产品事实覆盖率 {offered_coverage:.0%}（{offered_fact_count} 条事实 / {tech_req_count} 项技术要求）。"
+                  + ("" if offered_coverage_pass else " 不足50%，技术表右侧仍大量为待核实。"),
+    })
+    if not offered_coverage_pass:
+        issues.append(f"产品事实覆盖率仅 {offered_coverage:.0%}，技术表中大量参数仍为待核实。")
+        suggestions.append("请补充产品彩页、说明书等投标材料，通过 Product Profile Builder 提取真实参数。")
+
+    # (2) bid_evidence_coverage: 投标侧证据页码覆盖率
+    bid_evidence_count = 0
+    bid_evidence_with_page = 0
+    total_bindings = 0
+    if evidence_result:
+        bid_evidence_count = int(evidence_result.get("bidder_matched_count", 0) or 0)
+        total_bindings = int(evidence_result.get("total", 0) or 0)
+        # 统计有页码的投标证据数
+        bid_evidence_items = evidence_result.get("bid_evidence", [])
+        if isinstance(bid_evidence_items, list):
+            bid_evidence_with_page = sum(
+                1 for item in bid_evidence_items
+                if isinstance(item, dict) and item.get("evidence_page") is not None
+            )
+    bid_ev_coverage = bid_evidence_count / max(1, total_bindings)
+    bid_ev_page_coverage = bid_evidence_with_page / max(1, total_bindings)
+    bid_ev_pass = bid_ev_coverage >= 0.5
+    check_items.append({
+        "name": "bid_evidence_coverage（投标方证据覆盖率）",
+        "status": "通过" if bid_ev_pass else "需修订",
+        "detail": (
+            f"投标方证据覆盖率 {bid_ev_coverage:.0%}（{bid_evidence_count}/{total_bindings} 项已绑定），"
+            f"含页码 {bid_ev_page_coverage:.0%}（{bid_evidence_with_page}/{total_bindings} 项有页码）。"
+        ),
+    })
+    if not bid_ev_pass:
+        issues.append('投标方证据覆盖率不足，证据列仍停留在"待补投标方证据"。')
+        suggestions.append("请提供投标材料（彩页/说明书/注册证/检测报告），通过 BidEvidenceBinder 绑定页码。")
+
+    # (3) config_detail_score: 配置项平均条数
+    config_rows_per_pkg: dict[str, int] = {}
+    current_mode_cfg = ""
+    current_pkg_cfg = ""
+    for sec in sections:
+        for line in sec.content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") and ("配置" in stripped):
+                current_mode_cfg = "config"
+                pkg_match = re.search(r"第\s*(\d+)\s*包", stripped)
+                current_pkg_cfg = pkg_match.group(1) if pkg_match else "?"
+                config_rows_per_pkg.setdefault(current_pkg_cfg, 0)
+            elif stripped.startswith("#") and current_mode_cfg == "config":
+                current_mode_cfg = ""
+            elif current_mode_cfg == "config" and stripped.startswith("|") and not stripped.startswith("|---") and not stripped.startswith("| 序号"):
+                cells = [c.strip() for c in stripped.split("|")]
+                if len(cells) >= 5 and re.match(r"^\d+$", cells[1].strip()):
+                    config_rows_per_pkg[current_pkg_cfg] = config_rows_per_pkg.get(current_pkg_cfg, 0) + 1
+
+    avg_config = (
+        sum(config_rows_per_pkg.values()) / len(config_rows_per_pkg)
+        if config_rows_per_pkg else 0.0
+    )
+    config_score = min(avg_config / max(1, _DETAIL_TARGETS["config_items_min"]), 1.0)
+    config_score_pass = config_score >= 0.8
+    cfg_detail_parts = [f"包{pk}:{cnt}项" for pk, cnt in sorted(config_rows_per_pkg.items())]
+    check_items.append({
+        "name": "config_detail_score（配置详细度评分）",
+        "status": "通过" if config_score_pass else "需修订",
+        "detail": (
+            f"配置详细度 {config_score:.0%}（平均{avg_config:.1f}项/包；{', '.join(cfg_detail_parts) or '无'}）。"
+            + ("" if config_score_pass else f" 目标：每包≥{_DETAIL_TARGETS['config_items_min']}项。")
+        ),
+    })
+    if not config_score_pass:
+        issues.append(f"配置表过薄（平均{avg_config:.1f}项/包），像模板而非交付清单。")
+        suggestions.append("通过 Config Extractor 从投标材料中抽取核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料。")
+
+    # (4) mapping_count_consistency: 技术条款/偏离表/证据映射表行数一致性
+    dev_rows_total = 0
+    map_rows_total = 0
+    for sec in sections:
+        in_dev = in_map = False
+        for line in sec.content.splitlines():
+            stripped = line.strip()
+            if "技术偏离" in stripped and stripped.startswith("#"):
+                in_dev, in_map = True, False
+            elif "证据映射" in stripped and stripped.startswith("#"):
+                in_dev, in_map = False, True
+            elif stripped.startswith("#"):
+                in_dev = in_map = False
+            elif stripped.startswith("|") and not stripped.startswith("|---"):
+                is_header = any(h in stripped for h in ("条款编号", "序号", "参数名称"))
+                if not is_header:
+                    if in_dev:
+                        dev_rows_total += 1
+                    elif in_map:
+                        map_rows_total += 1
+
+    mapping_denom = max(1, tech_req_count, dev_rows_total, map_rows_total)
+    count_gap = (
+        abs(tech_req_count - dev_rows_total)
+        + abs(tech_req_count - map_rows_total)
+        + abs(dev_rows_total - map_rows_total)
+    )
+    mc_consistency = max(0.0, 1.0 - count_gap / (3 * mapping_denom))
+    mc_pass = mc_consistency >= 0.8
+    check_items.append({
+        "name": "mapping_count_consistency（表间行数一致性）",
+        "status": "通过" if mc_pass else "需修订",
+        "detail": f"技术条款 {tech_req_count} 项，偏离表 {dev_rows_total} 行，证据映射表 {map_rows_total} 行（一致性 {mc_consistency:.0%}）。",
+    })
+    if not mc_pass:
+        issues.append("技术条款数、偏离表行数、证据映射表行数不一致，存在遗漏或重复。")
+        suggestions.append("确保技术偏离表和证据映射表逐条对应归一化后的技术要求。")
+
+    # (5) section_template_similarity: 模板段落重复率
+    _TEMPLATE_MARKERS = (
+        "[待填写]", "[品牌型号]", "[生产厂家]", "[品牌]",
+        "待核实", "具备完整的技术功能", "配置清单包含主机及全套标准附件",
+        "按招标文件配置要求", "详见招标文件",
+    )
+    content_lines_all = [
+        line.strip()
+        for sec in sections
+        for line in sec.content.splitlines()
+        if line.strip()
+    ]
+    template_hits = sum(
+        1 for line in content_lines_all if any(marker in line for marker in _TEMPLATE_MARKERS)
+    )
+    template_ratio = template_hits / max(1, len(content_lines_all))
+    template_pass = template_ratio <= 0.15
+    check_items.append({
+        "name": "section_template_similarity（模板段落重复率）",
+        "status": "通过" if template_pass else "需修订",
+        "detail": f"模板化行占比 {template_ratio:.0%}（{template_hits}/{len(content_lines_all)} 行含模板标记）。"
+                  + ("" if template_pass else " 超过15%，文档仍像长模板而非项目化说明。"),
+    })
+    if not template_pass:
+        issues.append(f"模板段落重复率 {template_ratio:.0%}，文档内容过于模板化。")
+        suggestions.append("切换到 Rich draft mode，引用本包真实参数、配置和证据替换模板句。")
 
     overall_status = "通过" if not issues else "需修订"
     if not suggestions and overall_status == "通过":
@@ -4654,6 +5408,8 @@ class TenderWorkflowAgent:
         kb_source: str | None = None,
         analysis_result: dict[str, Any] | None = None,
         product_fact_result: dict[str, Any] | None = None,
+        normalized_result: dict[str, Any] | None = None,
+        evidence_result: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[BidDocumentSection]]:
         """第三步：整合生成标书内容。"""
         package_ids = {pkg.package_id for pkg in tender.packages}
@@ -4761,7 +5517,20 @@ class TenderWorkflowAgent:
         )
 
         integration_notes = _llm_call(self.llm, system_prompt, user_prompt)
-        sections = generate_bid_sections(filtered_tender, raw_text, self.llm, products=products)
+        product_profiles = {
+            pkg_id: _build_product_profile(product)
+            for pkg_id, product in products.items()
+            if product is not None
+        }
+        sections = generate_bid_sections(
+            filtered_tender,
+            raw_text,
+            self.llm,
+            products=products,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
+        )
 
         return {
             "generated": True,

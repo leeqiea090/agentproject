@@ -155,6 +155,23 @@ class CompanyProfile(BaseModel):
     credit_check_time: datetime | None = Field(default=None, description="最近信用查询时间")
 
 
+class BidMaterialInput(BaseModel):
+    """投标材料输入 - 用于 Product Profile Builder 从真实材料提取产品事实"""
+    file_name: str = Field(description="文件名称，如：彩页.pdf、说明书.pdf")
+    file_type: str = Field(
+        description="文件类型：brochure(彩页)、manual(说明书)、registration(注册证)、"
+                    "test_report(检测/质评报告)、spec_sheet(厂家参数页)"
+    )
+    file_path: str = Field(default="", description="文件路径")
+    page_count: int = Field(default=0, description="总页数")
+    extracted_text: str = Field(default="", description="已提取的文本内容")
+    extracted_specs: dict[str, Any] = Field(default_factory=dict, description="已提取的参数键值对")
+    key_pages: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="关键页码列表，如 [{'page': 3, 'content': '技术参数表'}]"
+    )
+
+
 class ProductSpecification(BaseModel):
     """产品技术规格 - 增强版，包含完整的投标产品事实"""
     product_id: str | None = Field(default=None, description="产品ID")
@@ -184,6 +201,12 @@ class ProductSpecification(BaseModel):
     registration_number: str = Field(default="", description="注册证编号（医疗器械）")
     authorization_letter: str = Field(default="", description="授权书路径")
     evidence_refs: list[dict[str, Any]] = Field(default_factory=list, description="证据引用列表（新增）,包含文件名、页码等")
+
+    # 投标材料输入（用于 Product Profile Builder）
+    bid_materials: list[BidMaterialInput] = Field(
+        default_factory=list,
+        description="投标材料列表：彩页、说明书、注册证、检测报告、厂家参数页"
+    )
 
 
 # --- 投标文件生成相关 ---

@@ -289,6 +289,29 @@ def test_sanitize_for_external_delivery_blocks_when_completion_is_insufficient()
     assert "硬校验未通过" in sanitize_result["blocked_reasons"]
 
 
+def test_sanitize_for_external_delivery_blocks_when_config_table_is_too_thin() -> None:
+    sections = [
+        BidDocumentSection(
+            section_title="第三章 商务及技术部分",
+            content=(
+                "### （二-A）详细配置明细表（第1包）\n"
+                "| 序号 | 配置名称 | 单位 | 数量 | 是否标配 | 用途说明 | 备注 |\n"
+                "|---:|---|---|---:|---|---|---|\n"
+                "| 1 | 主机 | 台 | 1 | 是 | 核心设备主机 | 核心设备 |\n"
+                "| 2 | 说明书 | 份 | 1 | 是 | 操作指导 | 随机文件 |\n"
+                "### （五）关键性能说明（第1包）\n"
+                "已补充关键性能说明。\n"
+            ),
+            attachments=[],
+        )
+    ]
+
+    _, sanitize_result = _sanitize_for_external_delivery(sections)
+
+    assert sanitize_result["status"] == "阻断外发"
+    assert any("配置项仅2项" in reason for reason in sanitize_result["blocked_reasons"])
+
+
 def test_build_regression_report_can_mark_ready_for_delivery() -> None:
     stages = [
         {"status": "completed"},
@@ -326,8 +349,12 @@ def test_build_regression_report_can_mark_ready_for_delivery() -> None:
     original_checks = [item for item in report["checks"] if item["name"] not in {
         "package_isolation_score", "atomic_requirement_rate", "offered_fact_coverage",
         "bid_evidence_coverage", "config_pollution_rate", "external_block_rate",
+        "config_detail_score", "mapping_count_consistency", "section_template_similarity",
         "detail_target_atomic_clauses", "detail_target_deviation_rows",
         "detail_target_narrative_chars", "detail_target_evidence_coverage",
+        "actual_param_coverage", "bid_evidence_page_coverage",
+        "config_avg_items_per_package", "template_paragraph_ratio",
+        "external_hardgate_block_rate",
     }]
     assert all(item["status"] == "通过" for item in original_checks)
     # New metrics should exist
@@ -337,7 +364,57 @@ def test_build_regression_report_can_mark_ready_for_delivery() -> None:
     assert "offered_fact_coverage" in new_metric_names
     assert "bid_evidence_coverage" in new_metric_names
     assert "config_pollution_rate" in new_metric_names
+    assert "config_detail_score" in new_metric_names
+    assert "mapping_count_consistency" in new_metric_names
+    assert "section_template_similarity" in new_metric_names
     assert "external_block_rate" in new_metric_names
+
+
+def test_build_evidence_bindings_exposes_bid_side_pages() -> None:
+    tender = _sample_tender()
+    product = ProductSpecification(
+        product_id="p1",
+        product_name="流式细胞分析仪",
+        manufacturer="某厂家",
+        model="FC5000",
+        origin="美国",
+        specifications={"激光器": "3个独立激光器"},
+        price=1000000.0,
+        evidence_refs=[{"description": "激光器", "page": 6, "file_name": "彩页-激光器.pdf"}],
+    )
+    analysis_result = {
+        "required_materials": [],
+        "scoring_rules": [],
+    }
+    clause_result = _classify_clauses(
+        tender=tender,
+        analysis_result=analysis_result,
+        selected_packages=["1"],
+        raw_text="激光器≥3",
+    )
+    normalized_result = _normalize_requirements(
+        tender=tender,
+        analysis_result=analysis_result,
+        clause_result=clause_result,
+        selected_packages=["1"],
+        raw_text="激光器≥3",
+    )
+
+    result = _build_evidence_bindings(
+        tender=tender,
+        raw_text="激光器≥3",
+        analysis_result=analysis_result,
+        clause_result=clause_result,
+        company=None,
+        products={"1": product},
+        selected_packages=["1"],
+        normalized_result=normalized_result,
+    )
+
+    technical_match = result["technical_matches"][0]
+    assert technical_match["bid_evidence_file"] == "产品彩页.pdf"
+    assert technical_match["bid_evidence_page"] == 6
+    assert technical_match["bid_evidence_type"] == "产品规格"
 
 
 def test_normalize_requirements_outputs_machine_readable_fields() -> None:

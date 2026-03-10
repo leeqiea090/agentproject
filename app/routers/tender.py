@@ -931,6 +931,10 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             company=company_for_docx,
             products=products,
             kb_source=kb_source,
+            analysis_result=analysis_dict,
+            product_fact_result=product_fact_dict,
+            normalized_result=normalization_dict,
+            evidence_result=evidence_dict,
         )
         internal_sections, materialize_dict = _materialize_sections(
             sections=sections,
