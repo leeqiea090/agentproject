@@ -34,16 +34,19 @@ logger = logging.getLogger(__name__)
 def _determine_document_mode(
     tender: TenderDocument,
     selected_packages: list[str] | None = None,
+    mode_hint: str = "",
 ) -> DocumentMode:
     """判定文档生成模式。
 
     规则：
-    - 如果只选了 1 个包（或标书只有 1 个包），走单包深写模式
-    - 否则走多包总母版底稿模式
+    - mode_hint='rich_draft' 且单包 → single_package_rich_draft（必须生成技术表/配置表/服务表/资料表）
+    - 只选了 1 个包（或标书只有 1 个包）→ single_package_deep_draft（允许待补，但不允许缺槽位）
+    - 否则 → multi_package_master_draft
     """
-    if selected_packages and len(selected_packages) == 1:
-        return DocumentMode.single_package_deep_draft
-    if len(tender.packages) == 1:
+    is_single = (selected_packages and len(selected_packages) == 1) or len(tender.packages) == 1
+    if is_single and mode_hint == "rich_draft":
+        return DocumentMode.single_package_rich_draft
+    if is_single:
         return DocumentMode.single_package_deep_draft
     return DocumentMode.multi_package_master_draft
 
@@ -54,7 +57,11 @@ def _filter_packages_for_mode(
     target_package_id: str = "",
 ) -> list[ProcurementPackage]:
     """根据文档模式过滤采购包。"""
-    if mode in (DocumentMode.single_package, DocumentMode.single_package_deep_draft) and target_package_id:
+    if mode in (
+        DocumentMode.single_package,
+        DocumentMode.single_package_deep_draft,
+        DocumentMode.single_package_rich_draft,
+    ) and target_package_id:
         return [p for p in tender.packages if p.package_id == target_package_id]
     return tender.packages
 
@@ -68,7 +75,10 @@ def build_tender_source_bindings(
     requirements: list[NormalizedRequirement],
     tender_raw: str,
 ) -> list[TenderSourceBinding]:
-    """A层：从招标原文中定位每条需求的来源位置。"""
+    """A层：从招标原文中定位每条需求的来源位置。
+
+    修复：excerpt 不再带出后续多条，精确截断到当前条目句尾。
+    """
     bindings: list[TenderSourceBinding] = []
     for req in requirements:
         if req.package_id != package_id:
@@ -81,8 +91,20 @@ def build_tender_source_bindings(
         pos = tender_raw.find(search_key)
         if pos >= 0:
             char_start = max(0, pos - 20)
-            char_end = min(len(tender_raw), pos + len(search_key) + 100)
+            # 从 pos 向后找到当前句子结尾（句号/分号/换行），避免串到下一条
+            raw_end = pos + len(search_key) + 100
+            raw_end = min(len(tender_raw), raw_end)
+            candidate = tender_raw[pos + len(search_key):raw_end]
+            # 找最近的句子边界
+            for sep in ("\n", "。", "；", ";"):
+                sep_pos = candidate.find(sep)
+                if sep_pos >= 0 and sep_pos < 80:
+                    raw_end = pos + len(search_key) + sep_pos + 1
+                    break
+            char_end = min(len(tender_raw), raw_end)
             excerpt = tender_raw[char_start:char_end].replace("\n", " ").strip()
+            # 去除尾部多余内容
+            excerpt = re.sub(r"\s+", " ", excerpt).strip()
 
         bindings.append(TenderSourceBinding(
             package_id=package_id,
@@ -184,8 +206,13 @@ def _determine_draft_level(
     gate: ValidationGate,
     mode: DocumentMode,
 ) -> DraftLevel:
-    """根据校验门和模式判定稿件等级。"""
-    if mode == DocumentMode.multi_package_draft:
+    """根据校验门和模式判定稿件等级。
+
+    - 多包模式 → 永远内部稿
+    - 多包母版底稿 → 永远内部稿
+    - 单包深写/富底稿 → 看校验门
+    """
+    if mode in (DocumentMode.multi_package_draft, DocumentMode.multi_package_master_draft):
         return DraftLevel.internal_draft
     if not gate.passes_external_gate():
         return DraftLevel.internal_draft

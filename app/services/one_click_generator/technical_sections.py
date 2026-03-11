@@ -248,18 +248,26 @@ def _generate_rich_draft_sections(
     products: dict,
     *,
     draft_mode: str = "rich",
+    normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
+    active_packages: list[ProcurementPackage] | None = None,
 ) -> list[BidDocumentSection]:
-    """双模式 Section Writer — 底稿优化版。
+    """双模式 Section Writer — 底稿优化版，固定分表输出。
 
-    关键改进：
-    - 每个包围绕本包技术要求展开，不套统一段落
-    - 从本包需求中提取交付/验收/培训的具体内容
-    - 使用 [TODO:待补] 标记系统方便人工续写定位
+    writer 输入必须是 requirement + package_context + table_type。
+    固定分表输出：
+    1. 技术参数响应表（仅 technical_requirement）
+    2. 配置清单（仅 config_requirement）
+    3. 售后服务响应表（仅 service_requirement）
+    4. 验收/资料要求响应表（acceptance + documentation）
+
+    每个包独立生成，只消费同包对象。
     """
-    sections = []
+    sections: list[BidDocumentSection] = []
     is_rich = draft_mode == "rich"
+    normalized_reqs = normalized_reqs or {}
+    packages = active_packages or tender.packages
 
-    for pkg in tender.packages:
+    for pkg in packages:
         product = products.get(pkg.package_id)
         if not product:
             continue
@@ -272,149 +280,140 @@ def _generate_rich_draft_sections(
         config_items = getattr(product, "config_items", None) or []
         evidence_refs = getattr(product, "evidence_refs", None) or []
         has_real_product = bool(p_model and p_mfr)
+        pkg_reqs = normalized_reqs.get(pkg.package_id, [])
 
-        # 提取本包特有的技术要求用于定制化说明
-        pkg_tech_reqs = pkg.technical_requirements or {}
-
-        # 1. 关键性能说明 — 围绕本包事实
-        performance_content = f"### 包{pkg.package_id} 关键性能说明\n\n"
+        # ── 分表1: 技术参数响应表 ──
+        tech_reqs = [r for r in pkg_reqs if r.category == ClauseCategory.technical_requirement]
+        tech_content = f"### 包{pkg.package_id} 技术参数响应表\n\n"
         if has_real_product:
-            performance_content += (
-                f"本包投标产品为 **{p_brand or p_mfr} {p_name}**（型号：{p_model}），"
-                f"生产厂家：{p_mfr}。\n\n"
-            )
+            tech_content += f"投标产品：**{p_brand or p_mfr} {p_name}**（型号：{p_model}）\n\n"
+        if tech_reqs:
+            tech_content += "| 序号 | 参数名称 | 招标要求 | 投标响应 | 偏离说明 |\n"
+            tech_content += "|------|----------|----------|----------|----------|\n"
+            for idx, req in enumerate(tech_reqs, 1):
+                response = specs.get(req.param_name, "待核实（需填入投标产品实参）")
+                deviation = "无偏离" if req.param_name in specs else "待核实"
+                material_mark = "★" if req.is_material else ""
+                tech_content += f"| {idx} | {material_mark}{_markdown_cell(req.param_name)} | {_markdown_cell(req.threshold or req.raw_text)} | {_markdown_cell(str(response))} | {deviation} |\n"
         else:
-            performance_content += f"本包投标产品为{p_name}。[TODO:待补品牌型号及厂家信息]\n\n"
+            tech_content += "[TODO:待补技术参数响应表]\n"
+        tech_content += "\n"
 
-        if specs:
-            performance_content += "**核心技术参数**：\n\n"
-            for idx, (key, value) in enumerate(list(specs.items())[:10], start=1):
-                evidence_note = ""
-                if is_rich and evidence_refs:
-                    for ref in evidence_refs:
-                        if isinstance(ref, dict) and key in _as_text(ref.get("description", "")):
-                            ref_file = _as_text(ref.get("file_name", ""))
-                            ref_page = ref.get("page", "")
-                            evidence_note = f"（证据：{ref_file}第{ref_page}页）" if ref_page else f"（证据：{ref_file}）"
-                            break
-                # 从本包技术要求中匹配对应的招标要求
-                tender_req = ""
-                for tk, tv in pkg_tech_reqs.items():
-                    if key in str(tk) or str(tk) in key:
-                        tender_req = f"（招标要求：{_as_text(tv)}）"
-                        break
-                performance_content += (
-                    f"{idx}. **{key}**：{_as_text(value)}{evidence_note}\n"
-                    f"   {tender_req}该参数满足本包采购需求，确保{pkg.item_name}在实际应用中达到预期性能。\n\n"
-                )
-        elif pkg_tech_reqs:
-            # 没有产品参数但有招标要求 — 列出要求框架供人工填写
-            performance_content += "**招标技术要求响应框架**：\n\n"
-            for idx, (key, value) in enumerate(list(pkg_tech_reqs.items())[:15], start=1):
-                performance_content += (
-                    f"{idx}. **{key}**：招标要求 {_as_text(value)}\n"
-                    f"   → [TODO:待补投标产品实际参数及说明]\n\n"
-                )
-        else:
-            performance_content += f"[TODO:待补{pkg.item_name}关键性能参数，建议提供产品彩页或参数表]\n\n"
-
-        # 2. 配置说明 — 基于真实配置项
-        config_content = f"### 包{pkg.package_id} 配置说明\n\n"
+        # ── 分表2: 配置清单 ──
+        config_reqs = [r for r in pkg_reqs if r.category == ClauseCategory.config_requirement]
+        config_content = f"### 包{pkg.package_id} 配置清单\n\n"
         if config_items:
-            categorized: dict[str, list] = {}
-            for item in config_items:
+            config_content += "| 序号 | 配置项 | 数量 | 说明 |\n"
+            config_content += "|------|--------|------|------|\n"
+            for idx, item in enumerate(config_items, 1):
                 if isinstance(item, dict):
-                    item_name = _as_text(item.get("配置项") or item.get("name", f"配置项"))
-                    category = _classify_config_item(item_name)
-                    categorized.setdefault(category, []).append(item)
-
-            cat_order = ["核心模块", "标准附件", "配套软件", "初始耗材", "随机文件", "安装/培训资料"]
-            for cat in cat_order:
-                items = categorized.get(cat, [])
-                if not items:
-                    config_content += f"**{cat}**：[TODO:待补{cat}清单]\n\n"
-                    continue
-                config_content += f"**{cat}**：\n\n"
-                for idx, item in enumerate(items[:8], 1):
-                    if isinstance(item, dict):
-                        config_name = _as_text(item.get("配置项") or item.get("name", ""))
-                        config_desc = _as_text(item.get("说明") or item.get("description", "标配"))
-                        config_qty = _as_text(item.get("数量") or item.get("qty", "1"))
-                        config_content += f"   {idx}. {config_name}（×{config_qty}）：{config_desc}\n"
-                config_content += "\n"
+                    name = _as_text(item.get("配置项") or item.get("name", ""))
+                    qty = _as_text(item.get("数量") or item.get("qty", "1"))
+                    desc = _as_text(item.get("说明") or item.get("description", "标配"))
+                    config_content += f"| {idx} | {_markdown_cell(name)} | {qty} | {_markdown_cell(desc)} |\n"
+        elif config_reqs:
+            config_content += "| 序号 | 配置项 | 招标要求 | 投标响应 |\n"
+            config_content += "|------|--------|----------|----------|\n"
+            for idx, req in enumerate(config_reqs, 1):
+                config_content += f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | [TODO:待补] |\n"
         else:
-            config_content += (
-                "**配置框架**（请补充具体配置信息）：\n\n"
-                "- 核心模块：[TODO:待补主机及核心组件]\n"
-                "- 标准附件：[TODO:待补随机附件清单]\n"
-                "- 配套软件：[TODO:待补软件名称及版本号]\n"
-                "- 初始耗材：[TODO:待补初始运行耗材清单]\n"
-                "- 随机文件：[TODO:待补说明书、合格证等文件清单]\n"
-                "- 安装/培训资料：[TODO:待补安装指导及培训计划]\n\n"
-            )
+            config_content += "[TODO:待补配置清单]\n"
+        config_content += "\n"
 
-        # 3. 交付说明 — 从本包需求中提取
-        delivery_content = f"### 包{pkg.package_id} 交付说明\n\n"
-        delivery_time = pkg.delivery_time or "[TODO:待补交货期限]"
-        delivery_place = pkg.delivery_place or "[TODO:待补交货地点]"
-        delivery_content += f"- 交货期：{delivery_time}\n"
-        delivery_content += f"- 交货地点：{delivery_place}\n"
-        delivery_content += "- 交货方式：由我公司负责运输至指定地点，包装符合国家标准\n"
-        if has_real_product:
-            delivery_content += f"- 交货内容：{p_brand or p_mfr} {p_name}（{p_model}）全套设备、标准配件、技术资料\n"
-        else:
-            delivery_content += f"- 交货内容：{pkg.item_name}全套设备 [TODO:待补具体交付清单]\n"
-        # 从商务条款中提取付款方式
-        payment = tender.commercial_terms.payment_method
-        if payment:
-            delivery_content += f"- 付款方式：{payment}\n"
-        delivery_content += "\n"
-
-        # 4. 验收说明 — 基于本包特性
-        acceptance_content = f"### 包{pkg.package_id} 验收说明\n\n"
-        acceptance_content += f"- 验收标准：按照国家相关标准及本项目采购文件对{pkg.item_name}的技术要求\n"
-        acceptance_content += "- 验收方式：开箱验收、外观检查、功能测试、性能验证\n"
-        if evidence_refs:
-            ref_files = list({_as_text(ref.get("file_name", "")) for ref in evidence_refs if isinstance(ref, dict)})
-            acceptance_content += f"- 验收文件：{', '.join(ref_files[:5])}等\n"
-        else:
-            acceptance_content += f"- 验收文件：[TODO:待补{pkg.item_name}验收所需文件清单]\n"
-        # 从技术要求中提取验收相关项
-        acceptance_items = [
-            f"{k}: {_as_text(v)}" for k, v in pkg_tech_reqs.items()
-            if any(kw in str(k) for kw in ("验收", "检测", "测试", "校准", "精度"))
-        ]
-        if acceptance_items:
-            acceptance_content += "- 关键验收参数：\n"
-            for item in acceptance_items[:5]:
-                acceptance_content += f"  - {item}\n"
-        acceptance_content += "- 验收配合：我公司派专业技术人员现场指导验收\n\n"
-
-        # 5. 使用与培训说明 — 基于本包产品
-        training_content = f"### 包{pkg.package_id} 使用与培训说明\n\n"
-        training_content += "**培训计划**：\n"
-        training_content += f"- 培训对象：{pkg.item_name}操作人员、维护人员\n"
-        if has_real_product:
-            training_content += f"- 培训内容：{p_name}（{p_model}）设备原理、操作规程、日常维护、故障排除\n"
-        else:
-            training_content += f"- 培训内容：{pkg.item_name}设备原理、操作规程 [TODO:待补培训大纲]\n"
-        training_content += "- 培训方式：现场培训+远程技术支持\n"
-        training_content += "- 培训时长：不少于3天，确保人员熟练掌握 [TODO:待核实具体培训时长要求]\n\n"
-        training_content += "**技术支持**：\n"
+        # ── 分表3: 售后服务响应表 ──
+        service_reqs = [r for r in pkg_reqs if r.category == ClauseCategory.service_requirement]
+        service_content = f"### 包{pkg.package_id} 售后服务响应表\n\n"
         warranty = tender.commercial_terms.warranty_period
-        training_content += f"- 质保期：{warranty or '[TODO:待补质保期限]'}\n"
-        training_content += "- 提供7×24小时技术热线\n"
-        training_content += "- 定期巡检和技术咨询\n"
-        training_content += f"- 提供{pkg.item_name}中文操作手册和维护手册\n\n"
+        service_content += f"- 质保期：{warranty or '[TODO:待补质保期限]'}\n"
+        service_content += "- 响应时间：接到通知后24小时内响应\n"
+        service_content += "- 维修服务：提供7×24小时技术热线\n\n"
+        if service_reqs:
+            service_content += "| 序号 | 服务项 | 招标要求 | 投标承诺 |\n"
+            service_content += "|------|--------|----------|----------|\n"
+            for idx, req in enumerate(service_reqs, 1):
+                service_content += f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | 满足 |\n"
+        service_content += "\n"
 
-        combined_content = performance_content + config_content + delivery_content + acceptance_content + training_content
+        # ── 分表4: 验收/资料要求响应表 ──
+        accept_reqs = [r for r in pkg_reqs if r.category in (
+            ClauseCategory.acceptance_requirement,
+            ClauseCategory.documentation_requirement,
+        )]
+        accept_content = f"### 包{pkg.package_id} 验收及资料要求响应表\n\n"
+        if accept_reqs:
+            accept_content += "| 序号 | 类型 | 要求项 | 招标要求 | 投标响应 |\n"
+            accept_content += "|------|------|--------|----------|----------|\n"
+            for idx, req in enumerate(accept_reqs, 1):
+                cat_label = "验收" if req.category == ClauseCategory.acceptance_requirement else "资料"
+                accept_content += f"| {idx} | {cat_label} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | 满足 |\n"
+        else:
+            accept_content += "- 验收标准：按照国家标准及采购文件要求\n"
+            accept_content += "- 随机文件：[TODO:待补随机文件清单]\n"
+        accept_content += "\n"
 
+        # ── 合并为一个章节 ──
+        combined = tech_content + config_content + service_content + accept_content
+        sections.append(BidDocumentSection(
+            section_title=f"第三章附：包{pkg.package_id}分表响应",
+            content=combined,
+        ))
+
+        # ── 独立的详细说明章节（关键性能+交付+培训） ──
+        detail_content = _build_package_detail_section(
+            pkg, tender, product, has_real_product, specs, evidence_refs, is_rich,
+        )
         sections.append(BidDocumentSection(
             section_title=f"第三章附：包{pkg.package_id}详细说明",
-            content=combined_content
+            content=detail_content,
         ))
 
     return sections
+
+
+def _build_package_detail_section(
+    pkg: ProcurementPackage,
+    tender: TenderDocument,
+    product: Any,
+    has_real_product: bool,
+    specs: dict,
+    evidence_refs: list,
+    is_rich: bool,
+) -> str:
+    """构建单包详细说明（关键性能+交付+培训），与分表解耦。"""
+    p_name = _as_text(getattr(product, "product_name", "")) if product else pkg.item_name
+    p_model = _as_text(getattr(product, "model", "")) if product else ""
+    p_mfr = _as_text(getattr(product, "manufacturer", "")) if product else ""
+    p_brand = _as_text(getattr(product, "brand", "")) if product else ""
+
+    content = f"### 包{pkg.package_id} 关键性能说明\n\n"
+    if has_real_product:
+        content += f"本包投标产品为 **{p_brand or p_mfr} {p_name}**（型号：{p_model}），生产厂家：{p_mfr}。\n\n"
+    else:
+        content += f"本包投标产品为{p_name}。[TODO:待补品牌型号及厂家信息]\n\n"
+
+    if specs:
+        content += "**核心技术参数**：\n\n"
+        for idx, (key, value) in enumerate(list(specs.items())[:10], start=1):
+            content += f"{idx}. **{key}**：{_as_text(value)}。\n"
+        content += "\n"
+    else:
+        content += "[TODO:待补关键性能参数]\n\n"
+
+    # 交付说明
+    content += f"### 包{pkg.package_id} 交付说明\n\n"
+    content += f"- 交货期：{pkg.delivery_time or '[TODO:待补交货期限]'}\n"
+    content += f"- 交货地点：{pkg.delivery_place or '[TODO:待补交货地点]'}\n"
+    content += "- 交货方式：由我公司负责运输至指定地点\n\n"
+
+    # 培训说明
+    content += f"### 包{pkg.package_id} 使用与培训说明\n\n"
+    content += f"- 培训对象：{pkg.item_name}操作人员、维护人员\n"
+    content += "- 培训方式：现场培训+远程技术支持\n"
+    content += "- 培训时长：不少于3天 [TODO:待核实具体培训时长要求]\n"
+    warranty = tender.commercial_terms.warranty_period
+    content += f"- 质保期：{warranty or '[TODO:待补质保期限]'}\n\n"
+
+    return content
 
 
 def _gen_technical(

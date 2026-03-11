@@ -51,13 +51,13 @@ def generate_bid_sections(
     logger.info("文档接入: 生成 %d 个可引用块", len(doc_blocks))
 
     # ── Step 0: 文档模式判定 ──
-    doc_mode = _determine_document_mode(tender, selected_packages)
+    doc_mode = _determine_document_mode(tender, selected_packages, mode_hint=mode)
     logger.info("文档模式: %s", doc_mode.value)
 
     target_package_ids = selected_packages or [p.package_id for p in tender.packages]
 
     # 单包模式：仅处理目标包
-    if doc_mode in (DocumentMode.single_package, DocumentMode.single_package_deep_draft) and target_package_ids:
+    if doc_mode in (DocumentMode.single_package, DocumentMode.single_package_deep_draft, DocumentMode.single_package_rich_draft) and target_package_ids:
         active_packages = _filter_packages_for_mode(tender, doc_mode, target_package_ids[0])
     else:
         active_packages = tender.packages
@@ -143,9 +143,13 @@ def generate_bid_sections(
         ),
     ]
 
-    # Rich draft mode 需要额外的详细说明章节
-    if mode == "rich_draft" and products:
-        rich_sections = _generate_rich_draft_sections(tender, products)
+    # Rich draft mode 或 single_package_rich_draft 需要额外的分表章节
+    if (mode == "rich_draft" or doc_mode == DocumentMode.single_package_rich_draft) and products:
+        rich_sections = _generate_rich_draft_sections(
+            tender, products,
+            normalized_reqs=all_normalized,
+            active_packages=active_packages,
+        )
         sections.extend(rich_sections)
 
     sections = _apply_template_pollution_guard(sections)
@@ -194,7 +198,7 @@ def generate_bid_sections(
     )
     logger.info(
         "回归指标: focus=%.2f, contamination=%.2f, mixing=%.2f, evidence=%.2f, "
-        "placeholders=%.2f, config=%.2f, density=%.1f",
+        "placeholders=%.2f, config=%.2f, density=%.1f, snippet_clean=%.2f, usability=%.2f",
         metrics.single_package_focus_score,
         metrics.package_contamination_rate,
         metrics.table_category_mixing_rate,
@@ -202,6 +206,8 @@ def generate_bid_sections(
         metrics.placeholder_leakage,
         metrics.config_detail_score,
         metrics.fact_density_per_page,
+        metrics.snippet_cleanliness_score,
+        metrics.draft_usability_score,
     )
 
     logger.info("一键投标文件章节生成完成，共 %d 章", len(sections))

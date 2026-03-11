@@ -422,7 +422,7 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
     规则：
     - 一个句子里有多个参数（用、或；分隔），拆成多条
     - "技术参数总括"这种合并项不允许进入最终技术偏离表
-    - 一个表格里一行一个要求，就一行一条
+    - 拆后必须语义完整：不允许半截条目名（括号未闭合、过短无意义）进入最终主表
     """
     # 跳过总括性/通用项
     _GENERIC_SUMMARY_KEYS = ("技术参数总括", "技术参数汇总", "技术要求总述", "整体要求", "总体要求", "参数一览")
@@ -458,15 +458,41 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
         # 语义完整性检查：拆后条目必须 >= 6 字或含数值/硬标记才允许入表
         if len(seg) < 6 and not any(m in seg for m in _HARD_REQUIREMENT_MARKERS) and not re.search(r"\d", seg):
             continue
+        # 半截条目名检查：括号未闭合则回合到父级
+        if _is_truncated_name(seg):
+            continue
         # 尝试从 segment 中提取 sub_key:sub_val
         pair = _extract_requirement_pair(seg)
         if pair:
+            # 再次检查拆后 key 的完整性
+            sub_key, sub_val = pair
+            if _is_truncated_name(sub_key):
+                continue
             results.append(pair)
         else:
             sub_key = f"{key}（{idx}）" if len(segments) > 1 else key
             results.append((sub_key, seg))
 
     return results if results else [(key, normalized_val)]
+
+
+def _is_truncated_name(name: str) -> bool:
+    """检测条目名是否为半截（括号未闭合、以特定符号结尾）。"""
+    stripped = name.strip()
+    if not stripped:
+        return True
+    # 括号未闭合
+    open_count = stripped.count("（") + stripped.count("(")
+    close_count = stripped.count("）") + stripped.count(")")
+    if open_count > close_count:
+        return True
+    # 以中文左括号结尾
+    if stripped.endswith("（") or stripped.endswith("("):
+        return True
+    # 过短且无技术含义
+    if len(stripped) < 3 and not re.search(r"\d", stripped):
+        return True
+    return False
 
 
 def _atomize_requirements(requirements: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -574,9 +600,11 @@ def normalize_requirements_to_objects(
     """将原子化后的 (key, value) 对转化为 NormalizedRequirement 对象。
 
     - 自动提取 operator / threshold / unit
-    - 自动分类 category（7 类 ClauseCategory）
+    - 自动分类 category（9 类 ClauseCategory）
     - 自动检测 is_material（实质性条款）
     - 跨包词命中直接判噪音
+    - 半截条目名自动过滤
+    - 填充 source_text（完整原文片段）
     """
     # 构建跨包检测 token
     _cross_pkg_tokens: list[str] = []
@@ -588,6 +616,11 @@ def normalize_requirements_to_objects(
     results: list[NormalizedRequirement] = []
     for idx, (key, val) in enumerate(requirements, start=1):
         raw_text = f"{key}：{val}" if val else key
+
+        # 半截条目名过滤：括号未闭合、过短无意义
+        if _is_truncated_name(key):
+            logger.debug("半截条目名过滤: pkg%s req#%d key=%s", package_id, idx, key)
+            continue
 
         # 跨包词命中检测：如果含其他包产品名 token，直接标噪音
         if _cross_pkg_tokens and any(tok in raw_text for tok in _cross_pkg_tokens):
@@ -616,6 +649,7 @@ def normalize_requirements_to_objects(
             is_material=is_material,
             needs_bid_fact=needs_bid_fact,
             source_page=source_page,
+            source_text=raw_text,
             source_clause_no=_detect_clause_no_from_key(key),
         ))
     return results

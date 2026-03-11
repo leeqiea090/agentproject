@@ -66,6 +66,8 @@ _REGRESSION_THRESHOLDS = {
     "placeholder_leakage": 0.1,               # 占位符泄漏应 ≤ 0.1
     "config_detail_score": 0.5,               # 配置详细度应 ≥ 0.5
     "fact_density_per_page": 3.0,             # 每页事实密度应 ≥ 3.0
+    "snippet_cleanliness_score": 0.7,         # 片段清洁度应 ≥ 0.7
+    "draft_usability_score": 0.5,             # 底稿可用性应 ≥ 0.5
 }
 
 
@@ -146,9 +148,9 @@ def compute_validation_gate(
                 table_mixing = True
                 logger.warning("表格分类混装：包%s 技术表中出现非技术类条款: %s", pkg_id, non_tech)
 
-    # 5) 半截条目检测
+    # 5) 半截条目检测 — 增强：检查 param_name 和 raw_text
     snippet_truncation_count = 0
-    _HALF_CUT_PATTERNS = ("（", "(", "中速（", "低速（", "高灵敏度模式（")
+    _HALF_CUT_ENDINGS = ("（", "(", "中速（", "低速（", "高灵敏度模式（")
     if normalized_reqs:
         for pkg_reqs in normalized_reqs.values():
             for req in pkg_reqs:
@@ -156,8 +158,14 @@ def compute_validation_gate(
                 # 以括号结尾（未闭合）视为截断
                 if name.endswith("（") or name.endswith("("):
                     snippet_truncation_count += 1
+                # 括号不平衡视为截断
+                elif (name.count("（") + name.count("(")) > (name.count("）") + name.count(")")):
+                    snippet_truncation_count += 1
                 # param_name 过短且非数值型
                 elif len(name) < 4 and not re.search(r"\d", name):
+                    snippet_truncation_count += 1
+                # raw_text 以括号截断结尾
+                elif req.raw_text and (req.raw_text.rstrip().endswith("（") or req.raw_text.rstrip().endswith("(")):
                     snippet_truncation_count += 1
 
     # 6) 锚点污染率 — 检测模板/系统标记泄漏
@@ -212,7 +220,10 @@ def annotate_draft_level(
 def strip_placeholders_for_external(
     sections: list[BidDocumentSection],
 ) -> list[BidDocumentSection]:
-    """外发稿：将残余占位符替换为安全文案，严禁任何待核实/待补证/占位符状态。"""
+    """外发稿：严禁任何待核实/待补证/占位符/招标原文片段状态。
+
+    External 不允许：待核实、待补证、占位符、招标原文片段。
+    """
     cleaned: list[BidDocumentSection] = []
     for s in sections:
         content = s.content
@@ -226,8 +237,11 @@ def strip_placeholders_for_external(
         content = re.sub(r"待补充", "（详见附件）", content)
         content = re.sub(r"待核实", "（详见产品技术资料）", content)
         content = re.sub(r"待定位片段", "（详见原文）", content)
+        content = re.sub(r"招标原文片段", "（详见原文）", content)
         # 移除内部草稿水印
         content = re.sub(r"\*\*【内部草稿.*?】\*\*\n*", "", content)
+        # 移除任何残留的 [待X] 格式占位符
+        content = re.sub(r"\[待[^\]]{1,20}\]", "（详见附件）", content)
         cleaned.append(BidDocumentSection(
             section_title=s.section_title,
             content=content,
@@ -342,6 +356,44 @@ def compute_regression_metrics(
     pages = max(1, total_pages_estimate)
     fact_density = fact_lines / pages
 
+    # 8) snippet_cleanliness_score — 原文片段清洁度
+    # 检查 source_excerpt / evidence snippet 是否带出后续多条或串邻
+    total_snippets = 0
+    clean_snippets = 0
+    _TRAILING_NOISE = ("；", ";", "\n", "|")
+    for _pkg_id, reqs in normalized_reqs.items():
+        for req in reqs:
+            total_snippets += 1
+            raw = req.raw_text or ""
+            # 干净 = 不含多余换行、不含未闭合括号、不以分隔符结尾
+            is_clean = True
+            if raw.count("\n") > 1:
+                is_clean = False
+            if raw.rstrip().endswith(("（", "(")) and raw.count("（") + raw.count("(") > raw.count("）") + raw.count(")"):
+                is_clean = False
+            if len(raw) > 200:
+                is_clean = False
+            if is_clean:
+                clean_snippets += 1
+    snippet_cleanliness = clean_snippets / total_snippets if total_snippets > 0 else 1.0
+
+    # 9) draft_usability_score — 底稿可用性
+    # 综合各指标：有槽位 + 分表清晰 + 不过碎不过厚
+    usability_factors = []
+    # 技术表/配置表/服务表是否都有内容
+    _TABLE_TYPES_EXPECTED = ("技术", "配置", "服务", "售后")
+    tables_found = sum(1 for t in _TABLE_TYPES_EXPECTED if t in full_text)
+    usability_factors.append(min(1.0, tables_found / 3))
+    # 占位符不过多（有一些是正常的，太多不可用）
+    usability_factors.append(max(0.0, 1.0 - leakage * 2))
+    # 配置详细度
+    usability_factors.append(config_score)
+    # 证据覆盖
+    usability_factors.append(min(1.0, evidence_cov * 1.5))
+    # 片段清洁度
+    usability_factors.append(snippet_cleanliness)
+    draft_usability = sum(usability_factors) / len(usability_factors) if usability_factors else 0.0
+
     metrics = RegressionMetrics(
         single_package_focus_score=round(focus_score, 3),
         package_contamination_rate=round(contamination_rate, 3),
@@ -350,6 +402,8 @@ def compute_regression_metrics(
         placeholder_leakage=round(leakage, 3),
         config_detail_score=round(config_score, 3),
         fact_density_per_page=round(fact_density, 2),
+        snippet_cleanliness_score=round(snippet_cleanliness, 3),
+        draft_usability_score=round(draft_usability, 3),
     )
 
     # ── 阈值对比：输出质量告警 ──
@@ -369,6 +423,10 @@ def compute_regression_metrics(
         warnings.append(f"配置详细度不足: {config_score:.2f} < {t['config_detail_score']}")
     if fact_density < t["fact_density_per_page"]:
         warnings.append(f"每页事实密度不足: {fact_density:.1f} < {t['fact_density_per_page']}")
+    if snippet_cleanliness < t["snippet_cleanliness_score"]:
+        warnings.append(f"原文片段清洁度不足: {snippet_cleanliness:.2f} < {t['snippet_cleanliness_score']}")
+    if draft_usability < t["draft_usability_score"]:
+        warnings.append(f"底稿可用性不足: {draft_usability:.2f} < {t['draft_usability_score']}")
 
     if warnings:
         for w in warnings:

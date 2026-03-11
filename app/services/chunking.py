@@ -53,6 +53,23 @@ def _detect_block_type(line: str) -> str:
     return "paragraph"
 
 
+def _is_noise_cell(text: str) -> bool:
+    """判断单元格内容是否为噪音（表头说明、脚注、纯序号等）。"""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    # 纯序号
+    if re.fullmatch(r"\d+", stripped):
+        return True
+    # 表头类关键词
+    _NOISE_CELL_HINTS = ("序号", "编号", "项目", "备注", "说明", "注：", "注:", "※", "合计", "小计")
+    if stripped in _NOISE_CELL_HINTS:
+        return True
+    if any(stripped.startswith(p) for p in ("注：", "注:", "备注", "说明：", "说明:", "※")):
+        return True
+    return False
+
+
 def split_text(
     text: str,
     chunk_size: int = 900,
@@ -101,11 +118,6 @@ def split_to_blocks(
 ) -> list[DocumentBlock]:
     """将文本切分为可引用的 DocumentBlock 对象。
 
-    相比 split_text：
-    1. 保留 char_start / char_end 偏移
-    2. 自动检测 package_hint / clause_no / block_type
-    3. 识别表格行并保留表头
-    4. 在包件边界和章节边界处强制切分
     """
     cleaned = text.replace("\r\n", "\n").strip()
     if not cleaned:
@@ -202,6 +214,7 @@ def split_to_blocks(
                 table_row_idx += 1
 
                 # ── 逐格入库：每个单元格生成独立 DocumentBlock ──
+                cell_row_idx = table_row
                 for row_line in lines:
                     row_stripped = row_line.strip()
                     if not _TABLE_ROW_PATTERN.match(row_stripped):
@@ -209,10 +222,22 @@ def split_to_blocks(
                     if _TABLE_SEP_PATTERN.match(row_stripped):
                         continue
                     cell_values = [c.strip() for c in row_stripped.strip("|").split("|")]
+                    # 计算该行在原文中的精确偏移
+                    row_offset_in_chunk = chunk.find(row_line)
+                    row_abs_start = abs_start + (row_offset_in_chunk if row_offset_in_chunk >= 0 else 0)
+                    cursor = 0
                     for col_idx, cell_text in enumerate(cell_values):
                         if not cell_text:
+                            cursor += 1
                             continue
+                        # 精确定位 cell 在行内的字符偏移
+                        cell_pos_in_row = row_stripped.find(cell_text, cursor)
+                        cell_char_start = row_abs_start + (cell_pos_in_row if cell_pos_in_row >= 0 else 0)
+                        cell_char_end = cell_char_start + len(cell_text)
+                        cursor = (cell_pos_in_row + len(cell_text)) if cell_pos_in_row >= 0 else cursor + len(cell_text)
                         col_header = table_header[col_idx] if col_idx < len(table_header) else ""
+                        # 表头行和脚注/说明类单元格标记为 noise
+                        cell_is_noise = bool(cell_row_idx == 0 and table_header) or _is_noise_cell(cell_text)
                         blocks.append(DocumentBlock(
                             text=cell_text,
                             package_hint=pkg_hint,
@@ -220,13 +245,15 @@ def split_to_blocks(
                             clause_no=clause_no,
                             block_type="table_cell",
                             page=0,
-                            char_start=abs_start,
-                            char_end=abs_end,
+                            char_start=cell_char_start,
+                            char_end=cell_char_end,
                             table_id=table_id,
-                            table_row=table_row,
+                            table_row=cell_row_idx,
                             table_col=col_idx,
                             table_header=[col_header] if col_header else [],
+                            is_noise=cell_is_noise,
                         ))
+                    cell_row_idx += 1
             else:
                 # 非表格行重置表格状态
                 current_table_id = ""

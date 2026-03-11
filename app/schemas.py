@@ -26,10 +26,11 @@ class ClauseCategory(str, Enum):
 
 class DocumentMode(str, Enum):
     """文档目标模式 — 决定生成策略。"""
-    single_package = "single_package"                     # 单包实装稿（兼容旧值）
-    single_package_deep_draft = "single_package_deep_draft"  # 单包深写模式（默认）
+    single_package = "single_package"                          # 单包实装稿（兼容旧值）
+    single_package_deep_draft = "single_package_deep_draft"    # 单包深写底稿（允许待补，但不允许缺槽位）
+    single_package_rich_draft = "single_package_rich_draft"    # 单包富底稿（必须生成技术表/配置表/服务表/资料表）
     multi_package_master_draft = "multi_package_master_draft"  # 多包总母版底稿
-    multi_package_draft = "multi_package_draft"            # 多包底稿（兼容旧值）
+    multi_package_draft = "multi_package_draft"                # 多包底稿（兼容旧值）
 
 
 class DraftLevel(str, Enum):
@@ -56,7 +57,11 @@ class DocumentBlock(BaseModel):
 
 
 class NormalizedRequirement(BaseModel):
-    """归一化需求条目 — 原子级、可直接绑定投标事实。"""
+    """归一化需求条目 — 原子级、可直接绑定投标事实。
+
+    固定输出字段：param_name / operator / threshold / unit / category / is_material / source_page / source_text
+    规则：一句多参数可拆，但拆后必须语义完整；不允许半截条目名进入最终主表。
+    """
     package_id: str = Field(description="所属包号")
     requirement_id: str = Field(default="", description="需求唯一 ID，如 'pkg1-req-003'")
     param_name: str = Field(description="参数名称")
@@ -68,6 +73,7 @@ class NormalizedRequirement(BaseModel):
     is_material: bool = Field(default=False, description="是否为实质性条款（不可偏离）")
     needs_bid_fact: bool = Field(default=True, description="是否需要投标侧事实来响应")
     source_page: int = Field(default=0, description="来源页码")
+    source_text: str = Field(default="", description="来源原文片段（完整句子，不截断）")
     source_clause_no: str = Field(default="", description="来源条款编号")
 
 
@@ -151,7 +157,13 @@ class ValidationGate(BaseModel):
 
 
 class RegressionMetrics(BaseModel):
-    """评测回归指标 — 衡量生成稿与标准标书的质量差距。"""
+    """评测回归指标 — 衡量生成稿与标准标书的质量差距。
+
+    新增指标：snippet_cleanliness_score / draft_usability_score /
+    package_contamination_rate / table_category_mixing_rate 已存在，
+    额外追加 config_detail_score 细化。
+    每次改流程后，能量化看到"更好补了没有"。
+    """
     single_package_focus_score: float = Field(default=0.0, description="单包聚焦度（0~1）")
     package_contamination_rate: float = Field(default=0.0, description="包件污染率（0~1）")
     table_category_mixing_rate: float = Field(default=0.0, description="表格分类混装率（0~1）")
