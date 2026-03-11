@@ -143,6 +143,7 @@ class RegressionMetrics(BaseModel):
     placeholder_leakage: float = Field(default=0.0, description="占位符泄漏率（0~1）")
     config_detail_score: float = Field(default=0.0, description="配置详细度得分（0~1）")
     fact_density_per_page: float = Field(default=0.0, description="每页事实密度")
+    quality_warnings: list[str] = Field(default_factory=list, description="质量告警列表（超出阈值时自动生成）")
 
 
 class BidGenerationResult(BaseModel):

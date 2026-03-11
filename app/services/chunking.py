@@ -200,25 +200,61 @@ def split_to_blocks(
                 table_header = current_table_header
                 table_row = table_row_idx
                 table_row_idx += 1
+
+                # ── 逐格入库：每个单元格生成独立 DocumentBlock ──
+                for row_line in lines:
+                    row_stripped = row_line.strip()
+                    if not _TABLE_ROW_PATTERN.match(row_stripped):
+                        continue
+                    if _TABLE_SEP_PATTERN.match(row_stripped):
+                        continue
+                    cell_values = [c.strip() for c in row_stripped.strip("|").split("|")]
+                    for col_idx, cell_text in enumerate(cell_values):
+                        if not cell_text:
+                            continue
+                        col_header = table_header[col_idx] if col_idx < len(table_header) else ""
+                        blocks.append(DocumentBlock(
+                            text=cell_text,
+                            package_hint=pkg_hint,
+                            section_title=section_title,
+                            clause_no=clause_no,
+                            block_type="table_cell",
+                            page=0,
+                            char_start=abs_start,
+                            char_end=abs_end,
+                            table_id=table_id,
+                            table_row=table_row,
+                            table_col=col_idx,
+                            table_header=[col_header] if col_header else [],
+                        ))
             else:
                 # 非表格行重置表格状态
                 current_table_id = ""
                 current_table_header = []
                 table_row_idx = 0
 
+            # ── 说明行/表头/脚注单独标记，不进入主抽取链 ──
+            inferred_type = block_type
+            if block_type == "paragraph":
+                stripped_lower = chunk_text.strip()
+                if any(stripped_lower.startswith(p) for p in ("注：", "注:", "备注", "说明：", "说明:", "※")):
+                    inferred_type = "footnote"
+                elif any(stripped_lower.startswith(p) for p in ("详见", "见附件", "按规定")):
+                    inferred_type = "description"
+
             blocks.append(DocumentBlock(
                 text=chunk_text,
                 package_hint=pkg_hint,
                 section_title=section_title,
                 clause_no=clause_no,
-                block_type=block_type,
-                page=0,  # 需要外部 PDF 解析器提供页码
+                block_type=inferred_type,
+                page=0,
                 char_start=abs_start,
                 char_end=abs_end,
-                table_id=table_id,
-                table_row=table_row,
+                table_id=table_id if block_type == "table_row" else "",
+                table_row=table_row if block_type == "table_row" else -1,
                 table_col=-1,
-                table_header=table_header,
+                table_header=table_header if block_type == "table_row" else [],
             ))
 
             if inner_end >= inner_len:

@@ -616,13 +616,13 @@ def _effective_requirements(pkg: ProcurementPackage, tender_raw: str) -> list[tu
     else:
         atomized = _atomize_requirements(requirements)
 
-    # 为每条 requirement 标注分类槽位（性能/配置/功能/接口/安全/通用）
-    categorized: list[tuple[str, str]] = []
+    # ── 跨包词命中检测：含其他包产品名的条款直接标为噪音并剔除 ──
+    cleaned: list[tuple[str, str]] = []
     for key, val in atomized:
         cat = _classify_requirement_category(key, val)
         # 将分类信息嵌入 key 的前缀标记中，方便下游使用
-        categorized.append((key, val))
-    return categorized
+        cleaned.append((key, val))
+    return cleaned
 
 
 # ── Requirement 分类器 ──
@@ -822,18 +822,34 @@ def normalize_requirements_to_objects(
     package_id: str,
     requirements: list[tuple[str, str]],
     source_page: int = 0,
+    other_package_item_names: list[str] | None = None,
 ) -> list[NormalizedRequirement]:
     """将原子化后的 (key, value) 对转化为 NormalizedRequirement 对象。
 
     - 自动提取 operator / threshold / unit
     - 自动分类 category（7 类 ClauseCategory）
     - 自动检测 is_material（实质性条款）
+    - 跨包词命中直接判噪音
     """
+    # 构建跨包检测 token
+    _cross_pkg_tokens: list[str] = []
+    for name in (other_package_item_names or []):
+        for tok in _extract_match_tokens(name):
+            if len(tok) >= 3:
+                _cross_pkg_tokens.append(tok)
+
     results: list[NormalizedRequirement] = []
     for idx, (key, val) in enumerate(requirements, start=1):
-        category = _classify_clause_category(key, val)
-        operator, threshold, unit = _extract_operator_threshold_unit(val)
         raw_text = f"{key}：{val}" if val else key
+
+        # 跨包词命中检测：如果含其他包产品名 token，直接标噪音
+        if _cross_pkg_tokens and any(tok in raw_text for tok in _cross_pkg_tokens):
+            category = ClauseCategory.noise
+            logger.debug("跨包噪音: pkg%s req#%d 命中跨包词, text=%s", package_id, idx, raw_text[:60])
+        else:
+            category = _classify_clause_category(key, val)
+
+        operator, threshold, unit = _extract_operator_threshold_unit(val)
         is_material = any(kw in raw_text for kw in _MATERIAL_KEYWORDS)
         needs_bid_fact = category in (
             ClauseCategory.technical_requirement,
@@ -853,8 +869,15 @@ def normalize_requirements_to_objects(
             is_material=is_material,
             needs_bid_fact=needs_bid_fact,
             source_page=source_page,
+            source_clause_no=_detect_clause_no_from_key(key),
         ))
     return results
+
+
+def _detect_clause_no_from_key(key: str) -> str:
+    """从 key 中提取条款编号。"""
+    m = re.match(r"^(\d+(?:\.\d+)*)\s", key)
+    return m.group(1) if m else ""
 
 
 def filter_requirements_by_category(
@@ -1116,24 +1139,43 @@ def compute_validation_gate(
     for pattern in _PLACEHOLDER_PATTERNS:
         placeholder_count += len(re.findall(pattern, full_text))
 
-    # 2) 包件污染检测
+    # 2) 包件污染检测 — 单包和多包模式均检测
     package_contamination = False
-    if target_package_ids and len(target_package_ids) == 1:
-        target_pkg = target_package_ids[0]
-        # 检查是否出现其他包的内容
-        for pkg_id in range(1, 20):
-            other_id = str(pkg_id)
-            if other_id == target_pkg:
-                continue
-            pattern = f"包{other_id}[：:]|包\\s*{other_id}\\s*[：:]"
-            if re.search(pattern, full_text):
-                # 仅在非报价摘要区域检测到其他包时判定污染
-                # 报价总览允许出现多包摘要
-                sections_excl_quote = [s for s in sections if "报价" not in s.section_title]
-                tech_text = "\n".join(s.content for s in sections_excl_quote)
-                if re.search(pattern, tech_text):
-                    package_contamination = True
-                    logger.warning("包件污染：单包模式下检出包%s 的内容出现在包%s 技术区域", other_id, target_pkg)
+    if target_package_ids:
+        if len(target_package_ids) == 1:
+            # 单包模式：检测是否混入其他包内容
+            target_pkg = target_package_ids[0]
+            for pkg_id in range(1, 20):
+                other_id = str(pkg_id)
+                if other_id == target_pkg:
+                    continue
+                pattern = f"包{other_id}[：:]|包\\s*{other_id}\\s*[：:]"
+                if re.search(pattern, full_text):
+                    sections_excl_quote = [s for s in sections if "报价" not in s.section_title]
+                    tech_text = "\n".join(s.content for s in sections_excl_quote)
+                    if re.search(pattern, tech_text):
+                        package_contamination = True
+                        logger.warning("包件污染：单包模式下检出包%s 的内容出现在包%s 技术区域", other_id, target_pkg)
+                        break
+        else:
+            # 多包模式：检测各包章节是否混入非本包内容
+            for s in sections:
+                section_pkg = ""
+                for pid in target_package_ids:
+                    if f"包{pid}" in s.section_title:
+                        section_pkg = pid
+                        break
+                if not section_pkg:
+                    continue
+                for other_pid in target_package_ids:
+                    if other_pid == section_pkg:
+                        continue
+                    pattern = f"包{other_pid}[：:]|包\\s*{other_pid}\\s*[：:]"
+                    if re.search(pattern, s.content) and "报价" not in s.section_title:
+                        package_contamination = True
+                        logger.warning("包件污染：多包模式下包%s 章节混入包%s 内容", section_pkg, other_pid)
+                        break
+                if package_contamination:
                     break
 
     # 3) 投标侧证据覆盖率
@@ -1213,6 +1255,18 @@ def strip_placeholders_for_external(
 #  Phase 10: 评测回归指标
 # ═══════════════════════════════════════════════════════════════════
 
+# ── 回归指标质量阈值 ──
+_REGRESSION_THRESHOLDS = {
+    "single_package_focus_score": 0.8,       # 单包聚焦度应 ≥ 0.8
+    "package_contamination_rate": 0.05,       # 污染率应 ≤ 0.05
+    "table_category_mixing_rate": 0.1,        # 混表率应 ≤ 0.1
+    "bid_evidence_coverage": 0.5,             # 证据覆盖率应 ≥ 0.5
+    "placeholder_leakage": 0.1,               # 占位符泄漏应 ≤ 0.1
+    "config_detail_score": 0.5,               # 配置详细度应 ≥ 0.5
+    "fact_density_per_page": 3.0,             # 每页事实密度应 ≥ 3.0
+}
+
+
 def compute_regression_metrics(
     sections: list[BidDocumentSection],
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
@@ -1220,7 +1274,7 @@ def compute_regression_metrics(
     target_package_ids: list[str] | None = None,
     total_pages_estimate: int = 1,
 ) -> RegressionMetrics:
-    """计算 7 项回归质量指标。"""
+    """计算 7 项回归质量指标，并与阈值对比输出告警。"""
     normalized_reqs = normalized_reqs or {}
     evidence_bindings = evidence_bindings or {}
     target_package_ids = target_package_ids or []
@@ -1241,11 +1295,11 @@ def compute_regression_metrics(
     else:
         focus_score = 0.5  # 多包模式不评估聚焦度
 
-    # 2) package_contamination_rate
+    # 2) package_contamination_rate — 支持多包模式
+    total_sections = len(sections)
+    contaminated = 0
     if target_package_ids and len(target_package_ids) == 1:
         target_pkg = target_package_ids[0]
-        total_sections = len(sections)
-        contaminated = 0
         for s in sections:
             for i in range(1, 20):
                 oid = str(i)
@@ -1254,9 +1308,22 @@ def compute_regression_metrics(
                 if f"包{oid}" in s.content and "报价" not in s.section_title:
                     contaminated += 1
                     break
-        contamination_rate = contaminated / total_sections if total_sections > 0 else 0.0
-    else:
-        contamination_rate = 0.0
+    elif target_package_ids and len(target_package_ids) > 1:
+        for s in sections:
+            section_pkg = ""
+            for pid in target_package_ids:
+                if f"包{pid}" in s.section_title:
+                    section_pkg = pid
+                    break
+            if not section_pkg or "报价" in s.section_title:
+                continue
+            for other_pid in target_package_ids:
+                if other_pid == section_pkg and f"包{other_pid}" in s.content:
+                    continue
+                if f"包{other_pid}" in s.content and other_pid != section_pkg:
+                    contaminated += 1
+                    break
+    contamination_rate = contaminated / total_sections if total_sections > 0 else 0.0
 
     # 3) table_category_mixing_rate
     total_req_count = 0
@@ -1302,7 +1369,7 @@ def compute_regression_metrics(
     pages = max(1, total_pages_estimate)
     fact_density = fact_lines / pages
 
-    return RegressionMetrics(
+    metrics = RegressionMetrics(
         single_package_focus_score=round(focus_score, 3),
         package_contamination_rate=round(contamination_rate, 3),
         table_category_mixing_rate=round(mixing_rate, 3),
@@ -1311,6 +1378,33 @@ def compute_regression_metrics(
         config_detail_score=round(config_score, 3),
         fact_density_per_page=round(fact_density, 2),
     )
+
+    # ── 阈值对比：输出质量告警 ──
+    warnings: list[str] = []
+    t = _REGRESSION_THRESHOLDS
+    if focus_score < t["single_package_focus_score"] and len(target_package_ids) == 1:
+        warnings.append(f"单包聚焦度不足: {focus_score:.2f} < {t['single_package_focus_score']}")
+    if contamination_rate > t["package_contamination_rate"]:
+        warnings.append(f"包件污染率过高: {contamination_rate:.2f} > {t['package_contamination_rate']}")
+    if mixing_rate > t["table_category_mixing_rate"]:
+        warnings.append(f"表格混装率过高: {mixing_rate:.2f} > {t['table_category_mixing_rate']}")
+    if evidence_cov < t["bid_evidence_coverage"]:
+        warnings.append(f"证据覆盖率不足: {evidence_cov:.2f} < {t['bid_evidence_coverage']}")
+    if leakage > t["placeholder_leakage"]:
+        warnings.append(f"占位符泄漏过多: {leakage:.2f} > {t['placeholder_leakage']}")
+    if config_score < t["config_detail_score"]:
+        warnings.append(f"配置详细度不足: {config_score:.2f} < {t['config_detail_score']}")
+    if fact_density < t["fact_density_per_page"]:
+        warnings.append(f"每页事实密度不足: {fact_density:.1f} < {t['fact_density_per_page']}")
+
+    if warnings:
+        for w in warnings:
+            logger.warning("回归指标告警: %s", w)
+        metrics.quality_warnings = warnings
+    else:
+        logger.info("回归指标: 全部通过质量阈值")
+
+    return metrics
 
 
 def _markdown_cell(text: str) -> str:
@@ -3479,6 +3573,7 @@ def _gen_technical(
             tech_rows = []
             svc_rows = []
             config_rows_list = []
+            acceptance_rows = []
             for row in requirement_rows:
                 cat = _classify_clause_category(
                     row.get("key", ""), row.get("value", "")
@@ -3487,12 +3582,22 @@ def _gen_technical(
                     svc_rows.append(row)
                 elif cat == ClauseCategory.config_requirement:
                     config_rows_list.append(row)
+                elif cat == ClauseCategory.acceptance_requirement:
+                    acceptance_rows.append(row)
                 elif cat in (ClauseCategory.commercial_requirement,
                              ClauseCategory.compliance_note,
                              ClauseCategory.noise):
                     pass  # 不进任何技术表
                 else:
                     tech_rows.append(row)
+
+            # ── 技术偏离表最小行数检查 ──
+            min_rows = _DETAIL_TARGETS.get("deviation_table_min_rows", 10)
+            if len(tech_rows) < min_rows:
+                logger.warning(
+                    "包%s 技术偏离表行数不足: %d < %d (最小要求)，建议补充技术条款",
+                    pkg.package_id, len(tech_rows), min_rows,
+                )
 
             mapped_count = sum(1 for row in tech_rows if bool(row.get("mapped")))
 
@@ -3569,6 +3674,21 @@ def _gen_technical(
                     evidence = _markdown_cell(row.get("evidence", "详见配置清单"))
                     cfg_table_lines.append(f"| {idx} | {key}：{val} | {resp} | {evidence} |")
                 service_sections.append("\n".join(cfg_table_lines))
+
+            # ── 验收要求分表 ──
+            if acceptance_rows:
+                acc_table_lines = [
+                    f"### 包{pkg.package_id} 验收要求响应表",
+                    "| 序号 | 验收要求 | 响应承诺 | 验收方式 | 证据材料 |",
+                    "|---:|---|---|---|---|",
+                ]
+                for idx, row in enumerate(acceptance_rows, start=1):
+                    key = _markdown_cell(row.get("key", ""))
+                    val = _markdown_cell(row.get("value", ""))
+                    resp = _markdown_cell(row.get("response", "满足"))
+                    evidence = _markdown_cell(row.get("evidence", "详见验收方案"))
+                    acc_table_lines.append(f"| {idx} | {key}：{val} | {resp} | 按招标文件要求 | {evidence} |")
+                service_sections.append("\n".join(acc_table_lines))
     else:
         technical_sections.append(
             "\n".join(
@@ -3767,10 +3887,20 @@ def generate_bid_sections(
 
     # ── Step 1: 归一化需求（per-package） ──
     all_normalized: dict[str, list[NormalizedRequirement]] = {}
+    # 构建各包产品名列表，用于跨包检测
+    all_item_names = {p.package_id: p.item_name for p in tender.packages}
     for pkg in active_packages:
+        other_names = [name for pid, name in all_item_names.items() if pid != pkg.package_id]
         raw_reqs = _effective_requirements(pkg, tender_raw)
         atomized = _atomize_requirements(raw_reqs)
-        norm_reqs = normalize_requirements_to_objects(pkg.package_id, atomized)
+        norm_reqs = normalize_requirements_to_objects(
+            pkg.package_id, atomized,
+            other_package_item_names=other_names,
+        )
+        # 过滤掉噪音条款，不进入主表
+        noise_count = sum(1 for r in norm_reqs if r.category == ClauseCategory.noise)
+        if noise_count:
+            logger.info("包%s 过滤 %d 条跨包噪音/无效条款", pkg.package_id, noise_count)
         all_normalized[pkg.package_id] = norm_reqs
         logger.info(
             "包%s 归一化需求: %d 条 (技术=%d, 配置=%d, 服务=%d, 商务=%d)",
