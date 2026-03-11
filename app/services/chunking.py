@@ -70,6 +70,30 @@ def _is_noise_cell(text: str) -> bool:
     return False
 
 
+def _is_noise_line(text: str) -> bool:
+    """判断整行是否应作为噪音处理。"""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if any(stripped.startswith(prefix) for prefix in ("注：", "注:", "备注", "说明：", "说明:", "※")):
+        return True
+    if stripped in {"注", "说明", "备注"}:
+        return True
+    return False
+
+
+def _cell_char_bounds(row_line: str, row_abs_start: int, cell_text: str, cursor: int) -> tuple[int, int, int]:
+    """计算单元格在全文中的字符区间。"""
+    if not cell_text:
+        return row_abs_start + cursor, row_abs_start + cursor, cursor
+    pos = row_line.find(cell_text, cursor)
+    if pos < 0:
+        pos = cursor
+    start = row_abs_start + pos
+    end = start + len(cell_text)
+    return start, end, pos + len(cell_text)
+
+
 def split_text(
     text: str,
     chunk_size: int = 900,
@@ -111,189 +135,141 @@ def split_text(
 # ── 增强版：输出可引用 DocumentBlock ──
 
 
+def _estimate_page(char_offset: int, chars_per_page: int = 1800) -> int:
+    """根据字符偏移量估算页码（1-based）。"""
+    if char_offset <= 0 or chars_per_page <= 0:
+        return 1
+    return (char_offset // chars_per_page) + 1
+
+
 def split_to_blocks(
     text: str,
     chunk_size: int = 900,
     chunk_overlap: int = 150,
+    chars_per_page: int = 1800,
 ) -> list[DocumentBlock]:
     """将文本切分为可引用的 DocumentBlock 对象。
 
+    每个块携带 section_title / clause_no / page / table_id / row / col /
+    char_start / char_end 等元数据；表头、脚注、说明行标记为 noise。
     """
     cleaned = text.replace("\r\n", "\n").strip()
     if not cleaned:
         return []
 
-    if chunk_overlap >= chunk_size:
-        chunk_overlap = max(0, chunk_size // 5)
-
-    # ── 第一步：按包件/章节边界做硬切分 ──
-    hard_breaks: list[int] = [0]
-    for m in _PACKAGE_PATTERN.finditer(cleaned):
-        pos = m.start()
-        # 找到该行行首
-        line_start = cleaned.rfind("\n", 0, pos)
-        line_start = 0 if line_start == -1 else line_start + 1
-        if line_start not in hard_breaks:
-            hard_breaks.append(line_start)
-
-    # 章节标题也做硬切分
-    for m in re.finditer(r"\n(第[一二三四五六七八九十\d]+[章节])", cleaned):
-        pos = m.start() + 1  # skip the \n
-        if pos not in hard_breaks:
-            hard_breaks.append(pos)
-
-    hard_breaks.append(len(cleaned))
-    hard_breaks.sort()
-
-    # ── 第二步：在每个硬段内做软切分 ──
     blocks: list[DocumentBlock] = []
+    current_package_id = ""
+    current_section_title = ""
+    current_clause_no = ""
     current_table_id = ""
     current_table_header: list[str] = []
     table_row_idx = 0
+    offset = 0
+    for raw_line in cleaned.splitlines(keepends=True):
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+        line_start = offset
+        line_end = offset + len(line)
+        offset += len(raw_line)
 
-    for seg_idx in range(len(hard_breaks) - 1):
-        seg_start = hard_breaks[seg_idx]
-        seg_end = hard_breaks[seg_idx + 1]
-        segment = cleaned[seg_start:seg_end]
-
-        if not segment.strip():
+        if not stripped:
+            current_table_id = ""
+            current_table_header = []
+            table_row_idx = 0
             continue
 
-        # 检测该段的包件提示
-        pkg_hint = _detect_package_hint(segment)
+        detected_package_id = _detect_package_hint(stripped)
+        if detected_package_id:
+            current_package_id = detected_package_id
+        package_hint = f"包{current_package_id}" if current_package_id else ""
 
-        # 在段内做 chunk 切分
-        inner_start = 0
-        inner_len = len(segment)
+        block_type = _detect_block_type(stripped)
+        clause_no = _detect_clause_no(stripped)
+        if clause_no:
+            current_clause_no = clause_no
+        if block_type == "header" and not clause_no:
+            current_section_title = stripped
 
-        while inner_start < inner_len:
-            inner_end = min(inner_start + chunk_size, inner_len)
-            chunk = segment[inner_start:inner_end]
+        if block_type == "header" and not clause_no:
+            section_title = current_section_title or stripped
+        else:
+            section_title = current_section_title
+        clause_for_block = clause_no or current_clause_no
 
-            if inner_end < inner_len:
-                boundary = max(chunk.rfind("\n\n"), chunk.rfind("\n"), chunk.rfind("。"))
-                if boundary > int(chunk_size * 0.6):
-                    inner_end = inner_start + boundary + 1
-                    chunk = segment[inner_start:inner_end]
-
-            chunk_text = chunk.strip()
-            if not chunk_text:
-                if inner_end >= inner_len:
-                    break
-                inner_start = max(inner_end - chunk_overlap, inner_start + 1)
+        if block_type == "table_row":
+            row_line = stripped
+            if _TABLE_SEP_PATTERN.match(row_line):
                 continue
-
-            abs_start = seg_start + inner_start
-            abs_end = seg_start + inner_end
-
-            # 检测块属性
-            first_line = chunk_text.split("\n", 1)[0]
-            block_type = _detect_block_type(first_line)
-            clause_no = _detect_clause_no(first_line)
-            section_title = first_line if block_type == "header" else ""
-
-            # 表格处理
-            table_id = ""
-            table_row = -1
-            table_header: list[str] = []
-
-            if block_type == "table_row":
-                lines = chunk_text.split("\n")
-                # 检查是否是新表格的开始（第一行是表头）
-                if lines and _TABLE_ROW_PATTERN.match(lines[0].strip()):
-                    cells = [c.strip() for c in lines[0].strip().strip("|").split("|")]
-                    # 如果看起来像表头（不是分隔行）
-                    if not _TABLE_SEP_PATTERN.match(lines[0].strip()):
-                        if cells != current_table_header:
-                            current_table_id = f"tbl_{abs_start}"
-                            current_table_header = cells
-                            table_row_idx = 0
-                table_id = current_table_id
-                table_header = current_table_header
-                table_row = table_row_idx
-                table_row_idx += 1
-
-                # ── 逐格入库：每个单元格生成独立 DocumentBlock ──
-                cell_row_idx = table_row
-                for row_line in lines:
-                    row_stripped = row_line.strip()
-                    if not _TABLE_ROW_PATTERN.match(row_stripped):
-                        continue
-                    if _TABLE_SEP_PATTERN.match(row_stripped):
-                        continue
-                    cell_values = [c.strip() for c in row_stripped.strip("|").split("|")]
-                    # 计算该行在原文中的精确偏移
-                    row_offset_in_chunk = chunk.find(row_line)
-                    row_abs_start = abs_start + (row_offset_in_chunk if row_offset_in_chunk >= 0 else 0)
-                    cursor = 0
-                    for col_idx, cell_text in enumerate(cell_values):
-                        if not cell_text:
-                            cursor += 1
-                            continue
-                        # 精确定位 cell 在行内的字符偏移
-                        cell_pos_in_row = row_stripped.find(cell_text, cursor)
-                        cell_char_start = row_abs_start + (cell_pos_in_row if cell_pos_in_row >= 0 else 0)
-                        cell_char_end = cell_char_start + len(cell_text)
-                        cursor = (cell_pos_in_row + len(cell_text)) if cell_pos_in_row >= 0 else cursor + len(cell_text)
-                        col_header = table_header[col_idx] if col_idx < len(table_header) else ""
-                        # 表头行和脚注/说明类单元格标记为 noise
-                        cell_is_noise = bool(cell_row_idx == 0 and table_header) or _is_noise_cell(cell_text)
-                        blocks.append(DocumentBlock(
-                            text=cell_text,
-                            package_hint=pkg_hint,
-                            section_title=section_title,
-                            clause_no=clause_no,
-                            block_type="table_cell",
-                            page=0,
-                            char_start=cell_char_start,
-                            char_end=cell_char_end,
-                            table_id=table_id,
-                            table_row=cell_row_idx,
-                            table_col=col_idx,
-                            table_header=[col_header] if col_header else [],
-                            is_noise=cell_is_noise,
-                        ))
-                    cell_row_idx += 1
-            else:
-                # 非表格行重置表格状态
-                current_table_id = ""
+            cell_values = [cell.strip() for cell in row_line.strip("|").split("|")]
+            if not current_table_id:
+                current_table_id = f"tbl_{line_start}"
                 current_table_header = []
                 table_row_idx = 0
+            is_header_row = table_row_idx == 0
+            if is_header_row:
+                current_table_header = cell_values
+            row_is_noise = is_header_row or any(_is_noise_cell(cell) for cell in cell_values) or _is_noise_line(stripped)
+            cursor = 0
+            for col_idx, cell_text in enumerate(cell_values):
+                if not cell_text:
+                    continue
+                cell_start, cell_end, cursor = _cell_char_bounds(row_line, line_start, cell_text, cursor)
+                col_header = ""
+                if not is_header_row and col_idx < len(current_table_header):
+                    col_header = current_table_header[col_idx]
+                blocks.append(DocumentBlock(
+                    text=cell_text,
+                    package_id=current_package_id,
+                    package_hint=package_hint,
+                    section_title=section_title,
+                    clause_no=clause_for_block,
+                    block_type="table_cell",
+                    page=_estimate_page(cell_start, chars_per_page),
+                    char_start=cell_start,
+                    char_end=cell_end,
+                    table_id=current_table_id,
+                    table_row=table_row_idx,
+                    table_col=col_idx,
+                    row=table_row_idx,
+                    col=col_idx,
+                    table_header=[col_header] if col_header else [],
+                    is_noise=row_is_noise or _is_noise_cell(cell_text),
+                ))
+            table_row_idx += 1
+            continue
 
-            # ── 说明行/表头/脚注单独标记，不进入主抽取链 ──
-            inferred_type = block_type
-            if block_type == "paragraph":
-                stripped_lower = chunk_text.strip()
-                if any(stripped_lower.startswith(p) for p in ("注：", "注:", "备注", "说明：", "说明:", "※")):
-                    inferred_type = "footnote"
-                elif any(stripped_lower.startswith(p) for p in ("详见", "见附件", "按规定")):
-                    inferred_type = "description"
+        current_table_id = ""
+        current_table_header = []
+        table_row_idx = 0
 
-                # 噪音块判定：脚注/说明行/短表头行/表格表头行
-            _is_noise = inferred_type in ("footnote", "description")
-            if not _is_noise and block_type == "header" and len(chunk_text.strip()) < 6:
-                _is_noise = True
-            if not _is_noise and block_type == "table_row" and table_row == 0 and table_header:
-                _is_noise = True
+        inferred_type = block_type
+        if block_type == "paragraph":
+            if _is_noise_line(stripped):
+                inferred_type = "footnote"
+            elif any(stripped.startswith(prefix) for prefix in ("详见", "见附件", "按规定")):
+                inferred_type = "description"
 
-            blocks.append(DocumentBlock(
-                text=chunk_text,
-                package_hint=pkg_hint,
-                section_title=section_title,
-                clause_no=clause_no,
-                block_type=inferred_type,
-                page=0,
-                char_start=abs_start,
-                char_end=abs_end,
-                table_id=table_id if block_type == "table_row" else "",
-                table_row=table_row if block_type == "table_row" else -1,
-                table_col=-1,
-                table_header=table_header if block_type == "table_row" else [],
-                is_noise=_is_noise,
-            ))
+        is_noise = inferred_type in {"footnote", "description"}
+        if not is_noise and block_type == "header" and len(stripped) < 6:
+            is_noise = True
 
-            if inner_end >= inner_len:
-                break
-            inner_start = max(inner_end - chunk_overlap, inner_start + 1)
+        blocks.append(DocumentBlock(
+            text=stripped,
+            package_id=current_package_id,
+            package_hint=package_hint,
+            section_title=section_title,
+            clause_no=clause_for_block,
+            block_type=inferred_type,
+            page=_estimate_page(line_start, chars_per_page),
+            char_start=line_start,
+            char_end=line_end,
+            table_id="",
+            table_row=-1,
+            table_col=-1,
+            row=-1,
+            col=-1,
+            table_header=[],
+            is_noise=is_noise,
+        ))
 
     return blocks

@@ -16,6 +16,10 @@ from app.schemas import (
     BidDocumentSection,
     BidGenerateRequest,
     ClauseCategory,
+    DocumentMode,
+    DraftLevel,
+    NormalizedRequirement,
+    WriterContext,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +73,50 @@ def _classify_req_category(key: str, val: str) -> str:
     if any(k in combined for k in _CONFIG_KEYWORDS):
         return "config_requirement"
     return "technical_requirement"
+
+
+# 分表类型 → ClauseCategory 映射
+_TABLE_TYPE_CATEGORY_MAP: dict[str, list[str]] = {
+    "technical_deviation": [ClauseCategory.technical_requirement],
+    "config_list": [ClauseCategory.config_requirement],
+    "service_response": [ClauseCategory.service_requirement, ClauseCategory.acceptance_requirement],
+    "acceptance_doc_response": [ClauseCategory.documentation_requirement],
+}
+
+
+def build_writer_contexts(
+    package_id: str,
+    requirements: list[NormalizedRequirement],
+    product_profile: Any = None,
+    tender_source_bindings: list | None = None,
+    bid_evidence_bindings: list | None = None,
+    document_mode: DocumentMode = DocumentMode.single_package_deep_draft,
+) -> list[WriterContext]:
+    """为指定包构建 WriterContext 列表 — 按 table_type 分组，writer 只消费同包对象。
+
+    返回最多 4 个 WriterContext（每种分表类型一个）；
+    仅包含有实际 requirement 的分表才会生成。
+    """
+    pkg_reqs = [r for r in requirements if r.package_id == package_id and r.category != ClauseCategory.noise]
+
+    contexts: list[WriterContext] = []
+    for table_type, categories in _TABLE_TYPE_CATEGORY_MAP.items():
+        table_reqs = [r for r in pkg_reqs if r.category in categories]
+        if not table_reqs:
+            continue
+        # 过滤同包 bindings
+        tsb = [b for b in (tender_source_bindings or []) if b.package_id == package_id]
+        beb = [b for b in (bid_evidence_bindings or []) if b.package_id == package_id]
+        contexts.append(WriterContext(
+            package_id=package_id,
+            table_type=table_type,
+            requirements=table_reqs,
+            product_profile=product_profile,
+            tender_source_bindings=tsb,
+            bid_evidence_bindings=beb,
+            document_mode=document_mode,
+        ))
+    return contexts
 
 
 def _as_text(value: Any) -> str:
@@ -198,8 +246,9 @@ def _ensure_compliance_branch_blocks(content: str, allow_consortium: bool, requi
 
 
 def _build_structured_technical_block(package: Any, product: ProductSpecification) -> str:
-    """构建结构化技术响应块——技术偏离表只含技术参数，服务/资料/验收独立分表。"""
+    """构建结构化技术响应块——技术偏离表只含技术参数；配置/服务/资料/验收独立分表。"""
     tech_rows: list[str] = []
+    config_req_rows: list[str] = []
     service_rows: list[str] = []
     doc_rows: list[str] = []
     evidence_rows: list[str] = []
@@ -210,6 +259,7 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
 
     if tech_req:
         tech_idx = 1
+        cfg_idx = 1
         svc_idx = 1
         doc_idx = 1
         for req_key, req_val in tech_req.items():
@@ -261,8 +311,14 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
                     f"| {doc_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} |"
                 )
                 doc_idx += 1
+            elif cat == "config_requirement":
+                # 配置需求 → 配置需求响应表（独立分表）
+                config_req_rows.append(
+                    f"| {cfg_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | {deviation_status} |"
+                )
+                cfg_idx += 1
             else:
-                # technical_requirement / config_requirement → 技术偏离表
+                # technical_requirement → 技术偏离表（仅技术参数）
                 tech_rows.append(
                     f"| {tech_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | {deviation_status} | {_markdown_cell(evidence_text)} |"
                 )
@@ -328,6 +384,15 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
         deviation_table,
         config_table,
     ]
+
+    # ── 配置需求响应表（独立分表，不混入技术偏离表）──
+    if config_req_rows:
+        blocks.append("\n".join([
+            "#### 2b) 配置需求响应表",
+            "| 序号 | 配置要求项 | 招标要求 | 响应承诺 | 偏离说明 |",
+            "|---:|---|---|---|---|",
+            *config_req_rows,
+        ]))
 
     # ── 服务/验收要求独立分表 ──
     if service_rows:
@@ -557,12 +622,22 @@ class BidGeneratorAgent:
         }
 
     def generate_technical_section(self, state: BidGenerationState) -> dict[str, Any]:
-        """生成第三章：商务及技术部分（分包+分阶段生成，避免输出过载）"""
+        """生成第三章：商务及技术部分（分包+分阶段生成，避免输出过载）
+
+        模式感知：
+        - single_package_deep_draft: 单包深写，每包生成完整 4 张分表 + 详细技术说明
+        - multi_package_master_draft: 多包母版，每包仅生成分表结构，技术说明精简
+        """
         logger.info("生成商务及技术部分章节")
 
         tender = state["tender_doc"]
         products = state["products"]
         request = state["request"]
+
+        # 判断文档模式
+        is_single_deep = len(request.selected_packages) == 1
+        mode_label = "single_package_deep_draft" if is_single_deep else "multi_package_master_draft"
+        logger.info("文档模式: %s, 包数量: %d", mode_label, len(request.selected_packages))
 
         # 对每个投标包生成技术响应（分包生成，每包独立调用）
         technical_responses = []
@@ -580,15 +655,16 @@ class BidGeneratorAgent:
                 logger.warning("包隔离检查：package_id=%s 无对应产品", package_id)
                 continue
 
-            # 分阶段生成：1) 表格 2) 说明文字
             # 阶段1: 生成技术偏离表和配置清单（结构化，不需要LLM）
             structured_block = _build_structured_technical_block(package, product)
 
-            # 阶段2: 生成详细技术说明（使用独立的LLM调用，提高输出预算）
-            detailed_explanation = self._generate_technical_explanation(package, product)
+            # 阶段2: 单包深写模式才生成详细技术说明；多包母版模式跳过
+            if is_single_deep:
+                detailed_explanation = self._generate_technical_explanation(package, product)
+                combined_response = f"{structured_block}\n\n{detailed_explanation}"
+            else:
+                combined_response = structured_block
 
-            # 合并两部分
-            combined_response = f"{structured_block}\n\n{detailed_explanation}"
             technical_responses.append(combined_response)
 
         if technical_responses:
@@ -791,12 +867,15 @@ class BidGeneratorAgent:
     def finalize_bid(self, state: BidGenerationState) -> dict[str, Any]:
         """完成投标文件生成，添加目录和封面。
 
-        同时生成 internal（母版，允许待核实/待补证）和 external（可外发）两个版本。
+        执行硬校验门、回归指标计算，并根据结果标注 internal/external 稿件等级。
+        Internal 允许：待核实、待补证、占位符、招标原文片段。
+        External 严禁以上任何一项。
         """
         logger.info("完成投标文件组装")
 
         tender = state["tender_doc"]
         company = state["company_profile"]
+        request = state["request"]
 
         # 生成封面
         cover_content = f"""# 政府采购响应文件
@@ -833,10 +912,49 @@ class BidGeneratorAgent:
             content="\n".join(toc_lines)
         )
 
+        # ── 硬校验门 + 稿件等级判定 ──
+        from app.services.quality_gate import (
+            compute_validation_gate,
+            compute_regression_metrics,
+            annotate_draft_level,
+            strip_placeholders_for_external,
+        )
+        from app.services.evidence_binder import _determine_draft_level, _determine_document_mode
+
+        all_sections = [cover_section, toc_section] + list(state["sections"])
+        target_pkg_ids = list(request.selected_packages) if request.selected_packages else []
+
+        gate = compute_validation_gate(
+            sections=all_sections,
+            target_package_ids=target_pkg_ids,
+            tender=tender,
+        )
+        mode = _determine_document_mode(tender, target_pkg_ids)
+        draft_level = _determine_draft_level(gate, mode)
+        metrics = compute_regression_metrics(
+            sections=all_sections,
+            target_package_ids=target_pkg_ids,
+            tender=tender,
+        )
+
+        # 根据稿件等级处理内容
+        if draft_level == DraftLevel.external_ready:
+            processed_sections = strip_placeholders_for_external(all_sections)
+            logger.info("稿件等级: external_ready — 已清除占位符")
+        else:
+            processed_sections = annotate_draft_level(all_sections, draft_level)
+            logger.info("稿件等级: internal_draft — 已添加内部草稿水印")
+
+        if gate.failure_reasons():
+            logger.warning("硬校验未通过: %s", "; ".join(gate.failure_reasons()))
+        if metrics.quality_warnings:
+            logger.warning("回归指标告警: %s", "; ".join(metrics.quality_warnings[:5]))
+
         return {
-            "sections": [cover_section, toc_section],
+            "sections": processed_sections,
             "status": "completed",
-            "bid_id": f"BID_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            "bid_id": f"BID_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "product_profiles": state.get("product_profiles", {}),
         }
 
     def generate(self, state: BidGenerationState) -> BidGenerationState:

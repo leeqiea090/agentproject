@@ -12,9 +12,11 @@ from app.schemas import (
     DraftLevel,
     NormalizedRequirement,
     RegressionMetrics,
+    TenderDocument,
     ValidationGate,
 )
 from app.services.evidence_binder import _compute_evidence_coverage
+from app.services.requirement_processor import _is_truncated_name
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,79 @@ _REGRESSION_THRESHOLDS = {
     "fact_density_per_page": 3.0,             # 每页事实密度应 ≥ 3.0
     "snippet_cleanliness_score": 0.7,         # 片段清洁度应 ≥ 0.7
     "draft_usability_score": 0.5,             # 底稿可用性应 ≥ 0.5
+    "project_meta_consistency_score": 0.8,    # 项目名称/编号/数量一致性应 ≥ 0.8
 }
+
+
+def _target_packages(
+    tender: TenderDocument | None,
+    target_package_ids: list[str] | None,
+):
+    if tender is None:
+        return []
+    wanted = {str(pkg_id) for pkg_id in (target_package_ids or []) if str(pkg_id).strip()}
+    if not wanted:
+        return list(tender.packages)
+    return [pkg for pkg in tender.packages if pkg.package_id in wanted]
+
+
+def _collect_project_meta_issues(
+    full_text: str,
+    tender: TenderDocument | None,
+    target_package_ids: list[str] | None = None,
+) -> list[str]:
+    """检查项目名称/编号/包件数量是否稳定落正文。"""
+    if tender is None or not full_text.strip():
+        return []
+
+    issues: list[str] = []
+    if tender.project_name and tender.project_name not in full_text:
+        issues.append("项目名称未命中")
+    if tender.project_number and tender.project_number not in full_text:
+        issues.append("项目编号未命中")
+
+    lines = [line.strip() for line in full_text.splitlines() if line.strip()]
+    for pkg in _target_packages(tender, target_package_ids):
+        item_name = (pkg.item_name or "").strip()
+        if not item_name:
+            continue
+        item_lines = [line for line in lines if item_name in line]
+        if not item_lines:
+            issues.append(f"包{pkg.package_id} 条目未落正文")
+            continue
+        quantity = str(pkg.quantity)
+        quantity_hit = any(quantity in line for line in item_lines)
+        if not quantity_hit:
+            issues.append(f"包{pkg.package_id} 数量异常")
+
+    return issues
+
+
+def _compute_project_meta_consistency_score(
+    full_text: str,
+    tender: TenderDocument | None,
+    target_package_ids: list[str] | None = None,
+) -> float:
+    if tender is None:
+        return 1.0
+
+    checks: list[bool] = []
+    if tender.project_name:
+        checks.append(tender.project_name in full_text)
+    if tender.project_number:
+        checks.append(tender.project_number in full_text)
+    for pkg in _target_packages(tender, target_package_ids):
+        item_name = (pkg.item_name or "").strip()
+        if not item_name:
+            continue
+        item_lines = [line.strip() for line in full_text.splitlines() if item_name in line]
+        checks.append(bool(item_lines))
+        if item_lines:
+            checks.append(any(str(pkg.quantity) in line for line in item_lines))
+
+    if not checks:
+        return 1.0
+    return sum(1 for ok in checks if ok) / len(checks)
 
 
 def compute_validation_gate(
@@ -77,6 +151,7 @@ def compute_validation_gate(
     evidence_bindings: dict[str, list[BidEvidenceBinding]] | None = None,
     target_package_ids: list[str] | None = None,
     mode: DocumentMode = DocumentMode.single_package,
+    tender: TenderDocument | None = None,
 ) -> ValidationGate:
     """计算硬校验门的 4 个条件。"""
     normalized_reqs = normalized_reqs or {}
@@ -88,6 +163,12 @@ def compute_validation_gate(
     full_text = "\n".join(s.content for s in sections)
     for pattern in _PLACEHOLDER_PATTERNS:
         placeholder_count += len(re.findall(pattern, full_text))
+
+    # 1b) 项目元信息异常检测
+    project_meta_issues = _collect_project_meta_issues(full_text, tender, target_package_ids)
+    project_meta_anomaly_detected = bool(project_meta_issues)
+    if project_meta_anomaly_detected:
+        logger.warning("项目元信息异常：%s", "；".join(project_meta_issues[:5]))
 
     # 2) 包件污染检测 — 单包和多包模式均检测
     package_contamination = False
@@ -160,7 +241,9 @@ def compute_validation_gate(
                         continue
                     if any(k in req_cell for k in ("售后", "质保", "维修", "保修", "培训",
                                                      "安装调试", "交付与培训", "说明书", "合格证",
-                                                     "技术文件（合格证", "投标文件格式", "正本与副本")):
+                                                     "技术文件（合格证", "投标文件格式", "正本与副本",
+                                                     "配置清单", "配备", "标配", "选配", "装箱",
+                                                     "附件", "配件", "随机配件")):
                         table_mixing = True
                         logger.warning("表格分类混装检测：技术表中发现非技术条款行: %s", req_cell[:60])
 
@@ -178,19 +261,11 @@ def compute_validation_gate(
 
     # 5) 半截条目检测 — 增强：检查 param_name 和 raw_text
     snippet_truncation_count = 0
-    _HALF_CUT_ENDINGS = ("（", "(", "中速（", "低速（", "高灵敏度模式（")
     if normalized_reqs:
         for pkg_reqs in normalized_reqs.values():
             for req in pkg_reqs:
                 name = req.param_name or ""
-                # 以括号结尾（未闭合）视为截断
-                if name.endswith("（") or name.endswith("("):
-                    snippet_truncation_count += 1
-                # 括号不平衡视为截断
-                elif (name.count("（") + name.count("(")) > (name.count("）") + name.count(")")):
-                    snippet_truncation_count += 1
-                # param_name 过短且非数值型
-                elif len(name) < 4 and not re.search(r"\d", name):
+                if _is_truncated_name(name):
                     snippet_truncation_count += 1
                 # raw_text 以括号截断结尾
                 elif req.raw_text and (req.raw_text.rstrip().endswith("（") or req.raw_text.rstrip().endswith("(")):
@@ -211,6 +286,7 @@ def compute_validation_gate(
         evidence_blank_rate = blank_count / len(all_bindings)
 
     return ValidationGate(
+        project_meta_anomaly_detected=project_meta_anomaly_detected,
         package_contamination_detected=package_contamination,
         placeholder_count=placeholder_count,
         bid_evidence_coverage=evidence_cov,
@@ -243,6 +319,41 @@ def annotate_draft_level(
             attachments=s.attachments,
         ))
     return annotated
+
+
+def normalize_pending_draft_sections(
+    sections: list[BidDocumentSection],
+) -> list[BidDocumentSection]:
+    """将无法自动补齐的占位内容转成明确的“待补充”提示。"""
+    normalized: list[BidDocumentSection] = []
+    for s in sections:
+        content = s.content
+        content = re.sub(r"\[投标方公司名称\]", "待补充（投标人名称）", content)
+        content = re.sub(r"\[法定代表人\]", "待补充（法定代表人）", content)
+        content = re.sub(r"\[授权代表\]", "待补充（授权代表）", content)
+        content = re.sub(r"\[联系电话\]", "待补充（联系电话）", content)
+        content = re.sub(r"\[联系地址\]", "待补充（联系地址）", content)
+        content = re.sub(r"\[公司注册地址\]", "待补充（公司注册地址）", content)
+        content = re.sub(r"\[品牌型号\]", "待补充（品牌型号）", content)
+        content = re.sub(r"\[生产厂家\]", "待补充（生产厂家）", content)
+        content = re.sub(r"\[品牌\]", "待补充（品牌）", content)
+        content = re.sub(r"\[待填写\]", "待补充", content)
+        content = re.sub(r"\[待补充\]", "待补充", content)
+        content = re.sub(r"\[待[^\]]{1,20}\]", "待补充", content)
+        content = re.sub(r"待核实（需填入投标产品实参）", "待补充（投标产品实参）", content)
+        content = re.sub(r"待核实（未匹配到已证实产品事实）", "待补充（投标产品实参）", content)
+        content = re.sub(r"待补充投标方证据", "待补充（投标方证据）", content)
+        content = re.sub(r"待补投标方证据", "待补充（投标方证据）", content)
+        content = re.sub(r"投标方证据：未绑定", "投标方证据：待补充", content)
+        content = re.sub(r"待定位片段", "待补充（原文定位片段）", content)
+        content = re.sub(r"招标原文片段", "待补充（招标原文片段）", content)
+        content = re.sub(r"待核实", "待补充", content)
+        normalized.append(BidDocumentSection(
+            section_title=s.section_title,
+            content=content,
+            attachments=s.attachments,
+        ))
+    return normalized
 
 
 def strip_placeholders_for_external(
@@ -288,6 +399,7 @@ def compute_regression_metrics(
     evidence_bindings: dict[str, list[BidEvidenceBinding]] | None = None,
     target_package_ids: list[str] | None = None,
     total_pages_estimate: int = 1,
+    tender: TenderDocument | None = None,
 ) -> RegressionMetrics:
     """计算 7 项回归质量指标，并与阈值对比输出告警。"""
     normalized_reqs = normalized_reqs or {}
@@ -438,6 +550,7 @@ def compute_regression_metrics(
     # 片段清洁度
     usability_factors.append(snippet_cleanliness)
     draft_usability = sum(usability_factors) / len(usability_factors) if usability_factors else 0.0
+    project_meta_consistency = _compute_project_meta_consistency_score(full_text, tender, target_package_ids)
 
     metrics = RegressionMetrics(
         single_package_focus_score=round(focus_score, 3),
@@ -449,6 +562,7 @@ def compute_regression_metrics(
         fact_density_per_page=round(fact_density, 2),
         snippet_cleanliness_score=round(snippet_cleanliness, 3),
         draft_usability_score=round(draft_usability, 3),
+        project_meta_consistency_score=round(project_meta_consistency, 3),
     )
 
     # ── 阈值对比：输出质量告警 ──
@@ -472,6 +586,10 @@ def compute_regression_metrics(
         warnings.append(f"原文片段清洁度不足: {snippet_cleanliness:.2f} < {t['snippet_cleanliness_score']}")
     if draft_usability < t["draft_usability_score"]:
         warnings.append(f"底稿可用性不足: {draft_usability:.2f} < {t['draft_usability_score']}")
+    if project_meta_consistency < t["project_meta_consistency_score"]:
+        warnings.append(
+            f"项目元信息一致性不足: {project_meta_consistency:.2f} < {t['project_meta_consistency_score']}"
+        )
 
     if warnings:
         for w in warnings:

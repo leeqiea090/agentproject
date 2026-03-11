@@ -5,7 +5,7 @@ from typing import Any
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ==================== 管道增强：可引用块 / 条款分类 / 归一化需求 ====================
@@ -42,6 +42,7 @@ class DraftLevel(str, Enum):
 class DocumentBlock(BaseModel):
     """可引用文档块 — 替代原始 chunk 纯文本。"""
     text: str = Field(description="块内文本内容")
+    package_id: str = Field(default="", description="所属采购包 ID，未识别时为空")
     package_hint: str = Field(default="", description="所属采购包提示，如 '包1'")
     section_title: str = Field(default="", description="所属章节标题")
     clause_no: str = Field(default="", description="条款编号，如 '1.3'")
@@ -52,6 +53,8 @@ class DocumentBlock(BaseModel):
     table_id: str = Field(default="", description="所属表格 ID")
     table_row: int = Field(default=-1, description="表格行号（-1 表示非表格）")
     table_col: int = Field(default=-1, description="表格列号（-1 表示非表格）")
+    row: int = Field(default=-1, description="表格行号别名（-1 表示非表格）")
+    col: int = Field(default=-1, description="表格列号别名（-1 表示非表格）")
     table_header: list[str] = Field(default_factory=list, description="表头文字列表（仅表格行携带）")
     is_noise: bool = Field(default=False, description="是否为噪音块（表头/脚注/说明行），不应进入主抽取链")
 
@@ -99,7 +102,26 @@ class BidEvidenceBinding(BaseModel):
     file_name: str = Field(default="", description="证据文件名")
     file_page: int = Field(default=0, description="证据文件页码")
     snippet: str = Field(default="", description="证据文件相关片段")
+    evidence_file: str = Field(default="", description="证据文件名别名")
+    evidence_page: int = Field(default=0, description="证据页码别名")
+    evidence_snippet: str = Field(default="", description="证据片段别名")
     covers_requirement: bool = Field(default=False, description="该证据是否充分覆盖需求")
+
+    @model_validator(mode="after")
+    def _sync_alias_fields(self) -> BidEvidenceBinding:
+        if not self.file_name and self.evidence_file:
+            self.file_name = self.evidence_file
+        if not self.evidence_file and self.file_name:
+            self.evidence_file = self.file_name
+        if not self.file_page and self.evidence_page:
+            self.file_page = self.evidence_page
+        if not self.evidence_page and self.file_page:
+            self.evidence_page = self.file_page
+        if not self.snippet and self.evidence_snippet:
+            self.snippet = self.evidence_snippet
+        if not self.evidence_snippet and self.snippet:
+            self.evidence_snippet = self.snippet
+        return self
 
 
 class ProductProfile(BaseModel):
@@ -121,6 +143,45 @@ class ProductProfile(BaseModel):
     evidence_refs: list[BidEvidenceBinding] = Field(default_factory=list, description="产品证据列表")
 
 
+class WriterContext(BaseModel):
+    """Writer 输入上下文 — 将 requirement / package_context / table_type 绑定为一个不可分割的输入单元。
+
+    writer 只能消费同包对象；table_type 决定条目输出到哪个分表。
+    """
+    package_id: str = Field(description="所属包号（必填）")
+    table_type: str = Field(
+        description="分表类型：technical_deviation / config_list / service_response / acceptance_doc_response"
+    )
+    requirements: list[NormalizedRequirement] = Field(default_factory=list, description="该分表下的归一化需求列表")
+    product_profile: ProductProfile | None = Field(default=None, description="产品画像（同包）")
+    tender_source_bindings: list[TenderSourceBinding] = Field(default_factory=list, description="招标侧溯源")
+    bid_evidence_bindings: list[BidEvidenceBinding] = Field(default_factory=list, description="投标侧证据")
+    document_mode: DocumentMode = Field(default=DocumentMode.single_package_deep_draft, description="文档模式")
+
+    @model_validator(mode="after")
+    def _validate_package_consistency(self) -> WriterContext:
+        """校验所有 requirement / binding 的 package_id 必须与 context 一致。"""
+        for req in self.requirements:
+            if req.package_id and req.package_id != self.package_id:
+                raise ValueError(
+                    f"WriterContext package_id={self.package_id} 与 requirement "
+                    f"package_id={req.package_id} 不一致"
+                )
+        for b in self.tender_source_bindings:
+            if b.package_id and b.package_id != self.package_id:
+                raise ValueError(
+                    f"WriterContext package_id={self.package_id} 与 TenderSourceBinding "
+                    f"package_id={b.package_id} 不一致"
+                )
+        for b in self.bid_evidence_bindings:
+            if b.package_id and b.package_id != self.package_id:
+                raise ValueError(
+                    f"WriterContext package_id={self.package_id} 与 BidEvidenceBinding "
+                    f"package_id={b.package_id} 不一致"
+                )
+        return self
+
+
 class ValidationGate(BaseModel):
     """硬校验门 — 7 个硬拦截条件。"""
     package_contamination_detected: bool = Field(default=False, description="是否检出包件污染")
@@ -130,6 +191,7 @@ class ValidationGate(BaseModel):
     snippet_truncation_count: int = Field(default=0, description="半截条目/截断片段数量")
     anchor_pollution_rate: float = Field(default=0.0, description="锚点污染率（0~1）")
     evidence_blank_rate: float = Field(default=0.0, description="证据页码空白率（0~1）")
+    project_meta_anomaly_detected: bool = Field(default=False, description="是否检出项目名称/编号/数量异常")
     # 阈值
     placeholder_threshold: int = Field(default=0, description="外发模式允许的最大占位符数")
     evidence_coverage_threshold: float = Field(default=0.6, description="外发模式最低证据覆盖率")
@@ -139,6 +201,8 @@ class ValidationGate(BaseModel):
 
     def passes_external_gate(self) -> bool:
         """外发稿是否通过所有硬校验。"""
+        if self.project_meta_anomaly_detected:
+            return False
         if self.package_contamination_detected:
             return False
         if self.placeholder_count > self.placeholder_threshold:
@@ -170,6 +234,8 @@ class ValidationGate(BaseModel):
     def failure_reasons(self) -> list[str]:
         """返回当前未通过的校验项列表。"""
         reasons: list[str] = []
+        if self.project_meta_anomaly_detected:
+            reasons.append("项目元信息异常")
         if self.package_contamination_detected:
             reasons.append("包件污染")
         if self.table_category_mixing:
@@ -204,6 +270,7 @@ class RegressionMetrics(BaseModel):
     fact_density_per_page: float = Field(default=0.0, description="每页事实密度")
     snippet_cleanliness_score: float = Field(default=0.0, description="原文片段清洁度（0~1，无拖尾/串邻=1）")
     draft_usability_score: float = Field(default=0.0, description="底稿可用性得分（0~1，越接近人工底稿=1）")
+    project_meta_consistency_score: float = Field(default=0.0, description="项目名称/编号/数量一致性得分（0~1）")
     quality_warnings: list[str] = Field(default_factory=list, description="质量告警列表（超出阈值时自动生成）")
 
 
