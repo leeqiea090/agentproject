@@ -150,13 +150,10 @@ def build_tender_source_bindings(
             char_end = matched_block.char_end
             excerpt = _clean_excerpt(matched_block.text)
         else:
-            # 回退：在包范围文本中搜索参数名
+            # 回退：仅在包范围文本中搜索参数名（不回退全文，避免串包）
             search_key = req.param_name
             pos = primary_text.find(search_key)
             search_text = primary_text
-            if pos < 0 and package_scoped_text:
-                pos = tender_raw.find(search_key)
-                search_text = tender_raw
             if pos >= 0:
                 char_start = max(0, pos - 20)
                 raw_end = pos + len(search_key) + 100

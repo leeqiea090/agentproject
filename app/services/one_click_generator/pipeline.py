@@ -76,6 +76,7 @@ def generate_bid_sections(
             pkg.package_id, atomized,
             other_package_item_names=other_names,
             package_item_name=pkg.item_name,
+            doc_blocks=doc_blocks,
         )
         # 过滤掉噪音条款和跨包条款，不进入主表
         noise_count = sum(1 for r in norm_reqs if r.category == ClauseCategory.noise)

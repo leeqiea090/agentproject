@@ -7,6 +7,7 @@ from typing import Any
 
 from app.schemas import (
     ClauseCategory,
+    DocumentBlock,
     NormalizedRequirement,
     ProcurementPackage,
 )
@@ -660,12 +661,33 @@ def _extract_operator_threshold_unit(text: str) -> tuple[str, str, str]:
     return operator, threshold, unit
 
 
+def _find_best_block_for_key(
+    key: str,
+    val: str,
+    package_id: str,
+    doc_blocks: list[DocumentBlock],
+) -> DocumentBlock | None:
+    """在当前包的 DocumentBlock 中找到最匹配 key 的块。"""
+    candidates = [
+        b for b in doc_blocks
+        if not b.is_noise and (not b.package_id or b.package_id == package_id)
+    ]
+    # 精确匹配 key
+    hits = [b for b in candidates if key in b.text]
+    if hits:
+        # 优先选同时包含 val 的块
+        both = [b for b in hits if val and val[:20] in b.text]
+        return both[0] if both else hits[0]
+    return None
+
+
 def normalize_requirements_to_objects(
     package_id: str,
     requirements: list[tuple[str, str]],
     source_page: int = 0,
     other_package_item_names: list[str] | None = None,
     package_item_name: str = "",
+    doc_blocks: list[DocumentBlock] | None = None,
 ) -> list[NormalizedRequirement]:
     """将原子化后的 (key, value) 对转化为 NormalizedRequirement 对象。
 
@@ -675,7 +697,7 @@ def normalize_requirements_to_objects(
     - 跨包词命中直接判噪音
     - 设备禁止词污染过滤
     - 半截条目名自动过滤
-    - 填充 source_text（完整原文片段）
+    - 填充 source_text（优先使用真实来源块文本，回退到拼接字符串）
     """
     # 构建跨包检测 token
     _cross_pkg_tokens: list[str] = []
@@ -686,6 +708,9 @@ def normalize_requirements_to_objects(
 
     # 构建设备禁止词
     forbidden_terms = _package_forbidden_terms(package_item_name, other_package_item_names)
+
+    # 预索引 doc_blocks（仅当前包）
+    _pkg_blocks = doc_blocks or []
 
     results: list[NormalizedRequirement] = []
     for idx, (key, val) in enumerate(requirements, start=1):
@@ -734,6 +759,15 @@ def normalize_requirements_to_objects(
         if val and val.strip().startswith(key) and len(val.strip()) <= len(key) + 3:
             needs_manual = True
 
+        # 从真实来源块获取 source_text / source_page，不再用拼接字符串
+        block_source_text = raw_text
+        block_source_page = source_page
+        if _pkg_blocks:
+            matched_block = _find_best_block_for_key(key, val, package_id, _pkg_blocks)
+            if matched_block:
+                block_source_text = matched_block.text
+                block_source_page = matched_block.page
+
         results.append(NormalizedRequirement(
             package_id=package_id,
             requirement_id=f"pkg{package_id}-req-{idx:03d}",
@@ -746,8 +780,8 @@ def normalize_requirements_to_objects(
             is_material=is_material,
             needs_bid_fact=needs_bid_fact,
             needs_manual_confirmation=needs_manual,
-            source_page=source_page,
-            source_text=raw_text,
+            source_page=block_source_page,
+            source_text=block_source_text,
             source_clause_no=_detect_clause_no_from_key(key),
         ))
     return results
