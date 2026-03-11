@@ -124,8 +124,9 @@ def build_tender_source_bindings(
                     break
             char_end = min(len(search_text), raw_end)
             excerpt = search_text[char_start:char_end].replace("\n", " ").strip()
-            # 去除尾部多余内容
             excerpt = re.sub(r"\s+", " ", excerpt).strip()
+            # 清洗 excerpt：去除噪音尾巴和跨包内容
+            excerpt = _trim_evidence_snippet(excerpt, search_key)
 
         bindings.append(TenderSourceBinding(
             package_id=package_id,

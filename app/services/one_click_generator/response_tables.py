@@ -208,6 +208,7 @@ def _structured_requirements_for_package(
     """从归一化结果中提取指定包的需求列表。
 
     category_filter: 如果指定，只返回该分类的需求（如 'technical_requirement'）
+    自动排除 noise 类别和跨包条目。
     """
     if not normalized_result:
         return []
@@ -217,8 +218,11 @@ def _structured_requirements_for_package(
             continue
         if _safe_text(requirement.get("package_id"), "") != package_id:
             continue
+        # 始终排除 noise 类别
+        req_category = _safe_text(requirement.get("category"), "")
+        if req_category == "noise":
+            continue
         if category_filter:
-            req_category = _safe_text(requirement.get("category"), "")
             if req_category and req_category != category_filter:
                 continue
         items.append(requirement)
@@ -383,9 +387,9 @@ def _build_requirement_rows(
             _tender_bind = (tender_bindings or {}).get(requirement_id, {})
             _bid_bind = (bid_bindings or {}).get(requirement_id, {})
             if not tender_quote and _tender_bind:
-                tender_quote = _safe_text(_tender_bind.get("excerpt"), "")
+                tender_quote = _safe_text(_tender_bind.get("source_excerpt"), "")
                 if not tender_page:
-                    tender_page = _tender_bind.get("page")
+                    tender_page = _tender_bind.get("source_page")
             if not bidder_quote and _bid_bind:
                 bidder_source = _safe_text(_bid_bind.get("evidence_file"), "") or bidder_source
                 bidder_quote = _safe_text(_bid_bind.get("evidence_snippet"), "")

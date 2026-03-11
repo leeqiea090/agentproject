@@ -299,6 +299,29 @@ def compute_validation_gate(
             logger.warning("嵌套占位符检测：发现嵌套模式 %s", np_pat)
             break
 
+    # 9) 证据片段不洁净率 — 检测跨包文本和噪音标记残留
+    snippet_dirty_rate = 0.0
+    if evidence_bindings:
+        _dirty_markers = ("评分标准", "投标人须知", "合同条款", "响应文件格式")
+        dirty_count = 0
+        total_bind_count = 0
+        for pkg_id, pkg_bindings in evidence_bindings.items():
+            for b in pkg_bindings:
+                total_bind_count += 1
+                snip = getattr(b, "snippet", "") or getattr(b, "evidence_snippet", "") or ""
+                if not snip:
+                    continue
+                # 检测跨包引用（提到其他包号）
+                other_pkg_refs = re.findall(r"包(\d+)", snip)
+                if other_pkg_refs and any(ref != pkg_id for ref in other_pkg_refs):
+                    dirty_count += 1
+                    continue
+                # 检测噪音标记残留
+                if any(m in snip for m in _dirty_markers):
+                    dirty_count += 1
+        if total_bind_count > 0:
+            snippet_dirty_rate = dirty_count / total_bind_count
+
     return ValidationGate(
         project_meta_anomaly_detected=project_meta_anomaly_detected,
         package_contamination_detected=package_contamination,
@@ -309,6 +332,7 @@ def compute_validation_gate(
         anchor_pollution_rate=anchor_pollution_rate,
         evidence_blank_rate=evidence_blank_rate,
         nested_placeholder_detected=nested_placeholder_detected,
+        snippet_dirty_rate=snippet_dirty_rate,
     )
 
 

@@ -194,7 +194,7 @@ class WriterContext(BaseModel):
 
 
 class ValidationGate(BaseModel):
-    """硬校验门 — 7 个硬拦截条件。"""
+    """硬校验门 — 9 个硬拦截条件。"""
     package_contamination_detected: bool = Field(default=False, description="是否检出包件污染")
     placeholder_count: int = Field(default=0, description="关键占位符数量")
     bid_evidence_coverage: float = Field(default=0.0, description="投标侧证据覆盖率（0~1）")
@@ -204,12 +204,14 @@ class ValidationGate(BaseModel):
     evidence_blank_rate: float = Field(default=0.0, description="证据页码空白率（0~1）")
     project_meta_anomaly_detected: bool = Field(default=False, description="是否检出项目名称/编号/数量异常")
     nested_placeholder_detected: bool = Field(default=False, description="是否检出嵌套占位符文本")
+    snippet_dirty_rate: float = Field(default=0.0, description="证据片段不洁净率（含跨包文本/噪音标记）")
     # 阈值
     placeholder_threshold: int = Field(default=20, description="外发模式允许的最大占位符数")
     evidence_coverage_threshold: float = Field(default=0.6, description="外发模式最低证据覆盖率")
     snippet_truncation_threshold: int = Field(default=0, description="外发模式允许的最大截断片段数")
     anchor_pollution_threshold: float = Field(default=0.05, description="外发模式允许的最大锚点污染率")
     evidence_blank_threshold: float = Field(default=0.3, description="外发模式允许的最大证据空白率")
+    snippet_dirty_threshold: float = Field(default=0.15, description="外发模式允许的最大片段不洁净率")
 
     def passes_external_gate(self) -> bool:
         """外发稿是否通过所有硬校验。"""
@@ -230,6 +232,8 @@ class ValidationGate(BaseModel):
         if self.anchor_pollution_rate > self.anchor_pollution_threshold:
             return False
         if self.evidence_blank_rate > self.evidence_blank_threshold:
+            return False
+        if self.snippet_dirty_rate > self.snippet_dirty_threshold:
             return False
         return True
 
@@ -264,6 +268,8 @@ class ValidationGate(BaseModel):
             reasons.append(f"锚点污染({self.anchor_pollution_rate:.1%})")
         if self.evidence_blank_rate > self.evidence_blank_threshold:
             reasons.append(f"证据空白({self.evidence_blank_rate:.1%})")
+        if self.snippet_dirty_rate > self.snippet_dirty_threshold:
+            reasons.append(f"片段不洁净({self.snippet_dirty_rate:.1%})")
         return reasons
 
 

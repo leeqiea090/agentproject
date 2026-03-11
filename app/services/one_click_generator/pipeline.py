@@ -76,10 +76,11 @@ def generate_bid_sections(
             pkg.package_id, atomized,
             other_package_item_names=other_names,
         )
-        # 过滤掉噪音条款，不进入主表
+        # 过滤掉噪音条款和跨包条款，不进入主表
         noise_count = sum(1 for r in norm_reqs if r.category == ClauseCategory.noise)
         if noise_count:
             logger.info("包%s 过滤 %d 条跨包噪音/无效条款", pkg.package_id, noise_count)
+        norm_reqs = [r for r in norm_reqs if r.category != ClauseCategory.noise]
         all_normalized[pkg.package_id] = norm_reqs
         logger.info(
             "包%s 归一化需求: %d 条 (技术=%d, 配置=%d, 服务=%d, 商务=%d)",
@@ -252,10 +253,14 @@ def generate_bid_sections(
         after_snapshot = tuple((s.section_title, s.content) for s in sections)
         heal_pass += 1
         if after_snapshot == before_snapshot:
+            # 无新修复动作 — 若有不可自愈的问题，转为待补充底稿
+            if not gate.passes_external_gate():
+                sections = normalize_pending_draft_sections(sections)
             logger.info(
-                "自愈 pass %d 无新增修复动作，保留当前待补充底稿继续后续处理。问题: %s",
+                "自愈 pass %d 无新增修复动作，%s。问题: %s",
                 heal_pass,
-                "；".join(reasons) or "未知原因",
+                "已转为待补充底稿" if not gate.passes_external_gate() else "校验已通过",
+                "；".join(reasons) or "无",
             )
             break
 

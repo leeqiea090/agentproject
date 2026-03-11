@@ -652,6 +652,11 @@ def normalize_requirements_to_objects(
             logger.debug("半截条目名过滤: pkg%s req#%d key=%s", package_id, idx, key)
             continue
 
+        # 半截值过滤：值部分也被截断（如"检测器为""单机"）
+        if val and _is_truncated_name(f"{key}：{val}"):
+            logger.debug("半截值过滤: pkg%s req#%d raw=%s", package_id, idx, raw_text[:60])
+            continue
+
         # 跨包词命中检测：如果含其他包产品名 token，直接标噪音
         if _cross_pkg_tokens and any(tok in raw_text for tok in _cross_pkg_tokens):
             category = ClauseCategory.noise
@@ -667,6 +672,14 @@ def normalize_requirements_to_objects(
             ClauseCategory.service_requirement,
         )
 
+        # 标记需人工确认的条目：值过短且无量化信息
+        needs_manual = False
+        if val and len(val.strip()) < 4 and not operator and not threshold:
+            needs_manual = True
+        # 自引用检测（key 出现在 val 开头且 val 没有更多信息）
+        if val and val.strip().startswith(key) and len(val.strip()) <= len(key) + 3:
+            needs_manual = True
+
         results.append(NormalizedRequirement(
             package_id=package_id,
             requirement_id=f"pkg{package_id}-req-{idx:03d}",
@@ -678,6 +691,7 @@ def normalize_requirements_to_objects(
             category=category,
             is_material=is_material,
             needs_bid_fact=needs_bid_fact,
+            needs_manual_confirmation=needs_manual,
             source_page=source_page,
             source_text=raw_text,
             source_clause_no=_detect_clause_no_from_key(key),
