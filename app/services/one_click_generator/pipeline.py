@@ -5,6 +5,7 @@ import app.services.one_click_generator.sections as _sections
 import app.services.evidence_binder as _evidence_binder
 import app.services.quality_gate as _quality_gate
 import app.services.requirement_processor as _requirement_processor
+import app.services.bid_generator as _bid_generator
 
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
@@ -12,7 +13,7 @@ def __reexport_all(module) -> None:
             continue
         globals()[name] = value
 
-for _module in (_common, _sections, _evidence_binder, _quality_gate, _requirement_processor,):
+for _module in (_common, _sections, _evidence_binder, _quality_gate, _requirement_processor, _bid_generator,):
     __reexport_all(_module)
 
 del _module
@@ -101,6 +102,8 @@ def generate_bid_sections(
 
         # A层：招标侧溯源
         tender_bindings = build_tender_source_bindings(pkg.package_id, pkg_reqs, tender_raw)
+        # 用文档块的精确页码/章节覆盖粗估值
+        tender_bindings = enrich_bindings_from_blocks(tender_bindings, doc_blocks)
         all_tender_bindings[pkg.package_id] = tender_bindings
 
         # B层：投标侧证据
@@ -148,10 +151,26 @@ def generate_bid_sections(
 
     # Rich draft mode 或 single_package_rich_draft 需要额外的分表章节
     if (mode == "rich_draft" or doc_mode == DocumentMode.single_package_rich_draft) and products:
+        # 构建 WriterContext（按包×分表类型），确保 package_consistency 校验被执行
+        all_writer_contexts = {}
+        for pkg in active_packages:
+            pkg_reqs = all_normalized.get(pkg.package_id, [])
+            profile = all_profiles.get(pkg.package_id)
+            wctxs = build_writer_contexts(
+                package_id=pkg.package_id,
+                requirements=pkg_reqs,
+                product_profile=profile,
+                tender_source_bindings=all_tender_bindings.get(pkg.package_id, []),
+                bid_evidence_bindings=all_bid_bindings.get(pkg.package_id, []),
+                document_mode=doc_mode,
+            )
+            all_writer_contexts[pkg.package_id] = wctxs
+
         rich_sections = _generate_rich_draft_sections(
             tender, products,
             normalized_reqs=all_normalized,
             active_packages=active_packages,
+            writer_contexts=all_writer_contexts,
         )
         sections.extend(rich_sections)
 

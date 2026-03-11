@@ -250,6 +250,7 @@ def _generate_rich_draft_sections(
     draft_mode: str = "rich",
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
     active_packages: list[ProcurementPackage] | None = None,
+    writer_contexts: dict[str, list] | None = None,
 ) -> list[BidDocumentSection]:
     """双模式 Section Writer — 底稿优化版，固定分表输出。
 
@@ -261,10 +262,12 @@ def _generate_rich_draft_sections(
     4. 验收/资料要求响应表（acceptance + documentation）
 
     每个包独立生成，只消费同包对象。
+    当传入 writer_contexts 时，优先使用其中已校验的需求分组。
     """
     sections: list[BidDocumentSection] = []
     is_rich = draft_mode == "rich"
     normalized_reqs = normalized_reqs or {}
+    writer_contexts = writer_contexts or {}
     packages = active_packages or tender.packages
 
     for pkg in packages:
@@ -282,8 +285,14 @@ def _generate_rich_draft_sections(
         has_real_product = bool(p_model and p_mfr)
         pkg_reqs = normalized_reqs.get(pkg.package_id, [])
 
+        # 优先使用 WriterContext 中已校验的需求分组（保证包一致性）
+        pkg_wctxs = writer_contexts.get(pkg.package_id, [])
+        wctx_by_type = {wc.table_type: wc.requirements for wc in pkg_wctxs} if pkg_wctxs else {}
+
         # ── 分表1: 技术参数响应表 ──
-        tech_reqs = [r for r in pkg_reqs if r.category == ClauseCategory.technical_requirement]
+        tech_reqs = wctx_by_type.get("technical_deviation") or [
+            r for r in pkg_reqs if r.category == ClauseCategory.technical_requirement
+        ]
         tech_content = f"### 包{pkg.package_id} 技术参数响应表\n\n"
         if has_real_product:
             tech_content += f"投标产品：**{p_brand or p_mfr} {p_name}**（型号：{p_model}）\n\n"
@@ -300,7 +309,9 @@ def _generate_rich_draft_sections(
         tech_content += "\n"
 
         # ── 分表2: 配置清单 ──
-        config_reqs = [r for r in pkg_reqs if r.category == ClauseCategory.config_requirement]
+        config_reqs = wctx_by_type.get("config_list") or [
+            r for r in pkg_reqs if r.category == ClauseCategory.config_requirement
+        ]
         config_content = f"### 包{pkg.package_id} 配置清单\n\n"
         if config_items:
             config_content += "| 序号 | 配置项 | 数量 | 说明 |\n"
@@ -321,7 +332,9 @@ def _generate_rich_draft_sections(
         config_content += "\n"
 
         # ── 分表3: 售后服务响应表 ──
-        service_reqs = [r for r in pkg_reqs if r.category == ClauseCategory.service_requirement]
+        service_reqs = wctx_by_type.get("service_response") or [
+            r for r in pkg_reqs if r.category == ClauseCategory.service_requirement
+        ]
         service_content = f"### 包{pkg.package_id} 售后服务响应表\n\n"
         warranty = tender.commercial_terms.warranty_period
         service_content += f"- 质保期：{warranty or '[TODO:待补质保期限]'}\n"
@@ -335,10 +348,12 @@ def _generate_rich_draft_sections(
         service_content += "\n"
 
         # ── 分表4: 验收/资料要求响应表 ──
-        accept_reqs = [r for r in pkg_reqs if r.category in (
-            ClauseCategory.acceptance_requirement,
-            ClauseCategory.documentation_requirement,
-        )]
+        accept_reqs = wctx_by_type.get("acceptance_doc_response") or [
+            r for r in pkg_reqs if r.category in (
+                ClauseCategory.acceptance_requirement,
+                ClauseCategory.documentation_requirement,
+            )
+        ]
         accept_content = f"### 包{pkg.package_id} 验收及资料要求响应表\n\n"
         if accept_reqs:
             accept_content += "| 序号 | 类型 | 要求项 | 招标要求 | 投标响应 |\n"

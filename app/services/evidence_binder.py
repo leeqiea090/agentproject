@@ -7,6 +7,7 @@ from typing import Any
 
 from app.schemas import (
     BidEvidenceBinding,
+    DocumentBlock,
     DocumentMode,
     DraftLevel,
     NormalizedRequirement,
@@ -116,6 +117,52 @@ def build_tender_source_bindings(
             char_end=char_end,
         ))
     return bindings
+
+
+def enrich_bindings_from_blocks(
+    bindings: list[TenderSourceBinding],
+    doc_blocks: list[DocumentBlock],
+) -> list[TenderSourceBinding]:
+    """用 DocumentBlock 的精确元数据补充 TenderSourceBinding 的 page / section。
+
+    对每条 binding，在 doc_blocks 中找到 char_start 落入的块，
+    用块的 page / section_title 覆盖原先基于字符偏移量的粗估值。
+    """
+    if not doc_blocks:
+        return bindings
+
+    sorted_blocks = sorted(
+        (b for b in doc_blocks if not b.is_noise),
+        key=lambda b: b.char_start,
+    )
+    if not sorted_blocks:
+        return bindings
+
+    updated: list[TenderSourceBinding] = []
+    for bind in bindings:
+        if bind.char_start <= 0:
+            updated.append(bind)
+            continue
+        matched_block: DocumentBlock | None = None
+        for blk in sorted_blocks:
+            if blk.char_start <= bind.char_start <= blk.char_end:
+                matched_block = blk
+                break
+            if blk.char_start > bind.char_start:
+                break
+        if matched_block is None:
+            # 回退：找最近的前驱块
+            for blk in reversed(sorted_blocks):
+                if blk.char_start <= bind.char_start:
+                    matched_block = blk
+                    break
+        if matched_block:
+            bind = bind.model_copy(update={
+                "source_page": matched_block.page or bind.source_page,
+                "source_section": matched_block.section_title or bind.source_section,
+            })
+        updated.append(bind)
+    return updated
 
 
 def build_bid_evidence_bindings(
