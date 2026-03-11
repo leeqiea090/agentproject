@@ -21,6 +21,19 @@ del _module
 def _router_api():
     return importlib.import_module("app.routers.tender")
 
+
+def _existing_output_file(file_path: str | Path | None) -> Path | None:
+    if not file_path:
+        return None
+
+    candidate = Path(file_path)
+    try:
+        if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+    except OSError:
+        return None
+    return None
+
 @router.post("/upload", response_model=TenderUploadResponse)
 async def upload_tender_file(file: UploadFile = File(...)):
     """
@@ -351,33 +364,10 @@ async def generate_bid_document(request: BidGenerateRequest):
             hard_validation_result=consistency_report,
             evidence_result=evidence_result,
         )
-        stored_sections = _sections_for_storage_or_response(materialized_sections, sections, outbound_report)
         outbound_view = _build_external_delivery_view(
             sections,
             outbound_report,
             download_url=f"/api/tender/bid/download/{bid_id}?format=docx",
-        )
-
-        # 保存结果
-        bid_storage[bid_id] = {
-            "bid_id": bid_id,
-            "tender_id": request.tender_id,
-            "company_id": request.company_profile_id,
-            "sections": [s.model_dump() for s in stored_sections],
-            "generated_time": datetime.now(),
-            "status": "generated",
-            "materialize_report": materialize_report,
-            "consistency_report": consistency_report,
-            "outbound_report": outbound_view,
-        }
-
-        logger.info(
-            "投标文件生成成功: %s, 共 %d 个章节，深注入更新 %d 个章节，一致性状态=%s，外发状态=%s",
-            bid_id,
-            len(stored_sections),
-            len(materialize_report.get("changed_sections", [])),
-            consistency_report.get("overall_status", "unknown"),
-            outbound_view.get("status", "unknown"),
         )
 
         # 调用管道获取校验门和回归指标
@@ -399,8 +389,47 @@ async def generate_bid_document(request: BidGenerateRequest):
 
         # 6d: 外发门阻断
         if validation_gate is not None and not validation_gate.passes_external_gate():
-            outbound_view["status"] = "阻断外发"
-            outbound_view["download_url"] = ""
+            outbound_view = {
+                **outbound_view,
+                "status": "阻断外发",
+                "generated": False,
+                "section_titles": [],
+            }
+
+        stored_sections = _sections_for_storage_or_response(materialized_sections, sections, outbound_view)
+
+        file_path = ""
+        download_url = ""
+        if stored_sections:
+            output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
+            build_bid_docx(stored_sections, tender_doc, company_profile, output_file)
+            file_path = str(output_file)
+            download_url = f"/api/tender/bid/download/{bid_id}?format=docx"
+        outbound_view["file_path"] = file_path
+
+        # 保存结果
+        bid_storage[bid_id] = {
+            "bid_id": bid_id,
+            "tender_id": request.tender_id,
+            "company_id": request.company_profile_id,
+            "sections": [s.model_dump() for s in stored_sections],
+            "generated_time": datetime.now(),
+            "status": "generated",
+            "file_path": file_path,
+            "download_url": download_url,
+            "materialize_report": materialize_report,
+            "consistency_report": consistency_report,
+            "outbound_report": outbound_view,
+        }
+
+        logger.info(
+            "投标文件生成成功: %s, 共 %d 个章节，深注入更新 %d 个章节，一致性状态=%s，外发状态=%s",
+            bid_id,
+            len(stored_sections),
+            len(materialize_report.get("changed_sections", [])),
+            consistency_report.get("overall_status", "unknown"),
+            outbound_view.get("status", "unknown"),
+        )
 
         return BidGenerateResponse(
             bid_id=bid_id,
@@ -410,8 +439,8 @@ async def generate_bid_document(request: BidGenerateRequest):
             materialize_report=materialize_report,
             consistency_report=consistency_report,
             outbound_report=outbound_view,
-            file_path="",
-            download_url=outbound_view.get("download_url", ""),
+            file_path=file_path,
+            download_url=download_url,
             generated_time=datetime.now(),
             validation_gate=validation_gate,
             regression_metrics=regression_metrics,
@@ -452,7 +481,7 @@ async def get_bid_document(bid_id: str):
         consistency_report=bid_info.get("consistency_report", {}),
         outbound_report=outbound_report,
         file_path=bid_info.get("file_path", ""),
-        download_url=str(outbound_report.get("download_url", "") or ""),
+        download_url=str(bid_info.get("download_url", "") or outbound_report.get("download_url", "") or ""),
         generated_time=bid_info["generated_time"]
     )
 
@@ -473,34 +502,47 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
         raise HTTPException(status_code=404, detail="投标文件不存在")
 
     bid_info = bid_storage[bid_id]
-    if _is_external_delivery_blocked(bid_info.get("outbound_report")):
-        raise HTTPException(status_code=409, detail="当前标书未通过硬校验，已阻断外发下载")
-    sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
-
     if format == "docx":
-        # 获取招标文件和企业信息，用于封面
         tender_info = tender_storage.get(bid_info["tender_id"])
-        company = company_storage.get(bid_info["company_id"])
+        project_name = bid_id
+        if tender_info and tender_info.get("parsed_data"):
+            project_name = TenderDocument(**tender_info["parsed_data"]).project_name
 
-        if not tender_info or not company:
-            raise HTTPException(status_code=404, detail="关联的招标/企业信息不存在")
+        output_file = _existing_output_file(bid_info.get("file_path"))
+        if output_file is None:
+            output_file = _existing_output_file(BID_OUTPUT_DIR / f"{bid_id}.docx")
 
-        tender_doc = TenderDocument(**tender_info["parsed_data"])
-        output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
+        if output_file is None:
+            # 仅在成品文件缺失时兜底重建，避免每次下载都重新生成。
+            company = company_storage.get(bid_info["company_id"])
+            if not tender_info or not company:
+                raise HTTPException(status_code=404, detail="关联的招标/企业信息不存在")
 
-        try:
-            build_bid_docx(sections, tender_doc, company, output_file)
-        except Exception as e:
-            logger.error(f"Word文件生成失败: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Word文件生成失败: {str(e)}")
+            sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
+            tender_doc = TenderDocument(**tender_info["parsed_data"])
+            output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
+
+            try:
+                build_bid_docx(sections, tender_doc, company, output_file)
+            except Exception as e:
+                logger.error(f"Word文件生成失败: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Word文件生成失败: {str(e)}")
+
+            bid_info["file_path"] = str(output_file)
+        else:
+            bid_info["file_path"] = str(output_file)
+
+        if isinstance(bid_info.get("outbound_report"), dict):
+            bid_info["outbound_report"]["file_path"] = str(output_file)
 
         return FileResponse(
             output_file,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=f"投标文件_{tender_doc.project_name}.docx",
+            filename=_safe_download_filename(f"投标文件_{project_name}", ".docx"),
         )
 
     elif format == "markdown":
+        sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
         output_file = BID_OUTPUT_DIR / f"{bid_id}.md"
 
         with output_file.open("w", encoding="utf-8") as f:

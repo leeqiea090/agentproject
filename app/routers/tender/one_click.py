@@ -104,7 +104,12 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             message="正在生成投标文件章节…",
             progress=72,
         )
-        gen_result = generate_bid_sections(tender_doc, raw_text, llm)
+        gen_result = generate_bid_sections(
+            tender_doc,
+            raw_text,
+            llm,
+            require_validation_pass=True,
+        )
         sections = gen_result.sections
         _set_one_click_job_status(
             job_id,
@@ -115,16 +120,22 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
         )
         output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
         build_bid_docx(sections, tender_doc, _PLACEHOLDER_COMPANY, output_file)
+        if not output_file.exists() or output_file.stat().st_size == 0:
+            raise RuntimeError("Word 文件生成失败，输出文件为空")
 
-        safe_name = tender_doc.project_name.replace("/", "_").replace("\\", "_")
-        filename = f"投标文件_{safe_name}.docx"
+        filename = _safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx")
         download_url = f"/api/tender/one-click/download/{job_id}"
         logger.info("一键生成任务完成: %s -> %s", job_id, output_file)
+        is_external_ready = gen_result.validation_gate.passes_external_gate()
         _set_one_click_job_status(
             job_id,
             status="completed",
             step_code="completed",
-            message="投标文件已生成完成，可直接下载。",
+            message=(
+                "投标文件已生成完成，可直接下载。"
+                if is_external_ready
+                else "待补充底稿已生成，可下载后补充未完善信息。"
+            ),
             progress=100,
             filename=filename,
             download_url=download_url,
@@ -188,7 +199,12 @@ async def one_click_generate(file: UploadFile = File(...)):
         tender_doc = parser.parse_tender_document(save_path)
 
         # 4. 一键生成投标文件各章节（按固定模板生成，使用解析后的结构化数据）
-        gen_result = generate_bid_sections(tender_doc, raw_text, llm)
+        gen_result = generate_bid_sections(
+            tender_doc,
+            raw_text,
+            llm,
+            require_validation_pass=True,
+        )
         sections = gen_result.sections
 
         # 5. 构建 Word 文档
@@ -198,13 +214,15 @@ async def one_click_generate(file: UploadFile = File(...)):
         logger.info("投标文件生成成功：%s", output_file)
 
         # 6. 返回文件下载
-        safe_name = tender_doc.project_name.replace("/", "_").replace("\\", "_")
         return FileResponse(
             output_file,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=f"投标文件_{safe_name}.docx",
+            filename=_safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx"),
         )
 
+    except BidSectionsValidationError as exc:
+        logger.warning("一键生成被硬校验阻断：%s", exc)
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         logger.error("一键生成失败：%s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"生成失败：{exc}")
@@ -262,18 +280,6 @@ async def download_one_click_result(job_id: str):
     if job_info.get("status") != "completed":
         raise HTTPException(status_code=409, detail="任务尚未完成")
 
-    # 硬校验拦截：如果有可修复问题仍未通过，阻止下载
-    gate_data = job_info.get("validation_gate")
-    if gate_data:
-        from app.schemas import ValidationGate
-        gate = ValidationGate(**gate_data)
-        if gate.has_fixable_issues():
-            reasons = gate.failure_reasons()
-            raise HTTPException(
-                status_code=409,
-                detail=f"硬校验未通过，已阻断外发下载。问题: {'; '.join(reasons)}",
-            )
-
     output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
     if not output_file.exists():
         raise HTTPException(status_code=404, detail="生成文件不存在")
@@ -281,5 +287,5 @@ async def download_one_click_result(job_id: str):
     return FileResponse(
         output_file,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=job_info.get("filename") or f"投标文件_{job_id}.docx",
+        filename=job_info.get("filename") or _safe_download_filename(f"投标文件_{job_id}", ".docx"),
     )

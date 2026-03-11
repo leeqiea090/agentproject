@@ -513,7 +513,7 @@ def _build_deviation_table(
             tender_quote = _safe_text(row.get("tender_quote"), "")
             evidence_text = (
                 f"{_markdown_cell(_safe_text(row.get('evidence_source'), '招标原文'))}；"
-                f"{_markdown_cell(tender_quote or '投标方证据待补充')}"
+                f"{_markdown_cell(tender_quote or '待补充（投标方证据）')}"
             )
             deviation = _safe_text(row.get("deviation_status"), "待核实")
             remark = "需补充投标方证据"

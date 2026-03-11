@@ -58,6 +58,45 @@ def _build_internal_audit_snapshot(
     }
 
 
+def _normalize_pending_sections(
+    sections: list[BidDocumentSection],
+    *,
+    add_draft_watermark: bool = False,
+) -> list[BidDocumentSection]:
+    normalized: list[BidDocumentSection] = []
+    watermark = "**【待补充底稿 — 含未补齐信息，需人工补充后再外发】**\n\n"
+    for section in sections:
+        content = section.content
+        content = content.replace("[投标方公司名称]", "待补充（投标人名称）")
+        content = content.replace("[法定代表人]", "待补充（法定代表人）")
+        content = content.replace("[授权代表]", "待补充（授权代表）")
+        content = content.replace("[联系电话]", "待补充（联系电话）")
+        content = content.replace("[联系地址]", "待补充（联系地址）")
+        content = content.replace("[公司注册地址]", "待补充（公司注册地址）")
+        content = content.replace("[品牌型号]", "待补充（品牌型号）")
+        content = content.replace("[生产厂家]", "待补充（生产厂家）")
+        content = content.replace("[品牌]", "待补充（品牌）")
+        content = content.replace("[待填写]", "待补充")
+        content = content.replace("[待补充]", "待补充")
+        content = content.replace("待补投标方证据", "待补充（投标方证据）")
+        content = content.replace("待补充投标方证据", "待补充（投标方证据）")
+        content = content.replace("投标方证据待补充", "待补充（投标方证据）")
+        content = content.replace("投标方证据：未绑定", "投标方证据：待补充")
+        # 带括号的长模式必须在裸 catch-all 之前
+        content = content.replace("待核实（未匹配到已证实产品事实）", "待补充（投标产品实参）")
+        content = content.replace("待核实（需填入投标产品实参）", "待补充（投标产品实参）")
+        # 裸 catch-all：只替换不带括号的裸"待核实"
+        import re as _re
+        content = _re.sub(r"待核实(?!（)", "待补充", content)
+        # 展平嵌套
+        from app.services.quality_gate import _flatten_nested_placeholders
+        content = _flatten_nested_placeholders(content)
+        if add_draft_watermark and not content.startswith("**【待补充底稿"):
+            content = watermark + content
+        normalized.append(section.model_copy(update={"content": content}))
+    return normalized
+
+
 def _sanitize_for_external_delivery(
     sections: list[BidDocumentSection],
     hard_validation_result: dict[str, Any] | None = None,
@@ -368,7 +407,13 @@ def _sanitize_for_external_delivery(
         summary += f" 当前外发已阻断：{'；'.join(blocked_reasons[:5])}。"
     summary += f" 当前稿件级别：{draft_level}。"
 
-    return cleaned_sections, {
+    output_sections = (
+        _normalize_pending_sections(cleaned_sections, add_draft_watermark=True)
+        if blocked_reasons
+        else cleaned_sections
+    )
+
+    return output_sections, {
         "status": status,
         "draft_level": draft_level,
         "changed_sections": changed_sections,

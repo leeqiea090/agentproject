@@ -8,6 +8,9 @@ import app.services.tender_workflow.materialization as _materialization
 import app.services.tender_workflow.sanitization as _sanitization
 import importlib
 
+from app.schemas import TenderDocument
+from app.services.quality_gate import _compute_project_meta_consistency_score
+
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
         if name.startswith("__"):
@@ -32,6 +35,7 @@ def _build_regression_report(
     product_fact_result: dict[str, Any] | None = None,
     sections: list[BidDocumentSection] | None = None,
     selected_packages: list[str] | None = None,
+    tender: TenderDocument | None = None,
 ) -> dict[str, Any]:
     stage_count = len(stages) + 1
     completed_count = len([stage for stage in stages if stage.get("status") == _STAGE_STATUS_COMPLETED])
@@ -346,6 +350,18 @@ def _build_regression_report(
         "status": "通过" if section_template_similarity <= 0.2 else "需修订",
         "detail": f"模板化行占比 {section_template_similarity:.0%}（{template_line_count}/{len(content_lines)} 行）。",
         "value": round(section_template_similarity, 4),
+    })
+
+    project_meta_consistency = _compute_project_meta_consistency_score(
+        "\n".join(sec.content for sec in (sections or [])),
+        tender,
+        selected_packages,
+    )
+    regression_checks.append({
+        "name": "project_meta_consistency_score",
+        "status": "通过" if project_meta_consistency >= 0.8 else "需修订",
+        "detail": f"项目名称/编号/数量一致性 {project_meta_consistency:.0%}。",
+        "value": round(project_meta_consistency, 4),
     })
 
     # 6. external_block_rate: 1.0 if blocked, 0.0 if passed

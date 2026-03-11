@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from app.schemas import CommercialTerms, ProcurementPackage, TenderDocument
+from app.schemas import BidDocumentSection, BidEvidenceBinding, CommercialTerms, NormalizedRequirement, ProcurementPackage, TenderDocument
 from app.services.one_click_generator import (
     _apply_template_pollution_guard,
     _build_configuration_table,
     _build_detail_quote_table,
     _build_enterprise_declaration_block,
     _build_requirement_rows,
+    compute_validation_gate,
     _effective_requirements,
     _gen_appendix,
     _gen_qualification,
     _gen_technical,
+    generate_bid_sections,
 )
 from app.services.tender_parser import TenderParser
 
@@ -518,3 +520,77 @@ def test_parser_can_correct_package_quantity_from_package_scope_text() -> None:
     )
 
     assert quantity == 3
+
+
+def test_validation_gate_does_not_flag_meaningful_short_param_names_as_truncated() -> None:
+    sections = [
+        BidDocumentSection(
+            section_title="第三章 商务及技术部分",
+            content="技术偏离及详细配置明细表\n| 1 | 主机 | 满足 |",
+            attachments=[],
+        )
+    ]
+    normalized_reqs = {
+        "1": [
+            NormalizedRequirement(
+                package_id="1",
+                requirement_id="pkg1-req-001",
+                param_name="主机",
+                raw_text="主机：1台",
+                source_text="主机：1台",
+            ),
+            NormalizedRequirement(
+                package_id="1",
+                requirement_id="pkg1-req-002",
+                param_name="接口",
+                raw_text="接口：不少于2个",
+                source_text="接口：不少于2个",
+            ),
+        ]
+    }
+    evidence_bindings = {
+        "1": [
+            BidEvidenceBinding(
+                package_id="1",
+                requirement_id="pkg1-req-001",
+                snippet="主机：1台",
+                covers_requirement=True,
+            ),
+            BidEvidenceBinding(
+                package_id="1",
+                requirement_id="pkg1-req-002",
+                snippet="接口：不少于2个",
+                covers_requirement=True,
+            ),
+        ]
+    }
+
+    gate = compute_validation_gate(
+        sections=sections,
+        normalized_reqs=normalized_reqs,
+        evidence_bindings=evidence_bindings,
+        target_package_ids=["1"],
+    )
+
+    assert gate.snippet_truncation_count == 0
+
+
+def test_generate_bid_sections_strict_mode_outputs_pending_draft_when_validation_still_fails() -> None:
+    tender = _sample_tender(project_name="单包严格外发校验项目")
+    raw_text = (
+        "包1 流式细胞分析仪\n"
+        "技术参数：激光器≥3；荧光通道≥11。\n"
+        "交货期：合同签订后30日内。\n"
+    )
+
+    result = generate_bid_sections(
+        tender,
+        raw_text,
+        llm=None,
+        require_validation_pass=True,
+    )
+
+    combined = "\n".join(section.content for section in result.sections)
+    assert result.draft_level.value == "internal_draft"
+    assert "待补充" in combined
+    assert "【内部草稿" in combined

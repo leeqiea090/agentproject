@@ -27,6 +27,7 @@ def generate_bid_sections(
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
     selected_packages: list[str] | None = None,
+    require_validation_pass: bool = False,
 ) -> BidGenerationResult:
     """
     根据招标文件生成全部投标文件章节 — 增强版 10 层管道。
@@ -157,17 +158,19 @@ def generate_bid_sections(
     sections = _apply_template_pollution_guard(sections)
 
     # ── Step 4: 硬校验 + 自愈循环 ──
-    #    生成 → 校验 → 如有可修复问题 → 修复 → 重新校验
-    #    最多 _MAX_HEAL_PASSES 次，直到通过或无法再修复
-    _MAX_HEAL_PASSES = 3
+    #    生成 → 校验 → 发现问题立即修复 → 重新校验
+    #    直到通过；若已无可推进的修复动作，则阻断输出而非降级放行
+    _MAX_HEAL_PASSES = 5
     gate = None
-    for heal_pass in range(_MAX_HEAL_PASSES + 1):
+    heal_pass = 0
+    while heal_pass <= _MAX_HEAL_PASSES:
         gate = compute_validation_gate(
             sections=sections,
             normalized_reqs=all_normalized,
             evidence_bindings=all_bid_bindings,
             target_package_ids=target_package_ids,
             mode=doc_mode,
+            tender=tender,
         )
         reasons = gate.failure_reasons()
         logger.info(
@@ -181,22 +184,23 @@ def generate_bid_sections(
             reasons or "无",
         )
 
-        # 没有可修复问题 → 退出循环
-        if not gate.has_fixable_issues():
+        if gate.passes_external_gate():
             if heal_pass > 0:
-                logger.info("自愈成功: 经 %d 轮修复后可修复问题已清除", heal_pass)
+                logger.info("自愈成功: 经 %d 轮修复后硬校验通过", heal_pass)
             break
 
-        # 达到上限 → 退出
         if heal_pass >= _MAX_HEAL_PASSES:
+            sections = normalize_pending_draft_sections(sections)
             logger.warning(
-                "自愈循环达 %d 次上限仍有问题: %s，降级为内部草稿",
-                _MAX_HEAL_PASSES, reasons,
+                "自愈已执行 %d 轮仍未通过硬校验，输出待补充底稿。原因: %s",
+                heal_pass,
+                "；".join(reasons) or "未知原因",
             )
             break
 
         # ── 自愈动作 ──
         logger.info("自愈 pass %d: 修复 %s", heal_pass + 1, reasons)
+        before_snapshot = tuple((s.section_title, s.content) for s in sections)
 
         # 修复1: 表格混装 → 从技术表移除非技术行
         if gate.table_category_mixing:
@@ -206,20 +210,40 @@ def generate_bid_sections(
         if gate.package_contamination_detected and target_package_ids:
             sections = _heal_package_contamination(sections, target_package_ids)
 
+        # 修复3: 模板污染/锚点污染 → 清理提示词与未渲染标记
         sections = _apply_template_pollution_guard(sections)
+
+        # 缺少上游真值时，统一转成“待补充”底稿而不是保留脏占位符。
+        if (
+            gate.placeholder_count > gate.placeholder_threshold
+            or gate.bid_evidence_coverage < gate.evidence_coverage_threshold
+            or gate.evidence_blank_rate > gate.evidence_blank_threshold
+        ):
+            sections = normalize_pending_draft_sections(sections)
+
+        after_snapshot = tuple((s.section_title, s.content) for s in sections)
+        heal_pass += 1
+        if after_snapshot == before_snapshot:
+            logger.info(
+                "自愈 pass %d 无新增修复动作，保留当前待补充底稿继续后续处理。问题: %s",
+                heal_pass,
+                "；".join(reasons) or "未知原因",
+            )
+            break
 
     # ── Step 5: 稿件等级判定 & 双输出 ──
     draft_level = _determine_draft_level(gate, doc_mode)
     logger.info("稿件等级: %s", draft_level.value)
 
     if draft_level == DraftLevel.internal_draft:
+        sections = normalize_pending_draft_sections(sections)
         sections = annotate_draft_level(sections, draft_level)
     elif draft_level == DraftLevel.external_ready:
         sections = strip_placeholders_for_external(sections)
 
     if not gate.passes_external_gate() and mode == "rich_draft":
         logger.warning(
-            "外发稿硬校验未通过，已降级为内部草稿。原因: contamination=%s, placeholders=%d, "
+            "外发稿硬校验未通过，已阻断对外输出。原因: contamination=%s, placeholders=%d, "
             "evidence=%.1f%%, mixing=%s",
             gate.package_contamination_detected,
             gate.placeholder_count,
@@ -233,10 +257,11 @@ def generate_bid_sections(
         normalized_reqs=all_normalized,
         evidence_bindings=all_bid_bindings,
         target_package_ids=target_package_ids,
+        tender=tender,
     )
     logger.info(
         "回归指标: focus=%.2f, contamination=%.2f, mixing=%.2f, evidence=%.2f, "
-        "placeholders=%.2f, config=%.2f, density=%.1f, snippet_clean=%.2f, usability=%.2f",
+        "placeholders=%.2f, config=%.2f, density=%.1f, snippet_clean=%.2f, usability=%.2f, project_meta=%.2f",
         metrics.single_package_focus_score,
         metrics.package_contamination_rate,
         metrics.table_category_mixing_rate,
@@ -246,6 +271,7 @@ def generate_bid_sections(
         metrics.fact_density_per_page,
         metrics.snippet_cleanliness_score,
         metrics.draft_usability_score,
+        metrics.project_meta_consistency_score,
     )
 
     logger.info("一键投标文件章节生成完成，共 %d 章", len(sections))

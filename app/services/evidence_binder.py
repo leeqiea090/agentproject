@@ -137,6 +137,9 @@ def build_bid_evidence_bindings(
                 file_name="",
                 file_page=0,
                 snippet="",
+                evidence_file="",
+                evidence_page=0,
+                evidence_snippet="",
                 covers_requirement=False,
             ))
         return bindings
@@ -166,6 +169,9 @@ def build_bid_evidence_bindings(
                     file_name=ref.get("file_name", ""),
                     file_page=int(ref.get("page", 0)),
                     snippet=str(ref.get("snippet", "")),
+                    evidence_file=ref.get("file_name", ""),
+                    evidence_page=int(ref.get("page", 0)),
+                    evidence_snippet=str(ref.get("snippet", "")),
                     covers_requirement=True,
                 )
                 break
@@ -173,6 +179,7 @@ def build_bid_evidence_bindings(
         # 2) 从 specifications 匹配
         if not best_binding.covers_requirement and req.param_name in specs:
             best_binding.snippet = str(specs[req.param_name])
+            best_binding.evidence_snippet = best_binding.snippet
             best_binding.evidence_type = "spec_sheet"
             best_binding.covers_requirement = True
 
@@ -183,10 +190,13 @@ def build_bid_evidence_bindings(
                 if req.param_name and req.param_name in mat_text:
                     best_binding.evidence_type = getattr(mat, "file_type", "brochure")
                     best_binding.file_name = getattr(mat, "file_name", "")
+                    best_binding.evidence_file = best_binding.file_name
                     key_pages = getattr(mat, "key_pages", []) or []
                     if key_pages:
                         best_binding.file_page = int(key_pages[0].get("page", 0))
+                        best_binding.evidence_page = best_binding.file_page
                     best_binding.snippet = req.param_name
+                    best_binding.evidence_snippet = best_binding.snippet
                     best_binding.covers_requirement = True
                     break
 
@@ -321,6 +331,11 @@ def _trim_evidence_snippet(snippet: str, anchor: str) -> str:
             normalized = normalized[:noise_pos]
 
     normalized = normalized.strip(" ；;，,。/\n\r\t")
+
+    # 清洗嵌套占位符文本
+    from app.services.quality_gate import _flatten_nested_placeholders
+    normalized = _flatten_nested_placeholders(normalized)
+
     return normalized
 
 

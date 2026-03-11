@@ -192,6 +192,7 @@ class ValidationGate(BaseModel):
     anchor_pollution_rate: float = Field(default=0.0, description="锚点污染率（0~1）")
     evidence_blank_rate: float = Field(default=0.0, description="证据页码空白率（0~1）")
     project_meta_anomaly_detected: bool = Field(default=False, description="是否检出项目名称/编号/数量异常")
+    nested_placeholder_detected: bool = Field(default=False, description="是否检出嵌套占位符文本")
     # 阈值
     placeholder_threshold: int = Field(default=0, description="外发模式允许的最大占位符数")
     evidence_coverage_threshold: float = Field(default=0.6, description="外发模式最低证据覆盖率")
@@ -202,6 +203,8 @@ class ValidationGate(BaseModel):
     def passes_external_gate(self) -> bool:
         """外发稿是否通过所有硬校验。"""
         if self.project_meta_anomaly_detected:
+            return False
+        if self.nested_placeholder_detected:
             return False
         if self.package_contamination_detected:
             return False

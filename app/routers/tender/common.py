@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 import shutil
 import uuid
+import re
 from datetime import datetime
 import logging
 
@@ -66,6 +67,8 @@ workflow_storage: dict[str, dict] = {}
 workflow_kb_indexed_sources: set[str] = set()
 one_click_job_storage: dict[str, dict] = {}
 
+_INVALID_DOWNLOAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n]+')
+
 
 def _is_external_delivery_blocked(outbound_report: dict | None) -> bool:
     return str((outbound_report or {}).get("status", "") or "").strip() == "阻断外发"
@@ -96,9 +99,23 @@ def _build_external_delivery_view(
     }
 
 
+def _safe_download_filename(stem: str, suffix: str) -> str:
+    sanitized = _INVALID_DOWNLOAD_FILENAME_CHARS.sub("_", str(stem or "").strip())
+    sanitized = sanitized.strip(" .")
+    if not sanitized:
+        sanitized = "投标文件"
+
+    normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    if sanitized.lower().endswith(normalized_suffix.lower()):
+        return sanitized
+    return f"{sanitized}{normalized_suffix}"
+
+
 def _sections_for_storage_or_response(
     internal_sections: list[BidDocumentSection],
     outbound_sections: list[BidDocumentSection],
     outbound_report: dict,
 ) -> list[BidDocumentSection]:
-    return internal_sections if _is_external_delivery_blocked(outbound_report) else outbound_sections
+    if outbound_sections:
+        return outbound_sections
+    return internal_sections

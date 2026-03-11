@@ -32,6 +32,26 @@ from app.schemas import (
 
 logger = logging.getLogger(__name__)
 
+
+class BidSectionsValidationError(RuntimeError):
+    """最终成稿未通过硬校验时抛出，阻断任何对外输出。"""
+
+    def __init__(
+        self,
+        gate: ValidationGate,
+        reasons: list[str],
+        *,
+        heal_passes: int = 0,
+        message: str | None = None,
+    ) -> None:
+        self.validation_gate = gate
+        self.reasons = reasons
+        self.heal_passes = heal_passes
+        reason_text = "；".join(reasons) if reasons else "未知原因"
+        super().__init__(
+            message or f"硬校验未通过，未输出任何内容：{reason_text}"
+        )
+
 _MAX_TECH_ROWS_PER_PACKAGE = 80
 _PACKAGE_SCOPE_BEFORE_LINES = 8
 _PACKAGE_SCOPE_AFTER_LINES = 80

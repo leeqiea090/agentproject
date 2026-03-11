@@ -255,11 +255,9 @@
     </button>
 
     <!-- 下载按钮（生成后出现） -->
-    <a id="downloadLink" style="display:none; width:100%; text-decoration:none;">
-      <button class="btn btn-success" style="width:100%;">
-        ⬇ 下载投标文件（Word）
-      </button>
-    </a>
+    <button class="btn btn-success" id="downloadBtn" type="button" style="display:none; width:100%;">
+      ⬇ 下载投标文件（Word）
+    </button>
 
   </div>
 
@@ -272,7 +270,7 @@ const statusBox  = document.getElementById('statusBox');
 const btnGen     = document.getElementById('btnGenerate');
 const progressWrap = document.getElementById('progressWrap');
 const progressBar  = document.getElementById('progressBar');
-const downloadLink = document.getElementById('downloadLink');
+const downloadBtn = document.getElementById('downloadBtn');
 const uploadZone   = document.getElementById('uploadZone');
 const liveProgress = document.getElementById('liveProgress');
 const liveProgressCurrent = document.getElementById('liveProgressCurrent');
@@ -293,6 +291,9 @@ const STEP_LABELS = {
 
 let pollTimer = null;
 let activeJobId = '';
+let downloadUrl = '';
+let downloadFilename = '';
+let downloading = false;
 
 // 拖拽高亮
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
@@ -303,6 +304,7 @@ uploadZone.addEventListener('drop', e => {
 });
 
 fileInput.addEventListener('change', updateFileName);
+downloadBtn.addEventListener('click', downloadGeneratedFile);
 
 function updateFileName() {
   const f = fileInput.files[0];
@@ -328,7 +330,12 @@ function resetRunState() {
     pollTimer = null;
   }
   activeJobId = '';
-  downloadLink.style.display = 'none';
+  downloadUrl = '';
+  downloadFilename = '';
+  downloading = false;
+  downloadBtn.disabled = false;
+  downloadBtn.textContent = '⬇ 下载投标文件（Word）';
+  downloadBtn.style.display = 'none';
   setStatus('', '');
   setProgress(0);
   liveProgress.style.display = 'none';
@@ -351,6 +358,109 @@ function updateLiveProgress(data) {
   liveProgressCurrent.textContent = data.message || '正在处理中…';
   liveProgressSub.textContent = `当前阶段：${data.step_label || STEP_LABELS[data.step_code] || '处理中'} · 任务ID：${data.job_id}`;
   renderStepTrack(data.step_code, data.status);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function withNoCache(url) {
+  const u = new URL(url, window.location.origin);
+  u.searchParams.set('_ts', String(Date.now()));
+  return u.toString();
+}
+
+async function readResponseError(resp) {
+  const contentType = resp.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const payload = await resp.json().catch(() => null);
+    if (payload && payload.detail) return payload.detail;
+  }
+
+  const text = await resp.text().catch(() => '');
+  return text.trim() || resp.statusText || '下载失败';
+}
+
+function inferFilename(resp, fallback) {
+  const disposition = resp.headers.get('content-disposition') || '';
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch (_) {
+      return utf8Match[1];
+    }
+  }
+
+  const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+  if (plainMatch && plainMatch[1]) return plainMatch[1];
+  return fallback || '投标文件.docx';
+}
+
+function getErrorMessage(err) {
+  return err instanceof Error ? err.message : String(err || '未知错误');
+}
+
+async function fetchDownloadWithRetry(url, attempts = 3) {
+  let lastError = new Error('下载失败');
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const resp = await fetch(withNoCache(url), {
+        method: 'GET',
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
+
+      if (!resp.ok) {
+        const message = await readResponseError(resp);
+        throw new Error(message);
+      }
+
+      return resp;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < attempts) {
+        setStatus('info', `<span class="spinner"></span>下载中断，正在发起第 ${attempt + 1} 次下载…`);
+        await sleep(800 * attempt);
+        continue;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function downloadGeneratedFile() {
+  if (!downloadUrl || downloading) return;
+
+  downloading = true;
+  downloadBtn.disabled = true;
+  downloadBtn.textContent = '⏬ 正在下载…';
+  setStatus('info', '<span class="spinner"></span>正在下载文件…');
+
+  try {
+    const resp = await fetchDownloadWithRetry(downloadUrl);
+    const blob = await resp.blob();
+    if (!blob.size) throw new Error('下载文件为空，请重试');
+
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = inferFilename(resp, downloadFilename);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+
+    setStatus('ok', '✅ 投标文件下载成功。');
+  } catch (err) {
+    setStatus('error', `❌ 下载失败：${getErrorMessage(err)}`);
+  } finally {
+    downloading = false;
+    downloadBtn.disabled = false;
+    downloadBtn.textContent = '⬇ 下载投标文件（Word）';
+  }
 }
 
 async function startGenerate() {
@@ -396,7 +506,7 @@ async function startGenerate() {
     }, 1200);
 
   } catch (err) {
-    setStatus('error', `❌ 生成失败：${err.message}`);
+    setStatus('error', `❌ 生成失败：${getErrorMessage(err)}`);
     btnGen.disabled = false;
   } finally {
     if (!activeJobId) btnGen.disabled = false;
@@ -408,7 +518,7 @@ function handlePollingError(err) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  setStatus('error', `❌ 状态刷新失败：${err.message}`);
+  setStatus('error', `❌ 状态刷新失败：${getErrorMessage(err)}`);
   btnGen.disabled = false;
 }
 
@@ -429,9 +539,9 @@ async function pollJobStatus(jobId) {
       pollTimer = null;
     }
     setStatus('ok', '✅ 投标文件生成成功！点击下方按钮下载。');
-    downloadLink.href = data.download_url;
-    downloadLink.download = data.filename || '投标文件.docx';
-    downloadLink.style.display = 'block';
+    downloadUrl = data.download_url;
+    downloadFilename = data.filename || '投标文件.docx';
+    downloadBtn.style.display = 'block';
     btnGen.disabled = false;
     return;
   }

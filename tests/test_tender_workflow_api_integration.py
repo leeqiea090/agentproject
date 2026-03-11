@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -179,6 +180,8 @@ def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
 
     bid_id = payload["generation"]["bid_id"]
     assert bid_id in tender_api.bid_storage
+    assert dual_output["external_delivery"]["status"] == "阻断外发"
+    assert dual_output["external_delivery"]["generated"] is False
     stored_content = "\n".join(section["content"] for section in tender_api.bid_storage[bid_id]["sections"])
     assert "测试医疗科技有限公司" in stored_content
     assert "FC5000" in stored_content
@@ -270,10 +273,19 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
                 ],
             }
 
+    def _fake_build_bid_docx(sections, tender_doc, company, output_file):  # noqa: ANN001
+        output_file.write_bytes(b"fake-docx")
+
     client = TestClient(app)
     with (
         patch.object(tender_api, "get_chat_model", return_value=object()),
         patch.object(tender_api, "create_bid_generator", return_value=_FakeGenerator()),
+        patch("app.routers.tender.crud.build_bid_docx", side_effect=_fake_build_bid_docx),
+        patch("app.routers.tender.crud.generate_bid_sections", side_effect=RuntimeError("skip metrics")),
+        patch(
+            "app.routers.tender.crud._sanitize_for_external_delivery",
+            side_effect=lambda sections, hard_validation_result, evidence_result: (sections, {"status": "通过"}),
+        ),
     ):
         response = client.post(
             "/api/tender/bid/generate",
@@ -298,6 +310,7 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
     assert "unresolved_sections" in payload["materialize_report"]
     assert "overall_status" in payload["consistency_report"]
     assert "status" in payload["outbound_report"]
+    assert payload["file_path"]
     assert "测试医疗科技有限公司" in combined
     assert "已关联社保缴纳证明：data/company/social-proof-2.pdf" in combined
     assert "4个独立激光器" in combined
@@ -311,14 +324,18 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
     assert "materialize_report" in stored
     assert "consistency_report" in stored
     assert "outbound_report" in stored
+    assert stored["file_path"] == payload["file_path"]
+    assert stored["outbound_report"]["file_path"] == payload["file_path"]
     stored_combined = "\n".join(section["content"] for section in stored["sections"])
     assert "国械注进20260002" in stored_combined
+    assert Path(payload["file_path"]).exists()
 
     detail_response = client.get("/api/tender/bid/bid-legacy-1")
     assert detail_response.status_code == 200, detail_response.text
     detail_payload = detail_response.json()
     assert detail_payload["materialize_report"]["changed_sections"] == payload["materialize_report"]["changed_sections"]
     assert detail_payload["consistency_report"]["overall_status"] == payload["consistency_report"]["overall_status"]
+    assert detail_payload["file_path"] == payload["file_path"]
 
 
 def test_bid_generate_api_does_not_expose_external_draft_when_blocked() -> None:
@@ -397,14 +414,61 @@ def test_bid_generate_api_does_not_expose_external_draft_when_blocked() -> None:
     assert payload["outbound_report"]["status"] == "阻断外发"
     assert payload["outbound_report"]["generated"] is False
     assert payload["outbound_report"]["section_titles"] == []
-    assert payload["download_url"] == ""
-
+    assert payload["download_url"]
     combined = "\n".join(section["content"] for section in payload["sections"])
-    assert "你是投标文件专家" in combined
-    assert "[待填写]" in combined
+    assert "待补充" in combined
+    assert "你是投标文件专家" not in combined
 
     stored = tender_api.bid_storage["bid-blocked-1"]
     assert stored["outbound_report"]["status"] == "阻断外发"
     assert stored["outbound_report"]["section_titles"] == []
     stored_combined = "\n".join(section["content"] for section in stored["sections"])
-    assert "你是投标文件专家" in stored_combined
+    assert "待补充" in stored_combined
+
+
+def test_bid_download_prefers_existing_generated_docx(tmp_path: Path) -> None:
+    tender = _sample_tender()
+    tender.project_name = "检验科购置全自动电泳仪等设备"
+    output_file = tmp_path / "bid-download.docx"
+    output_file.write_bytes(b"prebuilt-docx")
+
+    tender_api.tender_storage.clear()
+    tender_api.company_storage.clear()
+    tender_api.product_storage.clear()
+    tender_api.bid_storage.clear()
+
+    tender_api.tender_storage["tender-download"] = {
+        "tender_id": "tender-download",
+        "status": "parsed",
+        "parsed_data": tender.model_dump(),
+        "raw_text": "",
+        "upload_time": datetime.now(),
+    }
+    tender_api.bid_storage["bid-download-1"] = {
+        "bid_id": "bid-download-1",
+        "tender_id": "tender-download",
+        "company_id": "company-missing",
+        "sections": [],
+        "generated_time": datetime.now(),
+        "status": "generated",
+        "file_path": str(output_file),
+        "materialize_report": {},
+        "consistency_report": {},
+        "outbound_report": {
+            "status": "通过",
+            "generated": True,
+            "download_url": "/api/tender/bid/download/bid-download-1?format=docx",
+            "file_path": str(output_file),
+            "section_titles": [],
+        },
+    }
+
+    client = TestClient(app)
+    with patch("app.routers.tender.crud.build_bid_docx", side_effect=AssertionError("unexpected rebuild")):
+        response = client.get("/api/tender/bid/download/bid-download-1?format=docx")
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"prebuilt-docx"
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )

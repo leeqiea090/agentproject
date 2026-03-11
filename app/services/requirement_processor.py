@@ -490,7 +490,11 @@ def _is_truncated_name(name: str) -> bool:
     if stripped.endswith("（") or stripped.endswith("("):
         return True
     # 过短且无技术含义
-    if len(stripped) < 3 and not re.search(r"\d", stripped):
+    if (
+        len(stripped) < 3
+        and not re.search(r"\d", stripped)
+        and not _contains_any(stripped, _TECH_KEYWORDS + ("型号", "品牌", "产地", "厂家"))
+    ):
         return True
     return False
 

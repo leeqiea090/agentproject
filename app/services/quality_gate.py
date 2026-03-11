@@ -285,6 +285,20 @@ def compute_validation_gate(
         blank_count = sum(1 for b in all_bindings if not b.file_page and not b.snippet)
         evidence_blank_rate = blank_count / len(all_bindings)
 
+    # 8) 嵌套占位符检测
+    _NESTED_PLACEHOLDER_PATTERNS = [
+        r"待补充（待补充",
+        r"待补充\(待补充",
+        r"（详见[^）]*）（[^）]*）",
+        r"待补充（（",
+    ]
+    nested_placeholder_detected = False
+    for np_pat in _NESTED_PLACEHOLDER_PATTERNS:
+        if re.search(np_pat, full_text):
+            nested_placeholder_detected = True
+            logger.warning("嵌套占位符检测：发现嵌套模式 %s", np_pat)
+            break
+
     return ValidationGate(
         project_meta_anomaly_detected=project_meta_anomaly_detected,
         package_contamination_detected=package_contamination,
@@ -294,6 +308,7 @@ def compute_validation_gate(
         snippet_truncation_count=snippet_truncation_count,
         anchor_pollution_rate=anchor_pollution_rate,
         evidence_blank_rate=evidence_blank_rate,
+        nested_placeholder_detected=nested_placeholder_detected,
     )
 
 
@@ -321,13 +336,33 @@ def annotate_draft_level(
     return annotated
 
 
+def _flatten_nested_placeholders(text: str) -> str:
+    """消除占位符嵌套，如 '待补充（待补充（投标方证据））' → '待补充（投标方证据）'。"""
+    for _ in range(5):
+        prev = text
+        # 待补充（待补充（X）） → 待补充（X）
+        text = re.sub(r"待补充（待补充（([^）]*)））", r"待补充（\1）", text)
+        text = re.sub(r"待补充\(待补充\(([^)]*)\)\)", r"待补充（\1）", text)
+        # （详见X）（Y） → （详见X）
+        text = re.sub(r"（详见[^）]*）（[^）]*）", "（详见附件）", text)
+        # 待补充（（X）） → 待补充（X）
+        text = re.sub(r"待补充（（([^）]*)））", r"待补充（\1）", text)
+        if text == prev:
+            break
+    return text
+
+
 def normalize_pending_draft_sections(
     sections: list[BidDocumentSection],
 ) -> list[BidDocumentSection]:
-    """将无法自动补齐的占位内容转成明确的“待补充”提示。"""
+    """将无法自动补齐的占位内容转成明确的"待补充"提示。
+
+    规则：先处理带括号的长模式，再处理裸模式，最后展平嵌套。
+    """
     normalized: list[BidDocumentSection] = []
     for s in sections:
         content = s.content
+        # ── 阶段 1：方括号占位符 → 待补充（说明）──
         content = re.sub(r"\[投标方公司名称\]", "待补充（投标人名称）", content)
         content = re.sub(r"\[法定代表人\]", "待补充（法定代表人）", content)
         content = re.sub(r"\[授权代表\]", "待补充（授权代表）", content)
@@ -340,14 +375,23 @@ def normalize_pending_draft_sections(
         content = re.sub(r"\[待填写\]", "待补充", content)
         content = re.sub(r"\[待补充\]", "待补充", content)
         content = re.sub(r"\[待[^\]]{1,20}\]", "待补充", content)
+
+        # ── 阶段 2：带括号的特定模式 → 待补充（说明）──
         content = re.sub(r"待核实（需填入投标产品实参）", "待补充（投标产品实参）", content)
         content = re.sub(r"待核实（未匹配到已证实产品事实）", "待补充（投标产品实参）", content)
         content = re.sub(r"待补充投标方证据", "待补充（投标方证据）", content)
         content = re.sub(r"待补投标方证据", "待补充（投标方证据）", content)
+        content = re.sub(r"投标方证据待补充", "待补充（投标方证据）", content)
         content = re.sub(r"投标方证据：未绑定", "投标方证据：待补充", content)
         content = re.sub(r"待定位片段", "待补充（原文定位片段）", content)
         content = re.sub(r"招标原文片段", "待补充（招标原文片段）", content)
-        content = re.sub(r"待核实", "待补充", content)
+
+        # ── 阶段 3：裸 catch-all（只匹配不带括号的裸"待核实"）──
+        content = re.sub(r"待核实(?!（)", "待补充", content)
+
+        # ── 阶段 4：展平嵌套 ──
+        content = _flatten_nested_placeholders(content)
+
         normalized.append(BidDocumentSection(
             section_title=s.section_title,
             content=content,
@@ -362,25 +406,42 @@ def strip_placeholders_for_external(
     """外发稿：严禁任何待核实/待补证/占位符/招标原文片段状态。
 
     External 不允许：待核实、待补证、占位符、招标原文片段。
+    规则：先展平嵌套，再替换带括号的长模式，最后 catch-all 裸模式。
     """
     cleaned: list[BidDocumentSection] = []
     for s in sections:
         content = s.content
-        content = re.sub(r"\[待填写\]", "（详见附件）", content)
+
+        # ── 先展平嵌套占位符 ──
+        content = _flatten_nested_placeholders(content)
+
+        # ── 阶段 1：方括号占位符 ──
         content = re.sub(r"\[投标方公司名称\]", "（见封面）", content)
         content = re.sub(r"\[品牌型号\]", "（详见技术偏离表）", content)
+        content = re.sub(r"\[待填写\]", "（详见附件）", content)
+        content = re.sub(r"\[待[^\]]{1,20}\]", "（详见附件）", content)
+
+        # ── 阶段 2：带括号的完整模式（必须在裸 catch-all 之前）──
         content = re.sub(r"待核实（需填入投标产品实参）", "（详见产品技术资料）", content)
         content = re.sub(r"待核实（未匹配到已证实产品事实）", "（详见产品技术资料）", content)
+        content = re.sub(r"待补充（[^）]{0,30}）", "（详见附件）", content)
         content = re.sub(r"待补投标方证据", "（详见证据附件）", content)
         content = re.sub(r"待补充投标方证据", "（详见证据附件）", content)
+        content = re.sub(r"投标方证据待补充", "（详见证据附件）", content)
+
+        # ── 阶段 3：裸 catch-all ──
         content = re.sub(r"待补充", "（详见附件）", content)
         content = re.sub(r"待核实", "（详见产品技术资料）", content)
         content = re.sub(r"待定位片段", "（详见原文）", content)
         content = re.sub(r"招标原文片段", "（详见原文）", content)
-        # 移除内部草稿水印
+
+        # ── 阶段 4：移除内部草稿水印 ──
         content = re.sub(r"\*\*【内部草稿.*?】\*\*\n*", "", content)
-        # 移除任何残留的 [待X] 格式占位符
-        content = re.sub(r"\[待[^\]]{1,20}\]", "（详见附件）", content)
+        content = re.sub(r"\*\*【待补充底稿.*?】\*\*\n*", "", content)
+
+        # ── 阶段 5：展平可能的残留嵌套 ──
+        content = _flatten_nested_placeholders(content)
+
         cleaned.append(BidDocumentSection(
             section_title=s.section_title,
             content=content,

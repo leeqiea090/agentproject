@@ -542,6 +542,7 @@ def _materialize_section_content(
     evidence_result: dict[str, Any] | None = None,
 ) -> tuple[BidDocumentSection, bool]:
     content = section.content
+    fallback_product = _fallback_single_product(products)
     replacements = {
         "[投标方公司名称]": company.name if company else "[投标方公司名称]",
         "[法定代表人]": company.legal_representative if company else "[法定代表人]",
@@ -549,10 +550,27 @@ def _materialize_section_content(
         "[联系电话]": company.phone if company else "[联系电话]",
         "[联系地址]": company.address if company else "[联系地址]",
         "[公司注册地址]": company.address if company else "[公司注册地址]",
+        "[品牌型号]": (
+            _safe_text(fallback_product.model or fallback_product.product_name, "[品牌型号]")
+            if fallback_product else "[品牌型号]"
+        ),
+        "[生产厂家]": _safe_text(fallback_product.manufacturer, "[生产厂家]") if fallback_product else "[生产厂家]",
+        "[品牌]": _derive_brand(fallback_product) if fallback_product else "[品牌]",
     }
     for placeholder in _PLACEHOLDER_FILL_ORDER:
         value = _safe_text(replacements.get(placeholder), placeholder)
         content = content.replace(placeholder, value)
+    for placeholder in ("[品牌型号]", "[生产厂家]", "[品牌]"):
+        value = _safe_text(replacements.get(placeholder), placeholder)
+        content = content.replace(placeholder, value)
+    content = content.replace(
+        "1. 与投标人单位负责人为同一人的其他单位：[待填写]",
+        "1. 与投标人单位负责人为同一人的其他单位：无",
+    )
+    content = content.replace(
+        "2. 与投标人存在直接控股、管理关系的其他单位：[待填写]",
+        "2. 与投标人存在直接控股、管理关系的其他单位：无",
+    )
 
     package_map = {pkg.package_id: pkg for pkg in tender.packages}
     updated_lines: list[str] = []

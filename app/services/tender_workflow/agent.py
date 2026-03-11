@@ -735,6 +735,7 @@ class TenderWorkflowAgent:
         product_fact_result: dict[str, Any] | None = None,
         sections: list[BidDocumentSection] | None = None,
         selected_packages: list[str] | None = None,
+        tender: TenderDocument | None = None,
     ) -> dict[str, Any]:
         """第九步：评测回归。"""
         return _build_regression_report(
@@ -747,4 +748,5 @@ class TenderWorkflowAgent:
             product_fact_result=product_fact_result,
             sections=sections,
             selected_packages=selected_packages,
+            tender=tender,
         )

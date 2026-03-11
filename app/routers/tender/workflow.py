@@ -608,6 +608,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
         product_fact_result=product_fact_dict,
         sections=sections or None,
         selected_packages=selected_packages,
+        tender=tender_doc,
     )
     regression_stage_status = "completed" if regression_dict.get("overall_status") == "通过" else "warning"
     stages.append(
