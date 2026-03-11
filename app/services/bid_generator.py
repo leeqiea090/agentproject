@@ -300,6 +300,7 @@ class BidGenerationState(TypedDict):
     # 输出
     bid_id: str
     status: str
+    product_profiles: dict  # package_id -> ProductProfile dict
 
 
 class BidGeneratorAgent:

@@ -12,10 +12,11 @@ from pydantic import BaseModel, Field
 
 
 class ClauseCategory(str, Enum):
-    """条款分类枚举 — 7类细分，取代原先笼统的 '技术类'。"""
+    """条款分类枚举 — 8类细分，取代原先笼统的 '技术类'。"""
     technical_requirement = "technical_requirement"
     config_requirement = "config_requirement"
     service_requirement = "service_requirement"
+    acceptance_requirement = "acceptance_requirement"
     commercial_requirement = "commercial_requirement"
     compliance_note = "compliance_note"
     attachment_requirement = "attachment_requirement"
@@ -142,6 +143,15 @@ class RegressionMetrics(BaseModel):
     placeholder_leakage: float = Field(default=0.0, description="占位符泄漏率（0~1）")
     config_detail_score: float = Field(default=0.0, description="配置详细度得分（0~1）")
     fact_density_per_page: float = Field(default=0.0, description="每页事实密度")
+
+
+class BidGenerationResult(BaseModel):
+    """投标生成完整结果 — 包含章节、校验门和回归指标。"""
+    sections: list[BidDocumentSection] = Field(default_factory=list, description="文档章节列表")
+    validation_gate: ValidationGate = Field(default_factory=ValidationGate, description="硬校验门结果")
+    regression_metrics: RegressionMetrics = Field(default_factory=RegressionMetrics, description="回归指标")
+    draft_level: DraftLevel = Field(default=DraftLevel.internal_draft, description="稿件等级")
+    document_mode: DocumentMode = Field(default=DocumentMode.multi_package_draft, description="文档模式")
 
 
 class IngestTextRequest(BaseModel):
@@ -357,6 +367,7 @@ class BidGenerateRequest(BaseModel):
     discount_rate: float = Field(default=1.0, ge=0.5, le=1.0, description="报价折扣率，默认1.0（不打折）")
     add_performance_cases: bool = Field(default=False, description="是否添加业绩案例")
     custom_service_plan: str = Field(default="", description="自定义售后服务方案")
+    document_mode: DocumentMode | None = Field(default=None, description="文档模式：single_package / multi_package_draft，不传则自动判定")
 
 
 class BidDocumentSection(BaseModel):
@@ -385,6 +396,10 @@ class BidGenerateResponse(BaseModel):
     file_path: str = Field(default="", description="生成的PDF文件路径")
     download_url: str = Field(default="", description="下载链接")
     generated_time: datetime = Field(description="生成时间")
+    validation_gate: ValidationGate | None = Field(default=None, description="硬校验门结果")
+    regression_metrics: RegressionMetrics | None = Field(default=None, description="回归指标")
+    draft_level: str = Field(default="", description="稿件等级：internal_draft / external_ready")
+    document_mode: str = Field(default="", description="文档模式：single_package / multi_package_draft")
 
 
 class BidDownloadRequest(BaseModel):
@@ -528,6 +543,9 @@ class OneClickJobStatusResponse(BaseModel):
     download_url: str = Field(default="", description="下载地址")
     error: str = Field(default="", description="错误信息")
     updated_time: datetime = Field(description="状态更新时间")
+    validation_gate: ValidationGate | None = Field(default=None, description="硬校验门结果")
+    regression_metrics: RegressionMetrics | None = Field(default=None, description="回归指标")
+    draft_level: str = Field(default="", description="稿件等级")
 
 
 # --- 通用响应 ---

@@ -5663,7 +5663,7 @@ class TenderWorkflowAgent:
             for pkg_id, product in products.items()
             if product is not None
         }
-        sections = generate_bid_sections(
+        gen_result = generate_bid_sections(
             filtered_tender,
             raw_text,
             self.llm,
@@ -5672,6 +5672,7 @@ class TenderWorkflowAgent:
             evidence_result=evidence_result,
             product_profiles=product_profiles,
         )
+        sections = gen_result.sections
 
         return {
             "generated": True,

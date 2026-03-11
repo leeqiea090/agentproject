@@ -8,9 +8,12 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
+from app.services.chunking import split_to_blocks
+
 from app.schemas import (
     BidDocumentSection,
     BidEvidenceBinding,
+    BidGenerationResult,
     ClauseCategory,
     DocumentMode,
     DraftLevel,
@@ -638,7 +641,7 @@ _REQ_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-# ── 新增：7 类细分条款分类规则 ──
+# ── 新增：8 类细分条款分类规则 ──
 _CLAUSE_CATEGORY_RULES: list[tuple[ClauseCategory, tuple[str, ...]]] = [
     (ClauseCategory.service_requirement, (
         "质保", "保修", "售后", "维修", "维护", "保养", "巡检", "培训",
@@ -650,9 +653,14 @@ _CLAUSE_CATEGORY_RULES: list[tuple[ClauseCategory, tuple[str, ...]]] = [
         "附件", "配件", "随机", "耗材", "标准配置", "主要配置",
         "设备配置", "装箱配置", "配置与配件",
     )),
+    (ClauseCategory.acceptance_requirement, (
+        "验收", "验收标准", "验收条件", "验收方式", "验收程序",
+        "验收报告", "验收合格", "初验", "终验", "试运行",
+        "到货验收", "安装验收", "验收期", "试用期",
+    )),
     (ClauseCategory.commercial_requirement, (
         "付款", "价格", "报价", "折扣", "预算", "保证金", "违约",
-        "合同", "交货期", "交货地点", "包装运输", "验收",
+        "合同", "交货期", "交货地点", "包装运输",
         "发票", "税费", "货款", "尾款",
     )),
     (ClauseCategory.compliance_note, (
@@ -3722,7 +3730,7 @@ def generate_bid_sections(
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
     selected_packages: list[str] | None = None,
-) -> list[BidDocumentSection]:
+) -> BidGenerationResult:
     """
     根据招标文件生成全部投标文件章节 — 增强版 10 层管道。
 
@@ -3740,6 +3748,10 @@ def generate_bid_sections(
     logger.info("开始一键生成投标文件章节 - 模式: %s", mode)
     logger.debug("招标原文长度：%d 字符", len(tender_raw))
     products = products or {}
+
+    # ── Step 0a: 文档接入 — 可引用块 ──
+    doc_blocks = split_to_blocks(tender_raw)
+    logger.info("文档接入: 生成 %d 个可引用块", len(doc_blocks))
 
     # ── Step 0: 文档模式判定 ──
     doc_mode = _determine_document_mode(tender, selected_packages)
@@ -3886,4 +3898,10 @@ def generate_bid_sections(
     )
 
     logger.info("一键投标文件章节生成完成，共 %d 章", len(sections))
-    return sections
+    return BidGenerationResult(
+        sections=sections,
+        validation_gate=gate,
+        regression_metrics=metrics,
+        draft_level=draft_level,
+        document_mode=doc_mode,
+    )

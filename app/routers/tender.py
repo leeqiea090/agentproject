@@ -371,7 +371,8 @@ async def generate_bid_document(request: BidGenerateRequest):
             "current_section": "",
             "errors": [],
             "bid_id": "",
-            "status": "generating"
+            "status": "generating",
+            "product_profiles": {},
         }
 
         # 执行生成
@@ -462,6 +463,28 @@ async def generate_bid_document(request: BidGenerateRequest):
             outbound_view.get("status", "unknown"),
         )
 
+        # 调用管道获取校验门和回归指标
+        try:
+            pipeline_result = generate_bid_sections(
+                tender_doc, raw_text, llm,
+                products=products,
+                selected_packages=request.selected_packages,
+            )
+            validation_gate = pipeline_result.validation_gate
+            regression_metrics = pipeline_result.regression_metrics
+            draft_level_str = pipeline_result.draft_level.value
+            doc_mode_str = pipeline_result.document_mode.value
+        except Exception:
+            validation_gate = None
+            regression_metrics = None
+            draft_level_str = ""
+            doc_mode_str = ""
+
+        # 6d: 外发门阻断
+        if validation_gate is not None and not validation_gate.passes_external_gate():
+            outbound_view["status"] = "阻断外发"
+            outbound_view["download_url"] = ""
+
         return BidGenerateResponse(
             bid_id=bid_id,
             tender_id=request.tender_id,
@@ -470,9 +493,13 @@ async def generate_bid_document(request: BidGenerateRequest):
             materialize_report=materialize_report,
             consistency_report=consistency_report,
             outbound_report=outbound_view,
-            file_path="",  # 暂时为空，后续添加PDF生成功能
+            file_path="",
             download_url=outbound_view.get("download_url", ""),
-            generated_time=datetime.now()
+            generated_time=datetime.now(),
+            validation_gate=validation_gate,
+            regression_metrics=regression_metrics,
+            draft_level=draft_level_str,
+            document_mode=doc_mode_str,
         )
 
     except Exception as e:
@@ -1301,8 +1328,8 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             message="正在生成投标文件章节…",
             progress=72,
         )
-        sections = generate_bid_sections(tender_doc, raw_text, llm)
-
+        gen_result = generate_bid_sections(tender_doc, raw_text, llm)
+        sections = gen_result.sections
         _set_one_click_job_status(
             job_id,
             status="running",
@@ -1326,6 +1353,9 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             filename=filename,
             download_url=download_url,
         )
+        one_click_job_storage[job_id]["validation_gate"] = gen_result.validation_gate.model_dump()
+        one_click_job_storage[job_id]["regression_metrics"] = gen_result.regression_metrics.model_dump()
+        one_click_job_storage[job_id]["draft_level"] = gen_result.draft_level.value
     except Exception as exc:  # noqa: BLE001
         logger.error("一键生成后台任务失败：%s", exc, exc_info=True)
         _set_one_click_job_status(
@@ -1382,7 +1412,8 @@ async def one_click_generate(file: UploadFile = File(...)):
         tender_doc = parser.parse_tender_document(save_path)
 
         # 4. 一键生成投标文件各章节（按固定模板生成，使用解析后的结构化数据）
-        sections = generate_bid_sections(tender_doc, raw_text, llm)
+        gen_result = generate_bid_sections(tender_doc, raw_text, llm)
+        sections = gen_result.sections
 
         # 5. 构建 Word 文档
         output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
