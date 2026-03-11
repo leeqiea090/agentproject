@@ -156,21 +156,39 @@ def generate_bid_sections(
 
     sections = _apply_template_pollution_guard(sections)
 
-    # ── Step 4: 硬校验门 ──
-    gate = compute_validation_gate(
-        sections=sections,
-        normalized_reqs=all_normalized,
-        evidence_bindings=all_bid_bindings,
-        target_package_ids=target_package_ids,
-        mode=doc_mode,
-    )
-    logger.info(
-        "硬校验门: contamination=%s, placeholders=%d, evidence_cov=%.1f%%, table_mixing=%s",
-        gate.package_contamination_detected,
-        gate.placeholder_count,
-        gate.bid_evidence_coverage * 100,
-        gate.table_category_mixing,
-    )
+    # ── Step 4: 硬校验门 + 自愈循环 ──
+    #    如果检测到混装/污染，进行最多 _MAX_HEAL_PASSES 次清洗后重新校验
+    _MAX_HEAL_PASSES = 3
+    for heal_pass in range(_MAX_HEAL_PASSES + 1):
+        gate = compute_validation_gate(
+            sections=sections,
+            normalized_reqs=all_normalized,
+            evidence_bindings=all_bid_bindings,
+            target_package_ids=target_package_ids,
+            mode=doc_mode,
+        )
+        logger.info(
+            "硬校验门(pass=%d): contamination=%s, placeholders=%d, evidence_cov=%.1f%%, table_mixing=%s",
+            heal_pass,
+            gate.package_contamination_detected,
+            gate.placeholder_count,
+            gate.bid_evidence_coverage * 100,
+            gate.table_category_mixing,
+        )
+
+        # 如果没有混装和污染，校验通过，退出循环
+        if not gate.table_category_mixing and not gate.package_contamination_detected:
+            break
+
+        # 已达最大修复次数，退出
+        if heal_pass >= _MAX_HEAL_PASSES:
+            logger.warning("自愈循环已达 %d 次上限，仍有校验问题，降级为内部草稿", _MAX_HEAL_PASSES)
+            break
+
+        # ── 自愈：清洗技术表中的非技术行 ──
+        logger.info("自愈 pass %d: 清洗技术表中的非技术条款", heal_pass + 1)
+        sections = _heal_table_mixing(sections)
+        sections = _apply_template_pollution_guard(sections)
 
     # ── Step 5: 稿件等级判定 & 双输出 ──
     draft_level = _determine_draft_level(gate, doc_mode)

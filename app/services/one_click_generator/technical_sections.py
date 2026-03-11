@@ -468,16 +468,26 @@ def _gen_technical(
                 bid_bindings=_pkg_bid_binds,
             )
 
-            # ── 条款分类过滤：只有技术类进主表 ──
+            # ── 条款分类过滤：优先使用行上已标注的 category 字段 ──
             tech_rows = []
             svc_rows = []
             config_rows_list = []
             acceptance_rows = []
             doc_rows = []
             for row in requirement_rows:
-                cat = _classify_clause_category(
-                    row.get("key", ""), row.get("value", "")
-                )
+                # 优先使用归一化阶段已标注的 category，避免重新分类导致的偏差
+                raw_cat = row.get("category", "")
+                if raw_cat:
+                    try:
+                        cat = ClauseCategory(raw_cat)
+                    except ValueError:
+                        cat = _classify_clause_category(
+                            row.get("key", ""), row.get("requirement", "")
+                        )
+                else:
+                    cat = _classify_clause_category(
+                        row.get("key", ""), row.get("requirement", "")
+                    )
                 if cat == ClauseCategory.service_requirement:
                     svc_rows.append(row)
                 elif cat == ClauseCategory.config_requirement:
