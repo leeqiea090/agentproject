@@ -101,10 +101,12 @@ def test_enterprise_declaration_keeps_branches_without_sme_policy() -> None:
 def test_technical_section_is_forced_structured() -> None:
     tender = _sample_tender(special_requirements="本项目不接受联合体。")
     section = _gen_technical(llm=None, tender=tender, tender_raw="raw text")
+    assert "### 包1：" in section.content
     assert "技术偏离及详细配置明细表" in section.content
     assert "详细配置明细表" in section.content
     assert "技术响应检查清单" in section.content
     assert "技术条款证据映射表" in section.content
+    assert "（第1包）" not in section.content
     assert "具体参数待填写" not in section.content
     assert "招标原文长度" not in section.content
 

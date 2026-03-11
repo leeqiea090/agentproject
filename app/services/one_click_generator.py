@@ -8,7 +8,20 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-from app.schemas import BidDocumentSection, ProcurementPackage, TenderDocument
+from app.schemas import (
+    BidDocumentSection,
+    BidEvidenceBinding,
+    ClauseCategory,
+    DocumentMode,
+    DraftLevel,
+    NormalizedRequirement,
+    ProductProfile,
+    ProcurementPackage,
+    RegressionMetrics,
+    TenderDocument,
+    TenderSourceBinding,
+    ValidationGate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -625,6 +638,46 @@ _REQ_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+# ── 新增：7 类细分条款分类规则 ──
+_CLAUSE_CATEGORY_RULES: list[tuple[ClauseCategory, tuple[str, ...]]] = [
+    (ClauseCategory.service_requirement, (
+        "质保", "保修", "售后", "维修", "维护", "保养", "巡检", "培训",
+        "响应时间", "上门服务", "备品备件", "技术支持", "服务承诺",
+        "免费维修", "终身维护", "年度巡检", "应急响应",
+    )),
+    (ClauseCategory.config_requirement, (
+        "配置", "配备", "标配", "选配", "装箱", "配置清单", "配置单",
+        "附件", "配件", "随机", "耗材", "标准配置", "主要配置",
+        "设备配置", "装箱配置", "配置与配件",
+    )),
+    (ClauseCategory.commercial_requirement, (
+        "付款", "价格", "报价", "折扣", "预算", "保证金", "违约",
+        "合同", "交货期", "交货地点", "包装运输", "验收",
+        "发票", "税费", "货款", "尾款",
+    )),
+    (ClauseCategory.compliance_note, (
+        "实质性条款", "星号条款", "★", "▲", "不可偏离", "否决项",
+        "资格要求", "供应商资格", "投标人资格", "营业执照",
+        "经营许可", "注册证", "授权书",
+    )),
+    (ClauseCategory.attachment_requirement, (
+        "提供证明", "提供复印件", "提供扫描件", "加盖公章",
+        "附证书", "附报告", "附授权", "附彩页", "随附",
+    )),
+    (ClauseCategory.noise, (
+        "评分标准", "评分办法", "分值", "得分", "扣分",
+        "投标人须知", "响应文件格式", "页码要求", "装订",
+        "正本与副本", "目录编制",
+    )),
+    (ClauseCategory.technical_requirement, (
+        "技术参数", "性能", "指标", "检测", "灵敏度", "精度",
+        "速度", "分辨率", "通量", "功能", "模式", "方法",
+        "光学", "激光", "荧光", "通道", "散射", "波长",
+        "温度", "接口", "软件", "系统", "数据",
+    )),
+]
+
+
 def _classify_requirement_category(key: str, value: str) -> str:
     """将技术要求分类为：性能/配置/功能/接口/安全/通用。"""
     text = f"{key} {value}"
@@ -632,6 +685,15 @@ def _classify_requirement_category(key: str, value: str) -> str:
         if any(kw in text for kw in keywords):
             return category
     return "通用"
+
+
+def _classify_clause_category(key: str, value: str) -> ClauseCategory:
+    """将条款细分为 7 类 ClauseCategory。"""
+    text = f"{key} {value}"
+    for category, keywords in _CLAUSE_CATEGORY_RULES:
+        if any(kw in text for kw in keywords):
+            return category
+    return ClauseCategory.technical_requirement
 
 
 def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
@@ -696,6 +758,551 @@ def _atomize_requirements(requirements: list[tuple[str, str]]) -> list[tuple[str
             seen.add(dedup)
             atomized.append((sub_key, sub_val))
     return atomized
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Phase 4: 归一化需求 → NormalizedRequirement 对象
+# ═══════════════════════════════════════════════════════════════════
+
+_OPERATOR_PATTERNS = [
+    (r"[≥>=]\s*", "≥"),
+    (r"不低于\s*", "≥"),
+    (r"不少于\s*", "≥"),
+    (r"至少\s*", "≥"),
+    (r"[≤<=]\s*", "≤"),
+    (r"不高于\s*", "≤"),
+    (r"不大于\s*", "≤"),
+    (r"不超过\s*", "≤"),
+]
+
+_UNIT_PATTERN = re.compile(
+    r"(nm|μm|mm|cm|m|μl|ml|L|℃|°C|rpm|Hz|kHz|MHz|W|kW|V|A|dB|psi|Pa|kPa|"
+    r"通道|个|台|套|路|位|组|次/秒|次/分|样本/小时|测试/小时|T/h|%)",
+    re.IGNORECASE,
+)
+
+_MATERIAL_KEYWORDS = ("★", "▲", "实质性", "不可偏离", "否决", "必须满足")
+
+
+def _extract_operator_threshold_unit(text: str) -> tuple[str, str, str]:
+    """从条款文本中提取比较算子、阈值、单位。"""
+    operator = ""
+    threshold = ""
+    unit = ""
+
+    for pattern, op in _OPERATOR_PATTERNS:
+        m = re.search(pattern + r"([\d.,]+)", text)
+        if m:
+            operator = op
+            threshold = m.group(1)
+            break
+
+    if not operator:
+        m = re.search(r"([\d.,]+)", text)
+        if m:
+            threshold = m.group(1)
+            operator = "="
+
+    unit_m = _UNIT_PATTERN.search(text)
+    if unit_m:
+        unit = unit_m.group(1)
+
+    return operator, threshold, unit
+
+
+def normalize_requirements_to_objects(
+    package_id: str,
+    requirements: list[tuple[str, str]],
+    source_page: int = 0,
+) -> list[NormalizedRequirement]:
+    """将原子化后的 (key, value) 对转化为 NormalizedRequirement 对象。
+
+    - 自动提取 operator / threshold / unit
+    - 自动分类 category（7 类 ClauseCategory）
+    - 自动检测 is_material（实质性条款）
+    """
+    results: list[NormalizedRequirement] = []
+    for idx, (key, val) in enumerate(requirements, start=1):
+        category = _classify_clause_category(key, val)
+        operator, threshold, unit = _extract_operator_threshold_unit(val)
+        raw_text = f"{key}：{val}" if val else key
+        is_material = any(kw in raw_text for kw in _MATERIAL_KEYWORDS)
+        needs_bid_fact = category in (
+            ClauseCategory.technical_requirement,
+            ClauseCategory.config_requirement,
+            ClauseCategory.service_requirement,
+        )
+
+        results.append(NormalizedRequirement(
+            package_id=package_id,
+            requirement_id=f"pkg{package_id}-req-{idx:03d}",
+            param_name=key,
+            operator=operator,
+            threshold=threshold,
+            unit=unit,
+            raw_text=raw_text,
+            category=category,
+            is_material=is_material,
+            needs_bid_fact=needs_bid_fact,
+            source_page=source_page,
+        ))
+    return results
+
+
+def filter_requirements_by_category(
+    requirements: list[NormalizedRequirement],
+    category: ClauseCategory,
+) -> list[NormalizedRequirement]:
+    """按分类筛选需求列表。"""
+    return [r for r in requirements if r.category == category]
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Phase 5: 文档目标判定 — 单包实装 vs 多包底稿
+# ═══════════════════════════════════════════════════════════════════
+
+def _determine_document_mode(
+    tender: TenderDocument,
+    selected_packages: list[str] | None = None,
+) -> DocumentMode:
+    """判定文档生成模式。
+
+    规则：
+    - 如果只选了 1 个包（或标书只有 1 个包），走单包实装模式
+    - 否则走多包底稿模式
+    """
+    if selected_packages and len(selected_packages) == 1:
+        return DocumentMode.single_package
+    if len(tender.packages) == 1:
+        return DocumentMode.single_package
+    return DocumentMode.multi_package_draft
+
+
+def _filter_packages_for_mode(
+    tender: TenderDocument,
+    mode: DocumentMode,
+    target_package_id: str = "",
+) -> list[ProcurementPackage]:
+    """根据文档模式过滤采购包。"""
+    if mode == DocumentMode.single_package and target_package_id:
+        return [p for p in tender.packages if p.package_id == target_package_id]
+    return tender.packages
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Phase 6: 双层证据绑定
+# ═══════════════════════════════════════════════════════════════════
+
+def build_tender_source_bindings(
+    package_id: str,
+    requirements: list[NormalizedRequirement],
+    tender_raw: str,
+) -> list[TenderSourceBinding]:
+    """A层：从招标原文中定位每条需求的来源位置。"""
+    bindings: list[TenderSourceBinding] = []
+    for req in requirements:
+        if req.package_id != package_id:
+            continue
+        excerpt = ""
+        char_start = 0
+        char_end = 0
+        # 在原文中搜索参数名
+        search_key = req.param_name
+        pos = tender_raw.find(search_key)
+        if pos >= 0:
+            char_start = max(0, pos - 20)
+            char_end = min(len(tender_raw), pos + len(search_key) + 100)
+            excerpt = tender_raw[char_start:char_end].replace("\n", " ").strip()
+
+        bindings.append(TenderSourceBinding(
+            package_id=package_id,
+            requirement_id=req.requirement_id,
+            source_page=req.source_page,
+            source_section="",
+            source_excerpt=excerpt,
+            char_start=char_start,
+            char_end=char_end,
+        ))
+    return bindings
+
+
+def build_bid_evidence_bindings(
+    package_id: str,
+    requirements: list[NormalizedRequirement],
+    product: Any = None,
+) -> list[BidEvidenceBinding]:
+    """B层：从投标材料中定位每条需求的证据来源。"""
+    bindings: list[BidEvidenceBinding] = []
+    if not product:
+        # 无产品信息时，所有需求无证据
+        for req in requirements:
+            if req.package_id != package_id:
+                continue
+            bindings.append(BidEvidenceBinding(
+                package_id=package_id,
+                requirement_id=req.requirement_id,
+                evidence_type="",
+                file_name="",
+                file_page=0,
+                snippet="",
+                covers_requirement=False,
+            ))
+        return bindings
+
+    bid_materials = getattr(product, "bid_materials", []) or []
+    specs = getattr(product, "specifications", {}) or {}
+    evidence_refs = getattr(product, "evidence_refs", []) or []
+
+    for req in requirements:
+        if req.package_id != package_id:
+            continue
+
+        # 尝试从 evidence_refs 中找到匹配
+        best_binding = BidEvidenceBinding(
+            package_id=package_id,
+            requirement_id=req.requirement_id,
+        )
+
+        # 1) 从已有 evidence_refs 匹配
+        for ref in evidence_refs:
+            ref_param = str(ref.get("param_name", ref.get("parameter", "")))
+            if req.param_name and req.param_name in ref_param:
+                best_binding = BidEvidenceBinding(
+                    package_id=package_id,
+                    requirement_id=req.requirement_id,
+                    evidence_type=ref.get("evidence_type", "spec_sheet"),
+                    file_name=ref.get("file_name", ""),
+                    file_page=int(ref.get("page", 0)),
+                    snippet=str(ref.get("snippet", "")),
+                    covers_requirement=True,
+                )
+                break
+
+        # 2) 从 specifications 匹配
+        if not best_binding.covers_requirement and req.param_name in specs:
+            best_binding.snippet = str(specs[req.param_name])
+            best_binding.evidence_type = "spec_sheet"
+            best_binding.covers_requirement = True
+
+        # 3) 从 bid_materials 关键页匹配
+        if not best_binding.covers_requirement:
+            for mat in bid_materials:
+                mat_text = getattr(mat, "extracted_text", "") or ""
+                if req.param_name and req.param_name in mat_text:
+                    best_binding.evidence_type = getattr(mat, "file_type", "brochure")
+                    best_binding.file_name = getattr(mat, "file_name", "")
+                    key_pages = getattr(mat, "key_pages", []) or []
+                    if key_pages:
+                        best_binding.file_page = int(key_pages[0].get("page", 0))
+                    best_binding.snippet = req.param_name
+                    best_binding.covers_requirement = True
+                    break
+
+        bindings.append(best_binding)
+    return bindings
+
+
+def _compute_evidence_coverage(bindings: list[BidEvidenceBinding]) -> float:
+    """计算投标侧证据覆盖率。"""
+    if not bindings:
+        return 0.0
+    covered = sum(1 for b in bindings if b.covers_requirement)
+    return covered / len(bindings)
+
+
+def _determine_draft_level(
+    gate: ValidationGate,
+    mode: DocumentMode,
+) -> DraftLevel:
+    """根据校验门和模式判定稿件等级。"""
+    if mode == DocumentMode.multi_package_draft:
+        return DraftLevel.internal_draft
+    if not gate.passes_external_gate():
+        return DraftLevel.internal_draft
+    return DraftLevel.external_ready
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Phase 7: 构建 ProductProfile（writer 输入）
+# ═══════════════════════════════════════════════════════════════════
+
+def build_product_profile_for_package(
+    package_id: str,
+    product: Any = None,
+    evidence_bindings: list[BidEvidenceBinding] | None = None,
+) -> ProductProfile:
+    """为指定包构建 ProductProfile — writer 的核心输入。"""
+    if not product:
+        return ProductProfile(
+            package_id=package_id,
+            ready_for_external=False,
+        )
+
+    specs = getattr(product, "specifications", {}) or {}
+    brand = getattr(product, "brand", "") or ""
+    model_name = getattr(product, "model", "") or ""
+    manufacturer = getattr(product, "manufacturer", "") or ""
+    origin = getattr(product, "origin", "") or ""
+    product_name = getattr(product, "product_name", "") or ""
+    config_items = getattr(product, "config_items", []) or []
+    functional_notes = getattr(product, "functional_notes", "") or ""
+    acceptance_notes = getattr(product, "acceptance_notes", "") or ""
+    training_notes = getattr(product, "training_notes", "") or ""
+
+    has_identity = bool(brand and model_name and manufacturer)
+    has_specs = len(specs) >= 3
+
+    # 需要身份信息 + 技术参数 + 至少部分证据才能外发
+    evidence_coverage = _compute_evidence_coverage(evidence_bindings or [])
+    ready = has_identity and has_specs and evidence_coverage >= 0.5
+
+    return ProductProfile(
+        package_id=package_id,
+        product_name=product_name,
+        brand=brand,
+        model=model_name,
+        manufacturer=manufacturer,
+        origin=origin,
+        specifications=specs,
+        config_items=config_items,
+        functional_notes=functional_notes,
+        acceptance_notes=acceptance_notes,
+        training_notes=training_notes,
+        has_complete_identity=has_identity,
+        has_technical_specs=has_specs,
+        ready_for_external=ready,
+        evidence_refs=evidence_bindings or [],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Phase 8: 硬校验门
+# ═══════════════════════════════════════════════════════════════════
+
+_PLACEHOLDER_PATTERNS = (
+    r"\[待填写\]",
+    r"\[投标方公司名称\]",
+    r"\[品牌型号\]",
+    r"待核实",
+    r"待补投标方证据",
+    r"待补充",
+    r"\[待.*?\]",
+)
+
+
+def compute_validation_gate(
+    sections: list[BidDocumentSection],
+    normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
+    evidence_bindings: dict[str, list[BidEvidenceBinding]] | None = None,
+    target_package_ids: list[str] | None = None,
+    mode: DocumentMode = DocumentMode.single_package,
+) -> ValidationGate:
+    """计算硬校验门的 4 个条件。"""
+    normalized_reqs = normalized_reqs or {}
+    evidence_bindings = evidence_bindings or {}
+    target_package_ids = target_package_ids or []
+
+    # 1) 占位符计数
+    placeholder_count = 0
+    full_text = "\n".join(s.content for s in sections)
+    for pattern in _PLACEHOLDER_PATTERNS:
+        placeholder_count += len(re.findall(pattern, full_text))
+
+    # 2) 包件污染检测
+    package_contamination = False
+    if target_package_ids and len(target_package_ids) == 1:
+        target_pkg = target_package_ids[0]
+        # 检查是否出现其他包的内容
+        for pkg_id in range(1, 20):
+            other_id = str(pkg_id)
+            if other_id == target_pkg:
+                continue
+            pattern = f"包{other_id}[：:]|包\\s*{other_id}\\s*[：:]"
+            if re.search(pattern, full_text):
+                # 仅在非报价摘要区域检测到其他包时判定污染
+                # 报价总览允许出现多包摘要
+                sections_excl_quote = [s for s in sections if "报价" not in s.section_title]
+                tech_text = "\n".join(s.content for s in sections_excl_quote)
+                if re.search(pattern, tech_text):
+                    package_contamination = True
+                    logger.warning("包件污染：单包模式下检出包%s 的内容出现在包%s 技术区域", other_id, target_pkg)
+                    break
+
+    # 3) 投标侧证据覆盖率
+    all_bindings: list[BidEvidenceBinding] = []
+    for pkg_bindings in evidence_bindings.values():
+        all_bindings.extend(pkg_bindings)
+    evidence_cov = _compute_evidence_coverage(all_bindings)
+
+    # 4) 表格分类混装检测
+    table_mixing = False
+    if normalized_reqs:
+        for pkg_id, reqs in normalized_reqs.items():
+            categories_in_tech_table: set[str] = set()
+            for req in reqs:
+                categories_in_tech_table.add(req.category.value)
+            non_tech = categories_in_tech_table - {
+                ClauseCategory.technical_requirement.value,
+            }
+            if non_tech and len(categories_in_tech_table) > 1:
+                table_mixing = True
+                logger.warning("表格分类混装：包%s 技术表中出现非技术类条款: %s", pkg_id, non_tech)
+
+    return ValidationGate(
+        package_contamination_detected=package_contamination,
+        placeholder_count=placeholder_count,
+        bid_evidence_coverage=evidence_cov,
+        table_category_mixing=table_mixing,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Phase 9: 双输出 — 内部稿 vs 外发稿标注
+# ═══════════════════════════════════════════════════════════════════
+
+def annotate_draft_level(
+    sections: list[BidDocumentSection],
+    draft_level: DraftLevel,
+) -> list[BidDocumentSection]:
+    """根据稿件等级添加水印/标注。"""
+    if draft_level == DraftLevel.external_ready:
+        return sections
+
+    # 内部稿：在每个章节内容前加水印
+    watermark = "**【内部草稿 — 含待核实/待补证项，不可外发】**\n\n"
+    annotated: list[BidDocumentSection] = []
+    for s in sections:
+        annotated.append(BidDocumentSection(
+            section_title=s.section_title,
+            content=watermark + s.content,
+            attachments=s.attachments,
+        ))
+    return annotated
+
+
+def strip_placeholders_for_external(
+    sections: list[BidDocumentSection],
+) -> list[BidDocumentSection]:
+    """外发稿：将残余占位符替换为安全文案。"""
+    cleaned: list[BidDocumentSection] = []
+    for s in sections:
+        content = s.content
+        content = re.sub(r"\[待填写\]", "（详见附件）", content)
+        content = re.sub(r"\[投标方公司名称\]", "（见封面）", content)
+        content = re.sub(r"\[品牌型号\]", "（详见技术偏离表）", content)
+        content = re.sub(r"待核实（需填入投标产品实参）", "（详见产品技术资料）", content)
+        content = re.sub(r"待补投标方证据", "（详见证据附件）", content)
+        content = re.sub(r"待补充", "（详见附件）", content)
+        cleaned.append(BidDocumentSection(
+            section_title=s.section_title,
+            content=content,
+            attachments=s.attachments,
+        ))
+    return cleaned
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Phase 10: 评测回归指标
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_regression_metrics(
+    sections: list[BidDocumentSection],
+    normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
+    evidence_bindings: dict[str, list[BidEvidenceBinding]] | None = None,
+    target_package_ids: list[str] | None = None,
+    total_pages_estimate: int = 1,
+) -> RegressionMetrics:
+    """计算 7 项回归质量指标。"""
+    normalized_reqs = normalized_reqs or {}
+    evidence_bindings = evidence_bindings or {}
+    target_package_ids = target_package_ids or []
+    full_text = "\n".join(s.content for s in sections)
+
+    # 1) single_package_focus_score
+    if target_package_ids and len(target_package_ids) == 1:
+        target_pkg = target_package_ids[0]
+        target_mentions = len(re.findall(f"包{target_pkg}", full_text))
+        other_mentions = 0
+        for i in range(1, 20):
+            oid = str(i)
+            if oid == target_pkg:
+                continue
+            other_mentions += len(re.findall(f"包{oid}", full_text))
+        total = target_mentions + other_mentions
+        focus_score = target_mentions / total if total > 0 else 1.0
+    else:
+        focus_score = 0.5  # 多包模式不评估聚焦度
+
+    # 2) package_contamination_rate
+    if target_package_ids and len(target_package_ids) == 1:
+        target_pkg = target_package_ids[0]
+        total_sections = len(sections)
+        contaminated = 0
+        for s in sections:
+            for i in range(1, 20):
+                oid = str(i)
+                if oid == target_pkg:
+                    continue
+                if f"包{oid}" in s.content and "报价" not in s.section_title:
+                    contaminated += 1
+                    break
+        contamination_rate = contaminated / total_sections if total_sections > 0 else 0.0
+    else:
+        contamination_rate = 0.0
+
+    # 3) table_category_mixing_rate
+    total_req_count = 0
+    mixed_count = 0
+    for _pkg_id, reqs in normalized_reqs.items():
+        for req in reqs:
+            total_req_count += 1
+            if req.category != ClauseCategory.technical_requirement:
+                mixed_count += 1
+    mixing_rate = mixed_count / total_req_count if total_req_count > 0 else 0.0
+
+    # 4) bid_evidence_coverage
+    all_bindings: list[BidEvidenceBinding] = []
+    for pkg_bindings in evidence_bindings.values():
+        all_bindings.extend(pkg_bindings)
+    evidence_cov = _compute_evidence_coverage(all_bindings)
+
+    # 5) placeholder_leakage
+    placeholder_count = 0
+    for pattern in _PLACEHOLDER_PATTERNS:
+        placeholder_count += len(re.findall(pattern, full_text))
+    total_chars = len(full_text)
+    # 归一化：每 1000 字符的占位符数
+    leakage = min(1.0, placeholder_count / (total_chars / 1000 + 1) * 0.1) if total_chars > 0 else 0.0
+
+    # 6) config_detail_score
+    config_reqs = sum(
+        1 for reqs in normalized_reqs.values()
+        for r in reqs if r.category == ClauseCategory.config_requirement
+    )
+    config_with_detail = 0
+    # 检查配置表中有多少行有实际内容（非占位符）
+    config_pattern = re.compile(r"\|\s*\d+\s*\|.*?\|.*?\|.*?\|.*?\|.*?\|")
+    config_rows = config_pattern.findall(full_text)
+    for row in config_rows:
+        if not re.search(r"待填写|待补充|待核实", row):
+            config_with_detail += 1
+    config_score = min(1.0, config_with_detail / max(config_reqs, 5))
+
+    # 7) fact_density_per_page
+    # 统计非占位符的事实陈述数（含数值的行）
+    fact_lines = len(re.findall(r"[\d.,]+\s*(?:nm|μm|mm|ml|L|℃|Hz|W|V|%|通道|个|台)", full_text))
+    pages = max(1, total_pages_estimate)
+    fact_density = fact_lines / pages
+
+    return RegressionMetrics(
+        single_package_focus_score=round(focus_score, 3),
+        package_contamination_rate=round(contamination_rate, 3),
+        table_category_mixing_rate=round(mixing_rate, 3),
+        bid_evidence_coverage=round(evidence_cov, 3),
+        placeholder_leakage=round(leakage, 3),
+        config_detail_score=round(config_score, 3),
+        fact_density_per_page=round(fact_density, 2),
+    )
 
 
 def _markdown_cell(text: str) -> str:
@@ -2837,7 +3444,7 @@ def _gen_technical(
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> BidDocumentSection:
-    """第三章：商务及技术部分 - 支持双模式"""
+    """第三章：商务及技术部分 — 增强版：分类分表"""
     _ = llm
     products = products or {}
     today = _today()
@@ -2846,6 +3453,7 @@ def _gen_technical(
     quote_table = _quote_overview_table(tender, tender_raw)
 
     technical_sections: list[str] = []
+    service_sections: list[str] = []
     if tender.packages:
         for pkg in tender.packages:
             product = products.get(pkg.package_id)
@@ -2858,15 +3466,35 @@ def _gen_technical(
                 evidence_result=evidence_result,
                 product_profile=product_profile,
             )
-            mapped_count = sum(1 for row in requirement_rows if bool(row.get("mapped")))
+
+            # ── 条款分类过滤：只有技术类进主表 ──
+            tech_rows = []
+            svc_rows = []
+            config_rows_list = []
+            for row in requirement_rows:
+                cat = _classify_clause_category(
+                    row.get("key", ""), row.get("value", "")
+                )
+                if cat == ClauseCategory.service_requirement:
+                    svc_rows.append(row)
+                elif cat == ClauseCategory.config_requirement:
+                    config_rows_list.append(row)
+                elif cat in (ClauseCategory.commercial_requirement,
+                             ClauseCategory.compliance_note,
+                             ClauseCategory.noise):
+                    pass  # 不进任何技术表
+                else:
+                    tech_rows.append(row)
+
+            mapped_count = sum(1 for row in tech_rows if bool(row.get("mapped")))
 
             technical_sections.append(f"### 包{pkg.package_id}：{pkg.item_name}")
             technical_sections.append(
                 _build_deviation_table(
                     tender=tender,
                     pkg=pkg,
-                    requirement_rows=requirement_rows,
-                    total_requirements=total_requirements,
+                    requirement_rows=tech_rows,
+                    total_requirements=len(tech_rows),
                     product=product,
                 )
             )
@@ -2882,15 +3510,15 @@ def _gen_technical(
                 _build_response_checklist_table(
                     pkg=pkg,
                     mapped_count=mapped_count,
-                    total_requirements=total_requirements,
-                    requirement_rows=requirement_rows,
+                    total_requirements=len(tech_rows),
+                    requirement_rows=tech_rows,
                 )
             )
             technical_sections.append(
                 _build_evidence_mapping_table(
                     pkg=pkg,
-                    requirement_rows=requirement_rows,
-                    total_requirements=total_requirements,
+                    requirement_rows=tech_rows,
+                    total_requirements=len(tech_rows),
                 )
             )
             # ── 详细技术响应说明章节（post-table narratives）──
@@ -2900,9 +3528,39 @@ def _gen_technical(
                     tender=tender,
                     tender_raw=tender_raw,
                     product=product,
-                    requirement_rows=requirement_rows,
+                    requirement_rows=tech_rows,
                 )
             )
+
+            # ── 售后服务要求分表 ──
+            if svc_rows:
+                svc_table_lines = [
+                    f"### 包{pkg.package_id} 售后服务要求响应表",
+                    "| 序号 | 售后服务要求 | 响应承诺 | 证据材料 |",
+                    "|---:|---|---|---|",
+                ]
+                for idx, row in enumerate(svc_rows, start=1):
+                    key = _markdown_cell(row.get("key", ""))
+                    val = _markdown_cell(row.get("value", ""))
+                    resp = _markdown_cell(row.get("response", "满足"))
+                    evidence = _markdown_cell(row.get("evidence", "详见售后服务方案"))
+                    svc_table_lines.append(f"| {idx} | {key}：{val} | {resp} | {evidence} |")
+                service_sections.append("\n".join(svc_table_lines))
+
+            # ── 配置类要求分表（如原先未在配置表中处理） ──
+            if config_rows_list:
+                cfg_table_lines = [
+                    f"### 包{pkg.package_id} 配置要求响应表",
+                    "| 序号 | 配置要求 | 响应情况 | 证据材料 |",
+                    "|---:|---|---|---|",
+                ]
+                for idx, row in enumerate(config_rows_list, start=1):
+                    key = _markdown_cell(row.get("key", ""))
+                    val = _markdown_cell(row.get("value", ""))
+                    resp = _markdown_cell(row.get("response", "满足"))
+                    evidence = _markdown_cell(row.get("evidence", "详见配置清单"))
+                    cfg_table_lines.append(f"| {idx} | {key}：{val} | {resp} | {evidence} |")
+                service_sections.append("\n".join(cfg_table_lines))
     else:
         technical_sections.append(
             "\n".join(
@@ -2931,6 +3589,11 @@ def _gen_technical(
             )
         )
 
+    # 合并服务/配置分表
+    service_block = ""
+    if service_sections:
+        service_block = "\n\n## 四、售后服务及配置要求响应\n\n" + "\n\n".join(service_sections)
+
     content = f"""## 一、报价书
 {purchaser}：
 
@@ -2958,7 +3621,8 @@ def _gen_technical(
 {"\n\n".join(technical_sections)}
 
 说明：本章已按“逐包、逐参数、逐校验项”强制结构化编制。若采购文件另有固定格式，以采购文件格式为准。
-说明：本章已提供技术条款证据映射框架，正式递交前需补齐投标方实参与证明材料。
+说明：本章技术偏离表仅含技术类条款，售后服务/配置要求已分表处理（见下方）。
+{service_block}
 """
     return BidDocumentSection(section_title="第三章 商务及技术部分", content=content.strip())
 
@@ -3052,39 +3716,90 @@ def generate_bid_sections(
     tender_raw: str,
     llm: ChatOpenAI,
     products: dict | None = None,
-    mode: str = "rich_draft",  # 新增参数: "internal" | "rich_draft"
+    mode: str = "rich_draft",  # "internal" | "rich_draft"
     *,
     normalized_result: dict[str, Any] | None = None,
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
+    selected_packages: list[str] | None = None,
 ) -> list[BidDocumentSection]:
     """
-    根据招标文件生成全部投标文件章节 - 支持双模式。
+    根据招标文件生成全部投标文件章节 — 增强版 10 层管道。
 
-    Args:
-        tender: 结构化招标文件数据
-        tender_raw: 招标文件原始文本（供技术章节追溯）
-        llm: 语言模型实例（为兼容接口保留）
-        products: 包号→产品规格映射（可选，用于填入产品实参）
-        mode: 生成模式
-            - "internal": 内部模式,允许待核实、待补证、待补实参
-            - "rich_draft": 富展开模式,必须输出完整详细说明
-
-    Returns:
-        各章节列表
-
-    模式说明:
-    - Internal mode: 用于内部审阅,可包含 [待核实]、[待补证] 等标记
-    - Rich draft mode: 用于外发准备,必须包含:
-        * 技术偏离表
-        * 关键性能说明 (每条技术要求至少2-3句详细说明)
-        * 配置说明 (逐项说明用途)
-        * 交付说明
-        * 验收说明
-        * 使用与培训说明
+    新增能力：
+    1. 文档模式判定（单包/多包）
+    2. 7 类条款分类
+    3. 归一化需求（NormalizedRequirement）
+    4. 双层证据绑定（招标侧 + 投标侧）
+    5. ProductProfile 构建
+    6. 包件隔离硬规则
+    7. 4 项硬校验门
+    8. 双输出分层（internal_draft / external_ready）
+    9. 7 项回归指标
     """
     logger.info("开始一键生成投标文件章节 - 模式: %s", mode)
     logger.debug("招标原文长度：%d 字符", len(tender_raw))
+    products = products or {}
+
+    # ── Step 0: 文档模式判定 ──
+    doc_mode = _determine_document_mode(tender, selected_packages)
+    logger.info("文档模式: %s", doc_mode.value)
+
+    target_package_ids = selected_packages or [p.package_id for p in tender.packages]
+
+    # 单包模式：仅处理目标包
+    if doc_mode == DocumentMode.single_package and target_package_ids:
+        active_packages = _filter_packages_for_mode(tender, doc_mode, target_package_ids[0])
+    else:
+        active_packages = tender.packages
+
+    # ── Step 1: 归一化需求（per-package） ──
+    all_normalized: dict[str, list[NormalizedRequirement]] = {}
+    for pkg in active_packages:
+        raw_reqs = _effective_requirements(pkg, tender_raw)
+        atomized = _atomize_requirements(raw_reqs)
+        norm_reqs = normalize_requirements_to_objects(pkg.package_id, atomized)
+        all_normalized[pkg.package_id] = norm_reqs
+        logger.info(
+            "包%s 归一化需求: %d 条 (技术=%d, 配置=%d, 服务=%d, 商务=%d)",
+            pkg.package_id,
+            len(norm_reqs),
+            len(filter_requirements_by_category(norm_reqs, ClauseCategory.technical_requirement)),
+            len(filter_requirements_by_category(norm_reqs, ClauseCategory.config_requirement)),
+            len(filter_requirements_by_category(norm_reqs, ClauseCategory.service_requirement)),
+            len(filter_requirements_by_category(norm_reqs, ClauseCategory.commercial_requirement)),
+        )
+
+    # ── Step 2: 双层证据绑定（per-package） ──
+    all_tender_bindings: dict[str, list[TenderSourceBinding]] = {}
+    all_bid_bindings: dict[str, list[BidEvidenceBinding]] = {}
+    all_profiles: dict[str, ProductProfile] = {}
+
+    for pkg in active_packages:
+        pkg_reqs = all_normalized.get(pkg.package_id, [])
+        product = products.get(pkg.package_id)
+
+        # A层：招标侧溯源
+        tender_bindings = build_tender_source_bindings(pkg.package_id, pkg_reqs, tender_raw)
+        all_tender_bindings[pkg.package_id] = tender_bindings
+
+        # B层：投标侧证据
+        bid_bindings = build_bid_evidence_bindings(pkg.package_id, pkg_reqs, product)
+        all_bid_bindings[pkg.package_id] = bid_bindings
+
+        evidence_cov = _compute_evidence_coverage(bid_bindings)
+        logger.info("包%s 投标侧证据覆盖率: %.1f%%", pkg.package_id, evidence_cov * 100)
+
+        # 构建 ProductProfile
+        profile = build_product_profile_for_package(pkg.package_id, product, bid_bindings)
+        all_profiles[pkg.package_id] = profile
+
+    # ── Step 3: 包件隔离生成章节 ──
+    # 为了兼容，将 ProductProfile 转为 product_profiles dict 格式
+    pp_dict = product_profiles or {}
+    for pid, prof in all_profiles.items():
+        if pid not in pp_dict:
+            pp_dict[pid] = prof.model_dump()
 
     sections = [
         _gen_qualification(llm, tender),
@@ -3096,7 +3811,7 @@ def generate_bid_sections(
             products=products,
             normalized_result=normalized_result,
             evidence_result=evidence_result,
-            product_profiles=product_profiles,
+            product_profiles=pp_dict,
         ),
         _gen_appendix(
             llm,
@@ -3105,7 +3820,7 @@ def generate_bid_sections(
             products=products,
             normalized_result=normalized_result,
             evidence_result=evidence_result,
-            product_profiles=product_profiles,
+            product_profiles=pp_dict,
         ),
     ]
 
@@ -3115,6 +3830,60 @@ def generate_bid_sections(
         sections.extend(rich_sections)
 
     sections = _apply_template_pollution_guard(sections)
+
+    # ── Step 4: 硬校验门 ──
+    gate = compute_validation_gate(
+        sections=sections,
+        normalized_reqs=all_normalized,
+        evidence_bindings=all_bid_bindings,
+        target_package_ids=target_package_ids,
+        mode=doc_mode,
+    )
+    logger.info(
+        "硬校验门: contamination=%s, placeholders=%d, evidence_cov=%.1f%%, table_mixing=%s",
+        gate.package_contamination_detected,
+        gate.placeholder_count,
+        gate.bid_evidence_coverage * 100,
+        gate.table_category_mixing,
+    )
+
+    # ── Step 5: 稿件等级判定 & 双输出 ──
+    draft_level = _determine_draft_level(gate, doc_mode)
+    logger.info("稿件等级: %s", draft_level.value)
+
+    if draft_level == DraftLevel.internal_draft:
+        sections = annotate_draft_level(sections, draft_level)
+    elif draft_level == DraftLevel.external_ready:
+        sections = strip_placeholders_for_external(sections)
+
+    if not gate.passes_external_gate() and mode == "rich_draft":
+        logger.warning(
+            "外发稿硬校验未通过，已降级为内部草稿。原因: contamination=%s, placeholders=%d, "
+            "evidence=%.1f%%, mixing=%s",
+            gate.package_contamination_detected,
+            gate.placeholder_count,
+            gate.bid_evidence_coverage * 100,
+            gate.table_category_mixing,
+        )
+
+    # ── Step 6: 回归指标 ──
+    metrics = compute_regression_metrics(
+        sections=sections,
+        normalized_reqs=all_normalized,
+        evidence_bindings=all_bid_bindings,
+        target_package_ids=target_package_ids,
+    )
+    logger.info(
+        "回归指标: focus=%.2f, contamination=%.2f, mixing=%.2f, evidence=%.2f, "
+        "placeholders=%.2f, config=%.2f, density=%.1f",
+        metrics.single_package_focus_score,
+        metrics.package_contamination_rate,
+        metrics.table_category_mixing_rate,
+        metrics.bid_evidence_coverage,
+        metrics.placeholder_leakage,
+        metrics.config_detail_score,
+        metrics.fact_density_per_page,
+    )
 
     logger.info("一键投标文件章节生成完成，共 %d 章", len(sections))
     return sections

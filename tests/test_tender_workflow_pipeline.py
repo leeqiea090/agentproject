@@ -292,12 +292,13 @@ def test_sanitize_for_external_delivery_blocks_when_config_table_is_too_thin() -
         BidDocumentSection(
             section_title="第三章 商务及技术部分",
             content=(
-                "### （二-A）详细配置明细表（第1包）\n"
+                "### 包1：进口流式细胞分析仪\n"
+                "### （二-A）详细配置明细表\n"
                 "| 序号 | 配置名称 | 单位 | 数量 | 是否标配 | 用途说明 | 备注 |\n"
                 "|---:|---|---|---:|---|---|---|\n"
                 "| 1 | 主机 | 台 | 1 | 是 | 核心设备主机 | 核心设备 |\n"
                 "| 2 | 说明书 | 份 | 1 | 是 | 操作指导 | 随机文件 |\n"
-                "### （五）关键性能说明（第1包）\n"
+                "### （五）关键性能说明\n"
                 "已补充关键性能说明。\n"
             ),
             attachments=[],

@@ -232,7 +232,7 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
     unresolved_count = max(0, total_rows - proven_count)
     deviation_table = "\n".join(
         [
-            f"#### 1) 技术偏离表（第{package.package_id}包）",
+            "#### 1) 技术偏离表",
             "| 序号 | 参数项 | 招标要求 | 投标产品响应参数 | 偏离说明 | 证据映射 |",
             "|---:|---|---|---|---|---|",
             *rows,

@@ -11,13 +11,38 @@ import pypdf
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from app.schemas import BidDocumentSection, CompanyProfile, ProductSpecification, TenderDocument
+from app.schemas import (
+    BidDocumentSection,
+    BidEvidenceBinding,
+    ClauseCategory,
+    CompanyProfile,
+    DocumentMode,
+    DraftLevel,
+    NormalizedRequirement,
+    ProductProfile,
+    ProductSpecification,
+    RegressionMetrics,
+    TenderDocument,
+    TenderSourceBinding,
+    ValidationGate,
+)
 from app.services.one_click_generator import (
     _apply_template_pollution_guard,
     _atomize_requirements,
+    _classify_clause_category,
     _effective_requirements,
     _GENERIC_TECH_KEYS,
+    annotate_draft_level,
+    build_bid_evidence_bindings,
+    build_product_profile_for_package,
+    build_tender_source_bindings,
+    compute_regression_metrics,
+    compute_validation_gate,
+    filter_requirements_by_category,
     generate_bid_sections,
+    normalize_requirements_to_objects,
+    strip_placeholders_for_external,
+    _determine_document_mode,
 )
 from app.services.retriever import search_knowledge
 from app.services.tender_parser import TenderParser

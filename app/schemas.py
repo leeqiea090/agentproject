@@ -1,10 +1,147 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+# ==================== 管道增强：可引用块 / 条款分类 / 归一化需求 ====================
+
+
+class ClauseCategory(str, Enum):
+    """条款分类枚举 — 7类细分，取代原先笼统的 '技术类'。"""
+    technical_requirement = "technical_requirement"
+    config_requirement = "config_requirement"
+    service_requirement = "service_requirement"
+    commercial_requirement = "commercial_requirement"
+    compliance_note = "compliance_note"
+    attachment_requirement = "attachment_requirement"
+    noise = "noise"
+
+
+class DocumentMode(str, Enum):
+    """文档目标模式 — 决定生成策略。"""
+    single_package = "single_package"       # 单包实装稿
+    multi_package_draft = "multi_package_draft"  # 多包底稿模式
+
+
+class DraftLevel(str, Enum):
+    """稿件成熟度等级。"""
+    internal_draft = "internal_draft"       # 允许待核实/待补证/占位符
+    external_ready = "external_ready"       # 严禁占位符/混包/混类
+
+
+class DocumentBlock(BaseModel):
+    """可引用文档块 — 替代原始 chunk 纯文本。"""
+    text: str = Field(description="块内文本内容")
+    package_hint: str = Field(default="", description="所属采购包提示，如 '包1'")
+    section_title: str = Field(default="", description="所属章节标题")
+    clause_no: str = Field(default="", description="条款编号，如 '1.3'")
+    block_type: str = Field(default="paragraph", description="块类型：paragraph / table_row / header / list_item")
+    page: int = Field(default=0, description="来源页码（0 表示未知）")
+    char_start: int = Field(default=0, description="在全文中的起始字符偏移")
+    char_end: int = Field(default=0, description="在全文中的结束字符偏移")
+    table_id: str = Field(default="", description="所属表格 ID")
+    table_row: int = Field(default=-1, description="表格行号（-1 表示非表格）")
+    table_col: int = Field(default=-1, description="表格列号（-1 表示非表格）")
+    table_header: list[str] = Field(default_factory=list, description="表头文字列表（仅表格行携带）")
+
+
+class NormalizedRequirement(BaseModel):
+    """归一化需求条目 — 原子级、可直接绑定投标事实。"""
+    package_id: str = Field(description="所属包号")
+    requirement_id: str = Field(default="", description="需求唯一 ID，如 'pkg1-req-003'")
+    param_name: str = Field(description="参数名称")
+    operator: str = Field(default="", description="比较算子：≥ / ≤ / = / 包含 / 满足 / 空")
+    threshold: str = Field(default="", description="阈值/指标值，如 '5' / '≥10ml'")
+    unit: str = Field(default="", description="单位，如 'ml' / '℃' / '通道'")
+    raw_text: str = Field(default="", description="原始条款文本")
+    category: ClauseCategory = Field(default=ClauseCategory.technical_requirement, description="条款分类")
+    is_material: bool = Field(default=False, description="是否为实质性条款（不可偏离）")
+    needs_bid_fact: bool = Field(default=True, description="是否需要投标侧事实来响应")
+    source_page: int = Field(default=0, description="来源页码")
+    source_clause_no: str = Field(default="", description="来源条款编号")
+
+
+class TenderSourceBinding(BaseModel):
+    """招标侧溯源绑定 — 记录需求来自招标文件的位置。"""
+    package_id: str = Field(description="所属包号")
+    requirement_id: str = Field(default="", description="对应 NormalizedRequirement.requirement_id")
+    source_page: int = Field(default=0, description="招标文件页码")
+    source_section: str = Field(default="", description="招标文件章节")
+    source_excerpt: str = Field(default="", description="招标原文片段")
+    char_start: int = Field(default=0, description="片段在全文中的起始字符偏移")
+    char_end: int = Field(default=0, description="片段在全文中的结束字符偏移")
+
+
+class BidEvidenceBinding(BaseModel):
+    """投标侧证据绑定 — 记录用什么证据来证明满足需求。"""
+    package_id: str = Field(description="所属包号")
+    requirement_id: str = Field(default="", description="对应 NormalizedRequirement.requirement_id")
+    evidence_type: str = Field(
+        default="",
+        description="证据类型：brochure / manual / registration / test_report / authorization / spec_sheet / capability"
+    )
+    file_name: str = Field(default="", description="证据文件名")
+    file_page: int = Field(default=0, description="证据文件页码")
+    snippet: str = Field(default="", description="证据文件相关片段")
+    covers_requirement: bool = Field(default=False, description="该证据是否充分覆盖需求")
+
+
+class ProductProfile(BaseModel):
+    """产品画像 — writer 的核心输入之一，汇总产品事实。"""
+    package_id: str = Field(description="所属包号")
+    product_name: str = Field(default="", description="产品名称")
+    brand: str = Field(default="", description="品牌")
+    model: str = Field(default="", description="型号")
+    manufacturer: str = Field(default="", description="生产厂家")
+    origin: str = Field(default="", description="产地")
+    specifications: dict[str, Any] = Field(default_factory=dict, description="技术参数键值对")
+    config_items: list[dict[str, Any]] = Field(default_factory=list, description="配置项列表")
+    functional_notes: str = Field(default="", description="功能说明")
+    acceptance_notes: str = Field(default="", description="验收说明")
+    training_notes: str = Field(default="", description="培训说明")
+    has_complete_identity: bool = Field(default=False, description="品牌/型号/厂家是否齐全")
+    has_technical_specs: bool = Field(default=False, description="是否有实际技术参数")
+    ready_for_external: bool = Field(default=False, description="是否满足外发稿要求")
+    evidence_refs: list[BidEvidenceBinding] = Field(default_factory=list, description="产品证据列表")
+
+
+class ValidationGate(BaseModel):
+    """硬校验门 — 4 个硬拦截条件。"""
+    package_contamination_detected: bool = Field(default=False, description="是否检出包件污染")
+    placeholder_count: int = Field(default=0, description="关键占位符数量")
+    bid_evidence_coverage: float = Field(default=0.0, description="投标侧证据覆盖率（0~1）")
+    table_category_mixing: bool = Field(default=False, description="是否检出表格分类混装")
+    # 阈值
+    placeholder_threshold: int = Field(default=0, description="外发模式允许的最大占位符数")
+    evidence_coverage_threshold: float = Field(default=0.6, description="外发模式最低证据覆盖率")
+
+    def passes_external_gate(self) -> bool:
+        """外发稿是否通过所有硬校验。"""
+        if self.package_contamination_detected:
+            return False
+        if self.placeholder_count > self.placeholder_threshold:
+            return False
+        if self.bid_evidence_coverage < self.evidence_coverage_threshold:
+            return False
+        if self.table_category_mixing:
+            return False
+        return True
+
+
+class RegressionMetrics(BaseModel):
+    """评测回归指标 — 衡量生成稿与标准标书的质量差距。"""
+    single_package_focus_score: float = Field(default=0.0, description="单包聚焦度（0~1）")
+    package_contamination_rate: float = Field(default=0.0, description="包件污染率（0~1）")
+    table_category_mixing_rate: float = Field(default=0.0, description="表格分类混装率（0~1）")
+    bid_evidence_coverage: float = Field(default=0.0, description="投标侧证据覆盖率（0~1）")
+    placeholder_leakage: float = Field(default=0.0, description="占位符泄漏率（0~1）")
+    config_detail_score: float = Field(default=0.0, description="配置详细度得分（0~1）")
+    fact_density_per_page: float = Field(default=0.0, description="每页事实密度")
 
 
 class IngestTextRequest(BaseModel):
