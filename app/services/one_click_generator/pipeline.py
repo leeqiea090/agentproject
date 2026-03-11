@@ -100,8 +100,17 @@ def generate_bid_sections(
         pkg_reqs = all_normalized.get(pkg.package_id, [])
         product = products.get(pkg.package_id)
 
-        # A层：招标侧溯源
-        tender_bindings = build_tender_source_bindings(pkg.package_id, pkg_reqs, tender_raw)
+        # 获取本包的范围文本，避免跨包搜索
+        other_names = tuple(
+            p.item_name for p in active_packages if p.package_id != pkg.package_id
+        )
+        pkg_scope_text = _extract_package_scope_text(pkg, tender_raw, other_names)
+
+        # A层：招标侧溯源（优先在包范围内搜索）
+        tender_bindings = build_tender_source_bindings(
+            pkg.package_id, pkg_reqs, tender_raw,
+            package_scoped_text=pkg_scope_text,
+        )
         # 用文档块的精确页码/章节覆盖粗估值
         tender_bindings = enrich_bindings_from_blocks(tender_bindings, doc_blocks)
         all_tender_bindings[pkg.package_id] = tender_bindings
@@ -259,6 +268,15 @@ def generate_bid_sections(
         sections = annotate_draft_level(sections, draft_level)
     elif draft_level == DraftLevel.external_ready:
         sections = strip_placeholders_for_external(sections)
+        # 检查外发稿实际内容密度，如果过多 "详见..." 引用则降级为 internal
+        content_density = check_external_content_density(sections)
+        if content_density < 0.5:
+            logger.warning(
+                "外发稿实际内容密度不足 (%.1f%% < 50%%)，降级为 internal_draft",
+                content_density * 100,
+            )
+            draft_level = DraftLevel.internal_draft
+            sections = annotate_draft_level(sections, draft_level)
 
     if not gate.passes_external_gate() and mode == "rich_draft":
         logger.warning(

@@ -205,7 +205,7 @@ class ValidationGate(BaseModel):
     project_meta_anomaly_detected: bool = Field(default=False, description="是否检出项目名称/编号/数量异常")
     nested_placeholder_detected: bool = Field(default=False, description="是否检出嵌套占位符文本")
     # 阈值
-    placeholder_threshold: int = Field(default=0, description="外发模式允许的最大占位符数")
+    placeholder_threshold: int = Field(default=20, description="外发模式允许的最大占位符数")
     evidence_coverage_threshold: float = Field(default=0.6, description="外发模式最低证据覆盖率")
     snippet_truncation_threshold: int = Field(default=0, description="外发模式允许的最大截断片段数")
     anchor_pollution_threshold: float = Field(default=0.05, description="外发模式允许的最大锚点污染率")

@@ -477,7 +477,7 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
 
 
 def _is_truncated_name(name: str) -> bool:
-    """检测条目名是否为半截（括号未闭合、以特定符号结尾）。"""
+    """检测条目名是否为半截（括号未闭合、自引用、以冒号/介词结尾等）。"""
     stripped = name.strip()
     if not stripped:
         return True
@@ -495,6 +495,23 @@ def _is_truncated_name(name: str) -> bool:
         and not re.search(r"\d", stripped)
         and not _contains_any(stripped, _TECH_KEYWORDS + ("型号", "品牌", "产地", "厂家"))
     ):
+        return True
+    # 以冒号、顿号或"为"结尾 — 说明值部分被截断
+    if re.search(r"[：:、为]$", stripped):
+        return True
+    # 自引用检测："检测器：检测器为" — key 与 value 开头重复
+    if "：" in stripped or ":" in stripped:
+        parts = re.split(r"[：:]", stripped, maxsplit=1)
+        if len(parts) == 2:
+            k, v = parts[0].strip(), parts[1].strip()
+            # value 以 key 开头且后面不超过 2 个字 → 自引用截断
+            if k and v.startswith(k) and len(v) <= len(k) + 2:
+                return True
+            # value 以连接词/虚词结尾，说明句子未完成
+            if v and re.search(r"[可为的与及]$", v):
+                return True
+    # "至少包含""最低温度" 等以量词/限定词结尾但没有实际数值
+    if re.search(r"(至少|最低|最高|不低于|不少于|不超过)$", stripped):
         return True
     return False
 
@@ -557,12 +574,21 @@ def _classify_requirement_category(key: str, value: str) -> str:
 
 
 def _classify_clause_category(key: str, value: str) -> ClauseCategory:
-    """将条款细分为 7 类 ClauseCategory。"""
+    """将条款细分为 ClauseCategory — 基于关键词命中计数，取最高分类别。
+
+    修复：原先采用 first-match 逻辑，容易因关键词重叠导致误分类
+    （如"设备配置及质保"同时命中 service 和 config，first-match 总是返回 service）。
+    改为对所有类别打分，取命中次数最多的类别。
+    """
     text = f"{key} {value}"
+    best_category = ClauseCategory.technical_requirement
+    best_score = 0
     for category, keywords in _CLAUSE_CATEGORY_RULES:
-        if any(kw in text for kw in keywords):
-            return category
-    return ClauseCategory.technical_requirement
+        score = sum(1 for kw in keywords if kw in text)
+        if score > best_score:
+            best_score = score
+            best_category = category
+    return best_category
 
 
 # ═══════════════════════════════════════════════════════════════════

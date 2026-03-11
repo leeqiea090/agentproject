@@ -450,9 +450,49 @@ def strip_placeholders_for_external(
     return cleaned
 
 
+_EXTERNAL_REFERENCE_PATTERNS = re.compile(
+    r"（详见[^）]{0,20}）|（见[^）]{0,10}）"
+)
+
+
+def check_external_content_density(sections: list[BidDocumentSection]) -> float:
+    """检查外发稿中实际内容占比（排除"详见..."引用）。
+
+    返回实质内容字符占总字符的比例（0~1）。
+    如果比例低于阈值（如 0.5），说明外发稿大部分是空引用，不应放行。
+    """
+    total_chars = 0
+    reference_chars = 0
+    for s in sections:
+        content = s.content
+        total_chars += len(content)
+        for m in _EXTERNAL_REFERENCE_PATTERNS.finditer(content):
+            reference_chars += len(m.group())
+    if total_chars == 0:
+        return 1.0
+    return 1.0 - (reference_chars / total_chars)
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Phase 10: 评测回归指标
 # ═══════════════════════════════════════════════════════════════════
+
+def _is_truncated_field(text: str) -> bool:
+    """快速检测字段是否截断（用于评测指标，不用于主表过滤）。"""
+    if not text or not text.strip():
+        return True
+    s = text.strip()
+    # 以冒号/介词结尾
+    if re.search(r"[：:为]$", s):
+        return True
+    # 括号未闭合
+    if s.count("（") + s.count("(") > s.count("）") + s.count(")"):
+        return True
+    # 以限定词结尾但无数值
+    if re.search(r"(至少|最低|最高|不低于|不少于)$", s):
+        return True
+    return False
+
 
 def compute_regression_metrics(
     sections: list[BidDocumentSection],
@@ -596,12 +636,17 @@ def compute_regression_metrics(
     snippet_cleanliness = clean_snippets / total_snippets if total_snippets > 0 else 1.0
 
     # 9) draft_usability_score — 底稿可用性
-    # 综合各指标：有槽位 + 分表清晰 + 不过碎不过厚
+    # 综合评估：内容密度、分表完整度、截断率、跨包污染
     usability_factors = []
-    # 技术表/配置表/服务表是否都有内容
+    # 技术表/配置表/服务表是否都有实质内容（不仅仅是标题）
     _TABLE_TYPES_EXPECTED = ("技术", "配置", "服务", "售后")
-    tables_found = sum(1 for t in _TABLE_TYPES_EXPECTED if t in full_text)
-    usability_factors.append(min(1.0, tables_found / 3))
+    tables_with_content = 0
+    for t in _TABLE_TYPES_EXPECTED:
+        # 检查关键词后是否有至少 50 字的实质内容
+        idx = full_text.find(t)
+        if idx >= 0 and len(full_text[idx:idx+200].strip()) > 50:
+            tables_with_content += 1
+    usability_factors.append(min(1.0, tables_with_content / 3))
     # 占位符不过多（有一些是正常的，太多不可用）
     usability_factors.append(max(0.0, 1.0 - leakage * 2))
     # 配置详细度
@@ -610,6 +655,17 @@ def compute_regression_metrics(
     usability_factors.append(min(1.0, evidence_cov * 1.5))
     # 片段清洁度
     usability_factors.append(snippet_cleanliness)
+    # 截断率惩罚 — 截断条目越多，可用性越低
+    truncation_penalty = 0.0
+    if total_snippets > 0:
+        truncation_penalty = min(1.0, sum(
+            1 for reqs in (normalized_reqs or {}).values()
+            for req in reqs
+            if _is_truncated_field(req.raw_text) or _is_truncated_field(req.param_name)
+        ) / max(total_snippets, 1))
+    usability_factors.append(max(0.0, 1.0 - truncation_penalty))
+    # 跨包污染惩罚
+    usability_factors.append(max(0.0, 1.0 - contamination_rate * 3))
     draft_usability = sum(usability_factors) / len(usability_factors) if usability_factors else 0.0
     project_meta_consistency = _compute_project_meta_consistency_score(full_text, tender, target_package_ids)
 

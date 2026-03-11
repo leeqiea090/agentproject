@@ -17,6 +17,7 @@ from app.schemas import (
     TenderSourceBinding,
     ValidationGate,
 )
+from app.services.requirement_processor import _extract_package_scope_text
 from app.services.requirement_processor import (
     _extract_match_tokens,
     _find_evidence_position,
@@ -40,11 +41,21 @@ def _determine_document_mode(
     """判定文档生成模式。
 
     规则：
-    - mode_hint='rich_draft' 且单包 → single_package_rich_draft（必须生成技术表/配置表/服务表/资料表）
-    - 只选了 1 个包（或标书只有 1 个包）→ single_package_deep_draft（允许待补，但不允许缺槽位）
+    - mode_hint 直接映射：'single_package_deep_draft' / 'multi_package_master_draft' / 'rich_draft'
+    - 只选了 1 个包（或标书只有 1 个包）→ single_package_deep_draft
     - 否则 → multi_package_master_draft
     """
     is_single = (selected_packages and len(selected_packages) == 1) or len(tender.packages) == 1
+    # 允许 mode_hint 直接指定模式
+    _MODE_HINT_MAP = {
+        "single_package_deep_draft": DocumentMode.single_package_deep_draft,
+        "single_package_rich_draft": DocumentMode.single_package_rich_draft,
+        "multi_package_master_draft": DocumentMode.multi_package_master_draft,
+        "deep_draft": DocumentMode.single_package_deep_draft,
+        "master_draft": DocumentMode.multi_package_master_draft,
+    }
+    if mode_hint in _MODE_HINT_MAP:
+        return _MODE_HINT_MAP[mode_hint]
     if is_single and mode_hint == "rich_draft":
         return DocumentMode.single_package_rich_draft
     if is_single:
@@ -75,35 +86,44 @@ def build_tender_source_bindings(
     package_id: str,
     requirements: list[NormalizedRequirement],
     tender_raw: str,
+    *,
+    package_scoped_text: str = "",
 ) -> list[TenderSourceBinding]:
     """A层：从招标原文中定位每条需求的来源位置。
 
-    修复：excerpt 不再带出后续多条，精确截断到当前条目句尾。
+    优先在 package_scoped_text（单包范围文本）中搜索，避免跨包串取。
+    仅当 package_scoped_text 未命中时，才回退到 tender_raw。
     """
     bindings: list[TenderSourceBinding] = []
+    # 优先使用包范围文本，避免跨包污染
+    primary_text = package_scoped_text or tender_raw
     for req in requirements:
         if req.package_id != package_id:
             continue
         excerpt = ""
         char_start = 0
         char_end = 0
-        # 在原文中搜索参数名
+        # 在包范围文本中搜索参数名，找不到再回退全文
         search_key = req.param_name
-        pos = tender_raw.find(search_key)
+        pos = primary_text.find(search_key)
+        search_text = primary_text
+        if pos < 0 and package_scoped_text:
+            pos = tender_raw.find(search_key)
+            search_text = tender_raw
         if pos >= 0:
             char_start = max(0, pos - 20)
             # 从 pos 向后找到当前句子结尾（句号/分号/换行），避免串到下一条
             raw_end = pos + len(search_key) + 100
-            raw_end = min(len(tender_raw), raw_end)
-            candidate = tender_raw[pos + len(search_key):raw_end]
+            raw_end = min(len(search_text), raw_end)
+            candidate = search_text[pos + len(search_key):raw_end]
             # 找最近的句子边界
             for sep in ("\n", "。", "；", ";"):
                 sep_pos = candidate.find(sep)
                 if sep_pos >= 0 and sep_pos < 80:
                     raw_end = pos + len(search_key) + sep_pos + 1
                     break
-            char_end = min(len(tender_raw), raw_end)
-            excerpt = tender_raw[char_start:char_end].replace("\n", " ").strip()
+            char_end = min(len(search_text), raw_end)
+            excerpt = search_text[char_start:char_end].replace("\n", " ").strip()
             # 去除尾部多余内容
             excerpt = re.sub(r"\s+", " ", excerpt).strip()
 
