@@ -776,6 +776,27 @@ def _branch_decision(
     }
 
 
+_SERVICE_KEYWORDS = ("售后", "培训", "维修", "维保", "保修", "服务", "响应时间", "上门", "巡检", "技术支持")
+_ACCEPTANCE_KEYWORDS = ("验收", "安装调试", "试运行", "到货验收", "终验", "初验")
+_CONFIG_KEYWORDS = ("配置", "配件", "附件", "选配", "标配", "随机", "清单")
+
+
+def _is_service_clause(text: str) -> bool:
+    return any(kw in text for kw in _SERVICE_KEYWORDS)
+
+
+def _is_acceptance_clause(text: str) -> bool:
+    return any(kw in text for kw in _ACCEPTANCE_KEYWORDS)
+
+
+def _is_config_clause(text: str) -> bool:
+    return any(kw in text for kw in _CONFIG_KEYWORDS)
+
+
+def _is_service_or_acceptance_clause(text: str) -> bool:
+    return _is_service_clause(text) or _is_acceptance_clause(text) or _is_config_clause(text)
+
+
 def _classify_clauses(
     tender: TenderDocument,
     analysis_result: dict[str, Any],
@@ -865,7 +886,7 @@ def _classify_clauses(
     ]
 
     summary = (
-        f"已完成条款分类，覆盖资格、技术、商务、政策 4 类；"
+        f"已完成条款分类，覆盖资格、技术、配置、服务、验收、商务 6 类 + 噪音；"
         f"已生成 {len(branch_decisions)} 条分支决策。"
     )
 
@@ -875,8 +896,14 @@ def _classify_clauses(
         "clause_categories": {
             "qualification": qualification_clauses,
             "technical": technical_clauses[:20],
+            "technical_requirement": [c for c in technical_clauses[:20] if not _is_service_or_acceptance_clause(c)],
+            "config_requirement": [c for c in technical_clauses[:20] if _is_config_clause(c)],
+            "service_requirement": [c for c in technical_clauses[:20] if _is_service_clause(c)],
+            "acceptance_requirement": [c for c in technical_clauses[:20] if _is_acceptance_clause(c)],
             "commercial": commercial_clauses[:12],
+            "commercial_requirement": commercial_clauses[:12],
             "policy": policy_clauses[:12],
+            "noise": [],
         },
         "structured_categories": {
             "procurement_requirements": qualification_clauses + technical_clauses[:20] + commercial_clauses[:12],
@@ -1033,6 +1060,28 @@ def _normalize_requirements(
         tech_items = filtered_tech_items
         # --- End blanket clause filter ---
 
+        # --- 跨包污染过滤：命中别包关键词时判噪音 ---
+        other_pkg_keywords: dict[str, list[str]] = {}
+        for other_pkg in target_packages:
+            if other_pkg.package_id == pkg.package_id:
+                continue
+            name_tokens = re.split(r'[/、,，\s]+', other_pkg.item_name)
+            other_pkg_keywords[other_pkg.package_id] = [t for t in name_tokens if len(t) >= 2]
+
+        cross_pkg_filtered: list[tuple[str, str]] = []
+        for key, value in tech_items:
+            combined = f"{key} {value}"
+            contaminated = False
+            for other_id, keywords in other_pkg_keywords.items():
+                if any(kw in combined for kw in keywords):
+                    logger.info("包%s 跨包污染过滤：'%s' 命中包%s关键词，已移除", pkg.package_id, key, other_id)
+                    contaminated = True
+                    break
+            if not contaminated:
+                cross_pkg_filtered.append((key, value))
+        tech_items = cross_pkg_filtered
+        # --- End cross-package contamination filter ---
+
         for idx, (key, value) in enumerate(tech_items, start=1):
             comparator, threshold, unit = _parse_threshold(_safe_text(value))
             # 增强: 提取 source_page 和 source_text
@@ -1043,6 +1092,17 @@ def _normalize_requirements(
                 page_match = re.search(r"第\s*(\d+)\s*页", source_excerpt)
                 if page_match:
                     source_page = int(page_match.group(1))
+
+            # 条款分类
+            combined_text = f"{key} {value}"
+            if _is_service_clause(combined_text):
+                req_category = "service_requirement"
+            elif _is_acceptance_clause(combined_text):
+                req_category = "acceptance_requirement"
+            elif _is_config_clause(combined_text):
+                req_category = "config_requirement"
+            else:
+                req_category = "technical_requirement"
 
             technical_requirements.append(
                 {
@@ -1060,6 +1120,7 @@ def _normalize_requirements(
                     "response_value_type": "numeric" if comparator and threshold else "text",
                     "is_material_requirement": _looks_material_requirement(f"{key} {value}"),
                     "is_material": _looks_material_requirement(f"{key} {value}"),
+                    "category": req_category,
                     "source_page": source_page,
                     "source_text": source_excerpt or "",
                     "source_excerpt": source_excerpt or "",
@@ -1079,11 +1140,17 @@ def _normalize_requirements(
         f"需求归一化完成：资格 {len(qualification_requirements)} 项，"
         f"商务 {len(commercial_requirements)} 项，技术 {len(technical_requirements)} 项。"
     )
+    # 按 category 分组技术要求（用于分表输出）
+    tech_by_category: dict[str, list[dict[str, Any]]] = {}
+    for req in technical_requirements:
+        cat = req.get("category", "technical_requirement")
+        tech_by_category.setdefault(cat, []).append(req)
     return {
         "selected_packages": target_package_ids,
         "qualification_requirements": qualification_requirements,
         "commercial_requirements": commercial_requirements,
         "technical_requirements": technical_requirements,
+        "tech_by_category": tech_by_category,
         "by_package": by_package,
         "summary": summary,
     }
@@ -1915,6 +1982,11 @@ def _decide_rule_branches(
         f"{'存在关键阻断项' if blocking_fill_items else '未发现关键阻断项'}；"
         f"{'存在人工补录项' if manual_fill_items else '未发现强制人工补录项'}。"
     )
+    # 文档模式决策
+    if len(target_packages) == 1:
+        document_mode = "single_package"
+    else:
+        document_mode = "multi_package_draft"
     return {
         "selected_packages": target_packages,
         "branch_decisions": deduped,
@@ -1922,6 +1994,7 @@ def _decide_rule_branches(
         "blocking_fill_items": blocking_fill_items,
         "ready_for_generation": not blocking_fill_items,
         "risk_level": "high" if blocking_fill_items else "medium" if manual_fill_items else "low",
+        "document_mode": document_mode,
         "summary": summary,
     }
 
@@ -2131,6 +2204,13 @@ def _bind_bid_evidence(
                     if not evidence_file:
                         evidence_file = _safe_text(ref.get("file_name", "产品资料.pdf"))
                     break
+
+        # 底稿阶段：即使证据不完整，也输出完整骨架
+        if not material_matched and not evidence_type:
+            evidence_type = "pending"
+            evidence_file = evidence_file or ""
+            evidence_page = evidence_page
+            evidence_snippet = evidence_snippet or "底稿阶段 — 待补充投标方证据"
 
         bid_evidence_list.append({
             "requirement_id": requirement_id,
@@ -3457,6 +3537,7 @@ def _sanitize_for_external_delivery(
     hard_validation_result: dict[str, Any] | None = None,
     evidence_result: dict[str, Any] | None = None,
     normalized_result: dict[str, Any] | None = None,
+    document_mode: str | None = None,
 ) -> tuple[list[BidDocumentSection], dict[str, Any]]:
     cleaned_sections = _apply_template_pollution_guard(sections)
     changed_sections: list[str] = []
@@ -3484,6 +3565,36 @@ def _sanitize_for_external_delivery(
     # --- End fix ---
 
     blocked_reasons: list[str] = []
+
+    # 多包母版模式不允许外发
+    if document_mode == "multi_package_draft":
+        blocked_reasons.append("当前为多包母版模式（multi_package_draft），不允许外发")
+
+    # --- 跨包污染检测 ---
+    if normalized_result:
+        selected_pkgs = set(r.get("package_id", "") for r in normalized_result.get("technical_requirements", []) if isinstance(r, dict))
+        for cleaned in cleaned_sections:
+            all_mentions = set()
+            for m in re.finditer(r"第\s*(\d+)\s*包|包\s*(\d+)", cleaned.content):
+                pkg_id = m.group(1) or m.group(2)
+                if pkg_id:
+                    all_mentions.add(pkg_id)
+            foreign_pkgs = all_mentions - selected_pkgs
+            if foreign_pkgs and selected_pkgs:
+                blocked_reasons.append(
+                    f"章节'{cleaned.section_title}'引用了非目标包（{','.join(sorted(foreign_pkgs))}），疑似跨包污染"
+                )
+    # --- End cross-package contamination check ---
+
+    # --- 分类混表检测 ---
+    for cleaned in cleaned_sections:
+        if "技术偏离" in cleaned.section_title or "技术偏离" in cleaned.content[:100]:
+            for line in cleaned.content.splitlines():
+                if line.strip().startswith("|") and any(kw in line for kw in _SERVICE_KEYWORDS + _ACCEPTANCE_KEYWORDS):
+                    if "技术偏离表混入服务/验收类条款，存在分类混表" not in blocked_reasons:
+                        blocked_reasons.append("技术偏离表混入服务/验收类条款，存在分类混表")
+                        break
+    # --- End category mixing check ---
 
     # --- Content-quality hard gates ---
     # (a) Deviation table quality: block if only 1 generic row with "详见招标文件"
@@ -3851,7 +3962,7 @@ def _build_regression_report(
         _iso_detail += f"（存在串包：{','.join(sorted(unexpected_mentions))}）"
     _iso_detail += "。"
     regression_checks.append({
-        "name": "package_isolation_score",
+        "name": "single_package_focus_score",
         "status": "通过" if package_isolation >= 0.9 else "需修订",
         "detail": _iso_detail,
         "value": round(package_isolation, 4),
@@ -3910,7 +4021,7 @@ def _build_regression_report(
                     config_total += 1
     config_pollution_rate = config_polluted / max(1, config_total)
     regression_checks.append({
-        "name": "config_pollution_rate",
+        "name": "package_contamination_rate",
         "status": "通过" if config_pollution_rate <= 0.05 else "需修订",
         "detail": f"配置表污染率 {config_pollution_rate:.0%}（{config_polluted}/{config_total} 行疑似非配置项）。",
         "value": round(config_pollution_rate, 4),
@@ -3983,6 +4094,44 @@ def _build_regression_report(
         "value": round(config_detail_score, 4),
     })
 
+    # fact_density_per_page: count of concrete facts / estimated page count
+    total_content_chars = sum(len(sec.content) for sec in (sections or []))
+    estimated_pages = max(1, total_content_chars // 1500)  # ~1500 chars per page
+    fact_count = sum(1 for sec in (sections or []) for line in sec.content.splitlines()
+                     if line.strip().startswith("|") and not line.strip().startswith("|---")
+                     and not any(h in line for h in ("序号", "条款编号", "参数名称")))
+    fact_density = fact_count / estimated_pages
+    regression_checks.append({
+        "name": "fact_density_per_page",
+        "status": "通过" if fact_density >= 3.0 else "需修订",
+        "detail": f"每页事实密度 {fact_density:.1f}（{fact_count} 条事实 / ~{estimated_pages} 页）。",
+        "value": round(fact_density, 2),
+    })
+
+    # table_category_mixing_rate: fraction of deviation table rows that contain service/acceptance keywords
+    mixing_count = 0
+    deviation_total = sum(deviation_rows_by_pkg.values()) if deviation_rows_by_pkg else 0
+    for sec in (sections or []):
+        in_deviation = False
+        for line in sec.content.splitlines():
+            stripped = line.strip()
+            if "技术偏离" in stripped and stripped.startswith("#"):
+                in_deviation = True
+                continue
+            if stripped.startswith("#") and in_deviation:
+                in_deviation = False
+                continue
+            if in_deviation and stripped.startswith("|") and not stripped.startswith("|---"):
+                if any(kw in stripped for kw in ("售后", "培训", "维修", "保修", "验收", "安装调试")):
+                    mixing_count += 1
+    table_mixing_rate = mixing_count / max(1, deviation_total)
+    regression_checks.append({
+        "name": "table_category_mixing_rate",
+        "status": "通过" if table_mixing_rate <= 0.05 else "需修订",
+        "detail": f"表格分类混装率 {table_mixing_rate:.0%}（{mixing_count}/{deviation_total} 行含非技术类条款）。",
+        "value": round(table_mixing_rate, 4),
+    })
+
     total_tech_requirements = len(tech_reqs)
     total_deviation_rows = sum(deviation_rows_by_pkg.values())
     total_mapping_rows = sum(evidence_rows_by_pkg.values())
@@ -4024,7 +4173,7 @@ def _build_regression_report(
     )
     section_template_similarity = template_line_count / max(1, len(content_lines))
     regression_checks.append({
-        "name": "section_template_similarity",
+        "name": "placeholder_leakage",
         "status": "通过" if section_template_similarity <= 0.2 else "需修订",
         "detail": f"模板化行占比 {section_template_similarity:.0%}（{template_line_count}/{len(content_lines)} 行）。",
         "value": round(section_template_similarity, 4),

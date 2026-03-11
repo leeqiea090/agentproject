@@ -346,27 +346,33 @@ def test_build_regression_report_can_mark_ready_for_delivery() -> None:
     assert report["score"] > 50
     # Original 8 checks should all pass
     original_checks = [item for item in report["checks"] if item["name"] not in {
-        "package_isolation_score", "atomic_requirement_rate", "offered_fact_coverage",
-        "bid_evidence_coverage", "config_pollution_rate", "external_block_rate",
-        "config_detail_score", "mapping_count_consistency", "section_template_similarity",
+        "package_isolation_score", "single_package_focus_score",
+        "atomic_requirement_rate", "offered_fact_coverage",
+        "bid_evidence_coverage", "config_pollution_rate", "package_contamination_rate",
+        "external_block_rate",
+        "config_detail_score", "mapping_count_consistency",
+        "section_template_similarity", "placeholder_leakage",
         "detail_target_atomic_clauses", "detail_target_deviation_rows",
         "detail_target_narrative_chars", "detail_target_evidence_coverage",
         "actual_param_coverage", "bid_evidence_page_coverage",
         "config_avg_items_per_package", "template_paragraph_ratio",
         "external_hardgate_block_rate",
+        "fact_density_per_page", "table_category_mixing_rate",
     }]
     assert all(item["status"] == "通过" for item in original_checks)
     # New metrics should exist
     new_metric_names = {item["name"] for item in report["checks"]} - {item["name"] for item in original_checks}
-    assert "package_isolation_score" in new_metric_names
+    assert "single_package_focus_score" in new_metric_names
     assert "atomic_requirement_rate" in new_metric_names
     assert "offered_fact_coverage" in new_metric_names
     assert "bid_evidence_coverage" in new_metric_names
-    assert "config_pollution_rate" in new_metric_names
+    assert "package_contamination_rate" in new_metric_names
     assert "config_detail_score" in new_metric_names
     assert "mapping_count_consistency" in new_metric_names
-    assert "section_template_similarity" in new_metric_names
+    assert "placeholder_leakage" in new_metric_names
     assert "external_block_rate" in new_metric_names
+    assert "fact_density_per_page" in new_metric_names
+    assert "table_category_mixing_rate" in new_metric_names
 
 
 def test_build_evidence_bindings_exposes_bid_side_pages() -> None:

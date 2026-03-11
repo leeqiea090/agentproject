@@ -242,6 +242,13 @@ def split_to_blocks(
                 elif any(stripped_lower.startswith(p) for p in ("详见", "见附件", "按规定")):
                     inferred_type = "description"
 
+                # 噪音块判定：脚注/说明行/短表头行/表格表头行
+            _is_noise = inferred_type in ("footnote", "description")
+            if not _is_noise and block_type == "header" and len(chunk_text.strip()) < 6:
+                _is_noise = True
+            if not _is_noise and block_type == "table_row" and table_row == 0 and table_header:
+                _is_noise = True
+
             blocks.append(DocumentBlock(
                 text=chunk_text,
                 package_hint=pkg_hint,
@@ -255,6 +262,7 @@ def split_to_blocks(
                 table_row=table_row if block_type == "table_row" else -1,
                 table_col=-1,
                 table_header=table_header if block_type == "table_row" else [],
+                is_noise=_is_noise,
             ))
 
             if inner_end >= inner_len:

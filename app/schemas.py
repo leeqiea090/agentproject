@@ -49,6 +49,7 @@ class DocumentBlock(BaseModel):
     table_row: int = Field(default=-1, description="表格行号（-1 表示非表格）")
     table_col: int = Field(default=-1, description="表格列号（-1 表示非表格）")
     table_header: list[str] = Field(default_factory=list, description="表头文字列表（仅表格行携带）")
+    is_noise: bool = Field(default=False, description="是否为噪音块（表头/脚注/说明行），不应进入主抽取链")
 
 
 class NormalizedRequirement(BaseModel):
