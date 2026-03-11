@@ -425,6 +425,8 @@ def _gen_technical(
     normalized_result: dict[str, Any] | None = None,
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
+    tender_bindings: dict[str, list] | None = None,
+    bid_bindings: dict[str, list] | None = None,
 ) -> BidDocumentSection:
     """第三章：商务及技术部分 — 增强版：分类分表"""
     _ = llm
@@ -440,6 +442,20 @@ def _gen_technical(
         for pkg in tender.packages:
             product = products.get(pkg.package_id)
             product_profile = (product_profiles or {}).get(pkg.package_id)
+            # 构建 binding 索引（按 requirement_id 查找）
+            _pkg_tender_binds = {}
+            _pkg_bid_binds = {}
+            if tender_bindings and pkg.package_id in tender_bindings:
+                for tb in tender_bindings[pkg.package_id]:
+                    rid = getattr(tb, "requirement_id", None) or (tb.get("requirement_id") if isinstance(tb, dict) else None)
+                    if rid:
+                        _pkg_tender_binds[rid] = tb if isinstance(tb, dict) else tb.model_dump() if hasattr(tb, "model_dump") else {}
+            if bid_bindings and pkg.package_id in bid_bindings:
+                for bb in bid_bindings[pkg.package_id]:
+                    rid = getattr(bb, "requirement_id", None) or (bb.get("requirement_id") if isinstance(bb, dict) else None)
+                    if rid:
+                        _pkg_bid_binds[rid] = bb if isinstance(bb, dict) else bb.model_dump() if hasattr(bb, "model_dump") else {}
+
             requirement_rows, total_requirements = _build_requirement_rows(
                 pkg,
                 tender_raw,
@@ -447,6 +463,9 @@ def _gen_technical(
                 normalized_result=normalized_result,
                 evidence_result=evidence_result,
                 product_profile=product_profile,
+                category_filter=None,
+                tender_bindings=_pkg_tender_binds,
+                bid_bindings=_pkg_bid_binds,
             )
 
             # ── 条款分类过滤：只有技术类进主表 ──
@@ -501,6 +520,7 @@ def _gen_technical(
                     tender_raw,
                     product=product,
                     product_profile=product_profile,
+                    normalized_result=normalized_result,
                 )
             )
             technical_sections.append(

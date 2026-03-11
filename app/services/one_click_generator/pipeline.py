@@ -131,6 +131,8 @@ def generate_bid_sections(
             normalized_result=normalized_result,
             evidence_result=evidence_result,
             product_profiles=pp_dict,
+            tender_bindings=all_tender_bindings,
+            bid_bindings=all_bid_bindings,
         ),
         _gen_appendix(
             llm,

@@ -14,10 +14,17 @@ from app.schemas import (
     CompanyProfile,
     ProductSpecification,
     BidDocumentSection,
-    BidGenerateRequest
+    BidGenerateRequest,
+    ClauseCategory,
 )
 
 logger = logging.getLogger(__name__)
+
+# ── 条款分类关键词规则（与 requirement_processor 保持一致）──
+_SERVICE_KEYWORDS = ("售后", "质保", "维修", "保修", "维护", "响应时间", "培训", "安装调试", "技术支持", "巡检")
+_DOC_KEYWORDS = ("说明书", "手册", "合格证", "资料", "文件", "技术文档", "使用手册", "操作手册")
+_ACCEPTANCE_KEYWORDS = ("验收", "检测", "测试", "试运行", "调试")
+_CONFIG_KEYWORDS = ("配置", "配件", "附件", "装箱", "随机", "标配", "选配")
 
 _MODEL_POLLUTION_PREFIXES = (
     "你是",
@@ -42,6 +49,26 @@ _MODEL_POLLUTION_INFIX_KEYWORDS = (
     "trace:",
 )
 _HARD_REQUIREMENT_MARKERS = ("≥", "≤", ">=", "<=", "不低于", "不少于", "不高于", "不大于", "至少")
+
+# ── 内联条款分类 ──
+_INTERNAL_DRAFT_MARKERS = ("待核实", "待补证", "待补充", "[TODO", "招标原文片段")
+_EXTERNAL_FORBIDDEN_PATTERNS = re.compile(
+    r"待核实|待补证|待补充|\[TODO|招标原文片段|\[待\w+\]"
+)
+
+
+def _classify_req_category(key: str, val: str) -> str:
+    """对单个条款做简单分类，返回 ClauseCategory 值。"""
+    combined = f"{key} {val}"
+    if any(k in combined for k in _SERVICE_KEYWORDS):
+        return "service_requirement"
+    if any(k in combined for k in _DOC_KEYWORDS):
+        return "documentation_requirement"
+    if any(k in combined for k in _ACCEPTANCE_KEYWORDS):
+        return "acceptance_requirement"
+    if any(k in combined for k in _CONFIG_KEYWORDS):
+        return "config_requirement"
+    return "technical_requirement"
 
 
 def _as_text(value: Any) -> str:
@@ -171,7 +198,10 @@ def _ensure_compliance_branch_blocks(content: str, allow_consortium: bool, requi
 
 
 def _build_structured_technical_block(package: Any, product: ProductSpecification) -> str:
-    rows: list[str] = []
+    """构建结构化技术响应块——技术偏离表只含技术参数，服务/资料/验收独立分表。"""
+    tech_rows: list[str] = []
+    service_rows: list[str] = []
+    doc_rows: list[str] = []
     evidence_rows: list[str] = []
     tech_req = package.technical_requirements or {}
     product_specs = product.specifications or {}
@@ -179,20 +209,24 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
     no_deviation_count = 0
 
     if tech_req:
-        idx = 1
+        tech_idx = 1
+        svc_idx = 1
+        doc_idx = 1
         for req_key, req_val in tech_req.items():
             req_name = _as_text(req_key) or "技术参数"
             req_text = _as_text(req_val) or "详见招标文件"
+
+            # 分类
+            cat = _classify_req_category(req_name, req_text)
+
             matched = ""
             matched_spec_key = ""
-            # 精确/子串匹配
             for spec_key, spec_val in product_specs.items():
                 sk = _as_text(spec_key)
                 if req_name in sk or sk in req_name:
                     matched = _as_text(spec_val)
                     matched_spec_key = sk
                     break
-            # 宽松 token 匹配兜底
             if not matched:
                 req_tokens = [t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", req_name) if len(t) >= 3]
                 if req_tokens:
@@ -202,12 +236,14 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
                             matched = _as_text(spec_val)
                             matched_spec_key = sk
                             break
+
             response_text = _build_requirement_response_value(req_text, matched, product=product)
             deviation_status = _evaluate_deviation_status(req_text, matched)
             if matched:
                 proven_count += 1
             if deviation_status == "无偏离":
                 no_deviation_count += 1
+
             evidence_text = (
                 f"招标条款：{_markdown_cell(req_name)}={_markdown_cell(req_text)}；"
                 f"产品参数：{_markdown_cell(matched_spec_key)}={_markdown_cell(matched)}"
@@ -215,27 +251,41 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
                 else f"招标条款：{_markdown_cell(req_name)}={_markdown_cell(req_text)}；产品参数：未匹配到同名参数，需补充"
             )
 
-            rows.append(
-                f"| {idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | {deviation_status} | {_markdown_cell(evidence_text)} |"
-            )
-            evidence_rows.append(
-                f"| {idx} | {_markdown_cell(req_name)} | 招标技术条款 | {_markdown_cell(evidence_text)} | 技术偏离表第{idx}行 |"
-            )
-            idx += 1
+            if cat in ("service_requirement", "acceptance_requirement"):
+                service_rows.append(
+                    f"| {svc_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | {deviation_status} |"
+                )
+                svc_idx += 1
+            elif cat == "documentation_requirement":
+                doc_rows.append(
+                    f"| {doc_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} |"
+                )
+                doc_idx += 1
+            else:
+                # technical_requirement / config_requirement → 技术偏离表
+                tech_rows.append(
+                    f"| {tech_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | {deviation_status} | {_markdown_cell(evidence_text)} |"
+                )
+                evidence_rows.append(
+                    f"| {tech_idx} | {_markdown_cell(req_name)} | 招标技术条款 | {_markdown_cell(evidence_text)} | 技术偏离表第{tech_idx}行 |"
+                )
+                tech_idx += 1
     else:
-        rows.append(
+        tech_rows.append(
             "| 1 | 核心技术参数 | 详见招标文件 | 待核实（未提取到结构化技术要求） | 待核实 | 招标条款+产品参数待人工补充 |"
         )
         evidence_rows.append("| 1 | 核心技术参数 | 招标技术条款 | 暂未匹配到产品参数，需补充证据 | 技术偏离表第1行 |")
 
-    total_rows = len(rows)
+    total_rows = len(tech_rows)
     unresolved_count = max(0, total_rows - proven_count)
+
+    # ── 技术偏离表（只含技术参数）──
     deviation_table = "\n".join(
         [
             "#### 1) 技术偏离表",
             "| 序号 | 参数项 | 招标要求 | 投标产品响应参数 | 偏离说明 | 证据映射 |",
             "|---:|---|---|---|---|---|",
-            *rows,
+            *tech_rows,
         ]
     )
 
@@ -273,15 +323,33 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
         ]
     )
 
-    return "\n\n".join(
-        [
-            f"### 包{package.package_id}：{package.item_name}",
-            deviation_table,
-            config_table,
-            checklist,
-            evidence_table,
-        ]
-    )
+    blocks = [
+        f"### 包{package.package_id}：{package.item_name}",
+        deviation_table,
+        config_table,
+    ]
+
+    # ── 服务/验收要求独立分表 ──
+    if service_rows:
+        blocks.append("\n".join([
+            "#### 5) 售后服务/验收要求响应表",
+            "| 序号 | 要求项 | 招标要求 | 响应承诺 | 偏离说明 |",
+            "|---:|---|---|---|---|",
+            *service_rows,
+        ]))
+
+    # ── 资料要求独立分表 ──
+    if doc_rows:
+        blocks.append("\n".join([
+            "#### 6) 资料/文档要求响应表",
+            "| 序号 | 要求项 | 招标要求 | 响应承诺 |",
+            "|---:|---|---|---|",
+            *doc_rows,
+        ]))
+
+    blocks.extend([checklist, evidence_table])
+
+    return "\n\n".join(blocks)
 
 
 class BidGenerationState(TypedDict):
@@ -503,11 +571,13 @@ class BidGeneratorAgent:
             # 找到对应的采购包
             package = next((p for p in tender.packages if p.package_id == package_id), None)
             if not package:
+                logger.warning("包隔离检查：package_id=%s 不存在于 tender.packages", package_id)
                 continue
 
             # 找到对应的产品
             product = products.get(package_id)
             if not product:
+                logger.warning("包隔离检查：package_id=%s 无对应产品", package_id)
                 continue
 
             # 分阶段生成：1) 表格 2) 说明文字
@@ -719,7 +789,10 @@ class BidGeneratorAgent:
         }
 
     def finalize_bid(self, state: BidGenerationState) -> dict[str, Any]:
-        """完成投标文件生成，添加目录和封面"""
+        """完成投标文件生成，添加目录和封面。
+
+        同时生成 internal（母版，允许待核实/待补证）和 external（可外发）两个版本。
+        """
         logger.info("完成投标文件组装")
 
         tender = state["tender_doc"]

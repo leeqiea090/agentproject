@@ -1,0 +1,607 @@
+from __future__ import annotations
+
+import logging
+
+import app.services.one_click_generator.common as _common
+import app.services.one_click_generator.response_tables as _response_tables
+import app.services.evidence_binder as _evidence_binder
+import app.services.requirement_processor as _requirement_processor
+
+logger = logging.getLogger(__name__)
+
+def __reexport_all(module) -> None:
+    for name, value in vars(module).items():
+        if name.startswith("__"):
+            continue
+        globals()[name] = value
+
+for _module in (_common, _response_tables, _evidence_binder, _requirement_processor,):
+    __reexport_all(_module)
+
+del _module
+def _classify_config_item(name: str) -> str:
+    """按关键词对配置项进行类别归类。
+
+    增强分类：核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料
+    """
+    n = name.strip()
+    if any(k in n for k in ("主机", "整机", "仪器", "设备", "分析仪", "检测仪", "模块", "单元")):
+        return "核心模块"
+    if any(k in n for k in ("软件", "系统", "程序", "平台", "中间件")):
+        return "配套软件"
+    if any(k in n for k in ("试剂", "耗材", "液", "管路", "滤芯", "滤器", "消耗品", "墨盒", "色带")):
+        return "初始耗材"
+    if any(k in n for k in ("说明书", "文件", "手册", "合格证", "报告", "彩页", "装箱单", "保修卡")):
+        return "随机文件"
+    if any(k in n for k in ("安装", "培训", "调试", "指导", "服务")):
+        return "安装/培训资料"
+    if any(k in n for k in ("工具", "扳手", "螺丝", "钥匙")):
+        return "随机工具"
+    if any(k in n for k in ("附件", "配件", "接头", "适配", "支架", "台车", "推车", "底座", "托盘")):
+        return "标准附件"
+    if any(k in n for k in ("电源线", "数据线", "连接线", "电缆", "网线")):
+        return "标准附件"
+    if any(k in n for k in ("UPS", "稳压", "电源", "不间断")):
+        return "标准附件"
+    return "标准附件"
+
+
+def _config_dedup_tokens(name: str) -> set[str]:
+    """提取配置项名称的 token 集合用于 Jaccard 去重。"""
+    return {t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", name.strip()) if len(t) >= 2}
+
+
+def _extract_configuration_items(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    *,
+    normalized_result: dict[str, Any] | None = None,
+) -> list[tuple[str, str, str, str]]:
+    """提取配置项。
+
+    优先从 normalized_result 中提取 category='config_requirement' 的条目，
+    再用关键词兜底扫描。
+    """
+    # ── 优先：从归一化结果按 ClauseCategory 过滤 ──
+    structured_config = _structured_requirements_for_package(
+        normalized_result, pkg.package_id, category_filter="config_requirement",
+    ) if normalized_result else []
+
+    parsed_items: list[tuple[str, str, str, str]] = []
+    _seen_names: set[str] = set()
+
+    for req in structured_config:
+        name = _safe_text(req.get("param_name") or req.get("parameter_name"), "")
+        if not name or name in _seen_names:
+            continue
+        _seen_names.add(name)
+        unit = _safe_text(req.get("unit"), "项")
+        qty = _safe_text(req.get("threshold"), "1")
+        if not qty or not qty.replace(".", "").isdigit():
+            qty = "1"
+        remark = _classify_config_item(name)
+        parsed_items.append((name, unit, qty, remark))
+
+    # ── 兜底：关键词匹配提取（仅在结构化结果不足时）──
+    requirements = _effective_requirements(pkg, tender_raw)
+
+    for key, val in requirements:
+        if not any(marker in key for marker in _CONFIG_REQUIREMENT_KEYS):
+            continue
+        fragments = [frag.strip() for frag in re.split(r"[，,；;、]", val) if frag.strip()]
+        for fragment in fragments:
+            normalized = _normalize_requirement_line(fragment)
+            if not normalized:
+                continue
+            match = re.match(
+                r"^(?P<name>.+?)(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>台|套|个|把|本|件|组|副|支|块|张|台套)?$",
+                normalized,
+            )
+            if match:
+                name = match.group("name").strip(" ：:")
+                qty = match.group("qty")
+                unit = match.group("unit") or "项"
+            else:
+                name = normalized.strip(" ：:")
+                qty = "1"
+                unit = "项"
+
+            if not name:
+                continue
+
+            remark = _classify_config_item(name)
+            parsed_items.append((name, unit, qty, remark))
+
+    config_scope = _extract_package_configuration_scope_text(pkg, tender_raw)
+    if config_scope:
+        unit_pattern = "|".join(re.escape(unit) for unit in _CONFIG_ITEM_UNITS)
+        for raw_line in config_scope.splitlines():
+            normalized_line = _normalize_requirement_line(raw_line)
+            normalized_line = re.sub(
+                r"^(?:装箱配置单|装箱配置|配置清单|设备配置与配件|设备配置|配置与配件|主要配置|标准配置)[:：]?\s*",
+                "",
+                normalized_line,
+            ).strip(" ：:;；,，。")
+            if not normalized_line or _contains_any(normalized_line, _CONFIG_EXIT_HINTS):
+                continue
+
+            fragments = [frag.strip() for frag in re.split(r"[；;、,，]", normalized_line) if frag.strip()]
+            for fragment in fragments:
+                normalized = _normalize_requirement_line(fragment)
+                if not normalized or _contains_any(normalized, _CONFIG_EXIT_HINTS):
+                    continue
+                if "|" in normalized:
+                    cells = [cell.strip() for cell in normalized.split("|") if cell.strip()]
+                    if not cells or any(cell in {"序号", "配置名称", "名称", "数量", "单位", "备注"} for cell in cells):
+                        continue
+                    if cells and re.fullmatch(r"\d+", cells[0]):
+                        cells = cells[1:]
+                    normalized = " ".join(cells[:4]).strip()
+                if not normalized:
+                    continue
+
+                match = re.match(
+                    rf"^(?P<name>.+?)(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>{unit_pattern})(?:\s|$)",
+                    normalized,
+                )
+                if match:
+                    name = match.group("name").strip(" ：:")
+                    qty = match.group("qty")
+                    unit = match.group("unit")
+                else:
+                    name = normalized.strip(" ：:")
+                    qty = "1"
+                    unit = "项"
+
+                if not name or len(name) < 2 or _contains_any(name, _CONFIG_SECTION_HINTS):
+                    continue
+
+                remark = _classify_config_item(name)
+                parsed_items.append((name, unit, qty, remark))
+
+    # 智能去重：基于 token Jaccard 相似度而非简单子串匹配
+    deduped: list[tuple[str, str, str, str]] = []
+    deduped_token_sets: list[set[str]] = []
+    for item in parsed_items:
+        norm_name = re.sub(r"[\s，,。；;：:]+$", "", item[0]).strip()
+        if not norm_name:
+            continue
+        item_tokens = _config_dedup_tokens(norm_name)
+        is_dup = False
+        for existing_item, existing_tokens in zip(deduped, deduped_token_sets):
+            if not item_tokens or not existing_tokens:
+                continue
+            intersection = item_tokens & existing_tokens
+            union = item_tokens | existing_tokens
+            jaccard = len(intersection) / len(union) if union else 0
+            if jaccard >= 0.8 and item[1] == existing_item[1]:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+        deduped.append(item)
+        deduped_token_sets.append(item_tokens)
+
+    # Config pollution cleaning — remove non-config items that leaked through boundary detection
+    cleaned = _clean_config_items(deduped, pkg.package_id)
+
+    # ── 6大类别兜底：确保每个类别至少有一个占位行 ──
+    _REQUIRED_CONFIG_CATEGORIES = {
+        "核心模块": (f"{pkg.item_name}主机", "台", "1", "核心模块；[TODO:待补型号规格]"),
+        "标准附件": ("随机附件及工具", "套", "1", "标准附件；[TODO:待补附件清单]"),
+        "配套软件": ("操作/分析软件", "套", "1", "配套软件；[TODO:待补软件名称及版本]"),
+        "随机文件": ("技术文件（合格证/说明书/保修卡）", "套", "1", "随机文件；[TODO:待补文件清单]"),
+        "安装/培训资料": ("安装调试及培训服务", "项", "1", "安装/培训资料；[TODO:待补培训计划]"),
+        "初始耗材": ("初始运行耗材", "套", "1", "初始耗材；[TODO:待补耗材清单]"),
+    }
+    present_categories = {_classify_config_item(item[0]) for item in cleaned}
+    for category, default_item in _REQUIRED_CONFIG_CATEGORIES.items():
+        if category not in present_categories:
+            cleaned.append(default_item)
+
+    return cleaned
+
+
+def _clean_config_items(
+    raw_config_items: list[tuple[str, str, str, str]],
+    package_id: str = "",
+) -> list[tuple[str, str, str, str]]:
+    """Config Cleaner: 统一的配置项清理规则。
+
+    清理规则:
+    1. 过滤表头噪音 (序号、配置名称等表头文字)
+    2. 过滤模板说明行 (如"按招标文件要求"、"详见附件")
+    3. 过滤重复项 (基于 Jaccard 相似度二次去重)
+    4. 过滤跨包污染项 (包含其他包号)
+    5. 过滤非配置内容 (评分标准、商务条款等)
+    6. 过滤纯数字/纯符号/过短项
+    """
+    _CONFIG_POLLUTION_TOKENS = (
+        "评分标准", "评分办法", "商务条款", "合同条款", "投标人须知",
+        "质保期", "售后服务", "付款方式", "验收标准", "违约责任",
+        "评审因素", "评审办法", "评审标准", "投标有效期", "履约保证金",
+        "包装要求", "运输要求", "保险要求", "技术参数", "技术要求",
+        "采购需求", "性能要求", "参数要求",
+    )
+
+    _TABLE_HEADER_TOKENS = (
+        "序号", "配置名称", "名称", "数量", "单位", "备注", "说明", "规格",
+        "品牌", "型号", "产地", "价格", "小计", "合计", "货物名称",
+        "配置项", "分类", "用途", "功能描述",
+    )
+
+    _TEMPLATE_STATEMENT_PATTERNS = (
+        "按招标文件", "按采购文件", "详见招标文件", "详见采购文件",
+        "见附件", "见清单", "参见", "如下", "以下",
+        "按招标文件配置要求", "详见技术要求", "按采购需求",
+    )
+
+    cleaned: list[tuple[str, str, str, str]] = []
+    seen_token_sets: list[set[str]] = []
+
+    for item in raw_config_items:
+        name, unit, qty, remark = item
+
+        # 规则1: 过滤表头
+        if name.strip() in _TABLE_HEADER_TOKENS:
+            continue
+
+        # 规则2: 过滤模板说明行
+        if any(pattern in name for pattern in _TEMPLATE_STATEMENT_PATTERNS):
+            continue
+
+        # 规则3: 过滤污染内容
+        if any(token in name for token in _CONFIG_POLLUTION_TOKENS):
+            continue
+
+        # 规则4: 过滤跨包污染 (包含"包X"但不是当前包)
+        if package_id:
+            other_package_pattern = r"包\s*(\d+)"
+            matches = re.findall(other_package_pattern, name)
+            if matches and all(match != package_id for match in matches):
+                continue
+
+        # 规则5: 最小长度检查
+        if len(name) < 2:
+            continue
+
+        # 规则6: 纯数字或纯符号
+        if re.fullmatch(r"[\d\s\-_]+", name) or re.fullmatch(r"[^\u4e00-\u9fa5\w]+", name):
+            continue
+
+        # 规则7: 二次 Jaccard 去重（防止上游遗漏）
+        item_tokens = {t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", name.strip()) if len(t) >= 2}
+        is_dup = False
+        for existing_tokens in seen_token_sets:
+            if not item_tokens or not existing_tokens:
+                continue
+            intersection = item_tokens & existing_tokens
+            union = item_tokens | existing_tokens
+            if union and len(intersection) / len(union) >= 0.85:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+
+        cleaned.append(item)
+        seen_token_sets.append(item_tokens)
+
+    return cleaned
+
+
+def _profile_config_items(product_profile: dict[str, Any] | None) -> list[tuple[str, str, str, str]]:
+    """从产品 profile 提取配置项，覆盖6大类别：
+    核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料
+    """
+    if not product_profile:
+        return []
+
+    structured_items = product_profile.get("config_items") or []
+    parsed: list[tuple[str, str, str, str]] = []
+    for item in structured_items:
+        if not isinstance(item, dict):
+            continue
+        name = _as_text(item.get("配置项") or item.get("name") or item.get("item_name") or item.get("名称"))
+        if not name:
+            continue
+        unit = _as_text(item.get("单位") or item.get("unit") or "项")
+        qty = _as_text(item.get("数量") or item.get("qty") or item.get("quantity") or "1")
+        desc = _as_text(item.get("说明") or item.get("description") or item.get("remark") or "")
+        remark = _classify_config_item(name)
+        if desc:
+            remark = f"{remark}；{desc}"
+        parsed.append((name, unit, qty, remark))
+
+    # 从 technical_specs 补充可能的配置项（如果 config_items 不够丰富）
+    tech_specs = product_profile.get("technical_specs") or {}
+    existing_names = {item[0].strip() for item in parsed}
+    _CONFIG_HINT_KEYS = ("配置", "配备", "含", "包含", "包括", "标配", "选配", "附件")
+    for key, val in tech_specs.items():
+        val_str = str(val)
+        if any(hint in key for hint in _CONFIG_HINT_KEYS) or any(hint in val_str for hint in _CONFIG_HINT_KEYS):
+            if key.strip() not in existing_names:
+                remark = _classify_config_item(key)
+                parsed.append((key, "项", "1", f"{remark}；{val_str}"))
+                existing_names.add(key.strip())
+
+    # 确保覆盖基本类别 — 如果没有随机文件，从 evidence_refs 补充
+    category_present = {_classify_config_item(item[0]) for item in parsed}
+    evidence_refs = product_profile.get("evidence_refs") or []
+    if "随机文件" not in category_present:
+        for ref in evidence_refs:
+            if isinstance(ref, dict):
+                file_name = _as_text(ref.get("file_name", ""))
+                if file_name and file_name not in existing_names:
+                    parsed.append((file_name, "份", "1", "随机文件"))
+                    existing_names.add(file_name)
+
+    return _clean_config_items(parsed)
+
+
+def _build_configuration_table(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    product: Any = None,
+    *,
+    product_profile: dict[str, Any] | None = None,
+    normalized_result: dict[str, Any] | None = None,
+) -> str:
+    """构建双层配置表：第一层配置明细表 + 第二层配置功能描述表。"""
+    # ── 第一层：详细配置明细表（含是否标配、用途说明）──
+    lines = [
+        "### （二-A）详细配置明细表",
+        "| 序号 | 配置名称 | 单位 | 数量 | 是否标配 | 用途说明 | 备注 |",
+        "|---:|---|---|---:|---|---|---|",
+    ]
+
+    # Build product identity header if product is available
+    product_identity_lines: list[str] = []
+    if product is not None:
+        p_name = _as_text(getattr(product, "product_name", ""))
+        p_model = _as_text(getattr(product, "model", ""))
+        p_mfr = _as_text(getattr(product, "manufacturer", ""))
+        p_origin = _as_text(getattr(product, "origin", ""))
+        if p_name or p_model or p_mfr:
+            identity_parts = []
+            if p_mfr:
+                identity_parts.append(f"品牌/厂家：{p_mfr}")
+            if p_model:
+                identity_parts.append(f"型号：{p_model}")
+            if p_origin:
+                identity_parts.append(f"产地：{p_origin}")
+            product_identity_lines.append(
+                f"| 1 | {p_name or pkg.item_name}主机 | 台 | {_infer_package_quantity(pkg, tender_raw)} | 是 | 核心设备主机 | {'；'.join(identity_parts) if identity_parts else '核心设备'} |"
+            )
+
+    config_items = _profile_config_items(product_profile)
+    if not config_items:
+        config_items = _extract_configuration_items(pkg, tender_raw, normalized_result=normalized_result)
+    if not config_items and not product_identity_lines:
+        quantity = _infer_package_quantity(pkg, tender_raw)
+        lines.extend(
+            [
+                f"| 1 | {pkg.item_name}主机 | 台 | {quantity} | 是 | 核心设备 | 核心设备 |",
+                "| 2 | 随机附件及工具 | 套 | 1 | 是 | 设备运维保障 | 按招标文件配置要求 |",
+                "| 3 | 技术文件（合格证/说明书等） | 套 | 1 | 是 | 操作指导与合规文件 | 交货时随货提供 |",
+            ]
+        )
+        return "\n".join(lines)
+
+    idx = 1
+    if product_identity_lines:
+        lines.extend(product_identity_lines)
+        idx = 2
+
+    # 收集配置项描述信息，用于第二层
+    config_descriptions: list[tuple[str, str, str]] = []  # (name, usage, remark)
+
+    for name, unit, qty, remark in config_items:
+        # Enhance remark with product spec value if available
+        matched_spec = _fuzzy_spec_lookup(product, name) if product else ""
+        usage = _infer_config_usage(name)
+        is_standard = "是" if _is_standard_config(name) else "选配"
+
+        if matched_spec:
+            remark_full = f"{remark}；投标产品：{matched_spec}"
+        else:
+            remark_full = remark
+
+        lines.append(f"| {idx} | {_markdown_cell(name)} | {unit} | {qty} | {is_standard} | {usage} | {remark_full} |")
+        config_descriptions.append((name, usage, remark_full))
+        idx += 1
+
+    # ── 第二层：配置功能描述章节 ──
+    desc_lines = [
+        "",
+        "### （二-B）配置功能描述",
+        "",
+    ]
+    p_name = _as_text(getattr(product, "product_name", "")) if product else pkg.item_name
+    for name, usage, remark in config_descriptions:
+        desc_lines.append(f"**{name}**")
+        desc_lines.append(f"- 用途说明：{usage}")
+        desc_lines.append(f"- 在{p_name}设备运行中的作用：{_infer_config_role(name, p_name)}")
+        if any(kw in name for kw in ("软件", "系统", "模块", "程序")):
+            desc_lines.append("- 涉及安装/培训：是，需安装调试后进行操作培训")
+        elif any(kw in name for kw in ("试剂", "耗材")):
+            desc_lines.append("- 涉及验收：是，需核对品名、规格、有效期")
+        desc_lines.append("")
+
+    lines.extend(desc_lines)
+    return "\n".join(lines)
+
+
+def _is_standard_config(name: str) -> bool:
+    """判断配置项是否为标配。"""
+    n = name.strip()
+    if any(k in n for k in ("主机", "整机", "仪器", "设备", "分析仪", "检测仪", "说明书", "合格证", "电源线")):
+        return True
+    if any(k in n for k in ("选配", "可选", "升级", "扩展")):
+        return False
+    return True
+
+
+def _infer_config_usage(name: str) -> str:
+    """根据配置名称推断用途说明。"""
+    n = name.strip()
+    if any(k in n for k in ("主机", "整机", "仪器", "设备", "分析仪", "检测仪")):
+        return "核心检测/分析设备"
+    if any(k in n for k in ("软件", "系统", "模块", "程序")):
+        return "数据处理/分析/管理功能"
+    if any(k in n for k in ("试剂", "耗材", "液", "管路", "滤芯")):
+        return "日常运行消耗品"
+    if any(k in n for k in ("说明书", "文件", "手册", "合格证", "彩页")):
+        return "操作指导与合规文件"
+    if any(k in n for k in ("工具", "扳手", "螺丝", "钥匙")):
+        return "设备维护保障工具"
+    if any(k in n for k in ("附件", "配件", "接头", "适配", "支架", "台车")):
+        return "设备功能扩展/辅助配件"
+    if any(k in n for k in ("电源线", "数据线", "连接线", "电缆", "网线")):
+        return "设备连接/供电保障"
+    if any(k in n for k in ("UPS", "稳压", "电源", "不间断")):
+        return "设备电源稳定保障"
+    return "按招标文件配置要求提供"
+
+
+def _infer_config_role(name: str, product_name: str) -> str:
+    """推断配置项在设备中的功能角色。"""
+    n = name.strip()
+    if any(k in n for k in ("主机", "整机", "仪器", "设备")):
+        return f"作为{product_name}的核心运行单元，承载主要检测/分析功能"
+    if any(k in n for k in ("软件", "系统", "模块")):
+        return f"为{product_name}提供数据采集、分析和管理支持，是设备智能化运行的关键组件"
+    if any(k in n for k in ("试剂", "耗材")):
+        return f"为{product_name}日常运行提供必需消耗品，直接影响检测结果准确性"
+    if any(k in n for k in ("UPS", "稳压", "电源")):
+        return f"为{product_name}提供稳定电源保障，防止意外断电导致数据丢失或设备损坏"
+    if any(k in n for k in ("附件", "配件", "支架")):
+        return f"辅助{product_name}完成特定功能或扩展应用场景"
+    return f"配合{product_name}正常运行使用"
+
+
+def _build_main_parameter_table(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    product: Any = None,
+    *,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profile: dict[str, Any] | None = None,
+) -> str:
+    lines = [
+        f"### 包{pkg.package_id}：{pkg.item_name}",
+        "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
+        "|---:|---|---|---|---|",
+    ]
+
+    requirement_rows, total_requirements = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+    )
+    if not requirement_rows:
+        lines.append(f"| 1 | 核心技术参数 | 详见招标文件 | {_PENDING_BIDDER_RESPONSE} | 待核实 |")
+        return "\n".join(lines)
+
+    for idx, row in enumerate(requirement_rows, start=1):
+        note = _safe_text(
+            row.get("deviation_status"),
+            "无偏离" if row.get("has_real_response") else "待核实",
+        )
+        lines.append(
+            f"| {idx} | {_markdown_cell(str(row['key']))} | {_markdown_cell(str(row['requirement']))} | "
+            f"{_markdown_cell(str(row['response']))} | {note} |"
+        )
+
+    if total_requirements > len(requirement_rows):
+        lines.append(f"|  | 其余参数 | 详见附录参数表 | {_PENDING_BIDDER_RESPONSE} | 待核实 |")
+
+    return "\n".join(lines)
+
+
+def _build_response_checklist_table(
+    pkg: ProcurementPackage,
+    mapped_count: int,
+    total_requirements: int,
+    requirement_rows: list[dict[str, Any]] | None = None,
+) -> str:
+    real_response_count = 0
+    if requirement_rows:
+        real_response_count = sum(1 for r in requirement_rows if r.get("has_real_response"))
+
+    if total_requirements <= 0:
+        evidence_result = "未提取到结构化参数，已保留待核实框架"
+        evidence_status = "待补证"
+        param_conclusion = "未提取到结构化参数，待人工补充"
+        param_status = "待补实参"
+    elif real_response_count == total_requirements:
+        evidence_result = f"已完成 {mapped_count}/{total_requirements} 项招标原文映射，已绑定投标方证据"
+        evidence_status = "已完成"
+        param_conclusion = f"已证实 {real_response_count}/{total_requirements} 项，全部已填入投标产品实参"
+        param_status = "已完成"
+    elif real_response_count > 0:
+        evidence_result = f"已完成 {mapped_count}/{total_requirements} 项招标原文映射，部分已绑定投标方证据"
+        evidence_status = "部分完成"
+        param_conclusion = f"已证实 {real_response_count}/{total_requirements} 项，其余 {total_requirements - real_response_count} 项待补实参"
+        param_status = "部分完成"
+    else:
+        evidence_result = f"已完成 {mapped_count}/{total_requirements} 项招标原文映射，投标方证据待补"
+        evidence_status = "待补证"
+        param_conclusion = "已形成逐条响应框架，待填入投标产品实参"
+        param_status = "待补实参"
+
+    lines = [
+        "### （三）技术响应检查清单",
+        "| 序号 | 校验项 | 响应结论 | 证据载体 | 校验状态 |",
+        "|---:|---|---|---|---|",
+        f"| 1 | 关键技术参数逐条响应 | {param_conclusion} | 技术偏离表 | {param_status} |",
+        "| 2 | 配置清单完整性 | 已按招标文件配置项展开列示，待匹配投标型号 | 配置明细表 | 待复核 |",
+        "| 3 | 交付与培训要求 | 已保留响应框架，待结合投标方案复核 | 报价书与服务方案 | 待复核 |",
+        "| 4 | 质保与售后要求 | 已保留服务承诺框架，待补投标方细节 | 售后服务方案 | 待复核 |",
+        f"| 5 | 技术条款证据映射 | {evidence_result} | 技术条款证据映射表 | {evidence_status} |",
+    ]
+    return "\n".join(lines)
+
+
+def _build_evidence_mapping_table(
+    pkg: ProcurementPackage,
+    requirement_rows: list[dict[str, Any]],
+    total_requirements: int,
+) -> str:
+    lines = [
+        "### （四）技术条款证据映射表",
+        "| 序号 | 技术参数项 | 证据来源 | 原文片段 | 应用位置 |",
+        "|---:|---|---|---|---|",
+    ]
+
+    if not requirement_rows:
+        lines.append("| 1 | 核心技术参数 | 结构化解析结果 / 待补投标方证据 | 未提取到可映射原文片段，需人工复核原文并补齐投标方证据 | 技术偏离表第1行 |")
+        return "\n".join(lines)
+
+    for idx, row in enumerate(requirement_rows, start=1):
+        has_real = row.get("has_real_response", False)
+        bidder_ev = _safe_text(row.get("bidder_evidence"), "")
+        bidder_source = _safe_text(row.get("bidder_evidence_source"), "")
+        tender_quote = _safe_text(row.get("tender_quote"), "")
+        bidder_page = row.get("bidder_evidence_page")
+        if has_real and bidder_ev:
+            page_text = f"（第{bidder_page}页）" if bidder_page is not None else ""
+            source_text = _markdown_cell(bidder_source or _safe_text(row.get("evidence_source"), "投标方资料"))
+            quote_text = f"{_markdown_cell(bidder_ev)}{page_text}"
+            if tender_quote:
+                quote_text = f"{quote_text}；{_markdown_cell(tender_quote)}"
+        else:
+            source_text = f"{_markdown_cell('招标原文')} / 待补投标方证据"
+            quote_text = f"{_markdown_cell(tender_quote or _safe_text(row.get('evidence_quote'), '未定位到招标原文片段'))}；投标方证据待补充"
+        lines.append(
+            f"| {idx} | {_markdown_cell(str(row['key']))} | {source_text} | "
+            f"{quote_text} | 技术偏离表第{idx}行 |"
+        )
+
+    if total_requirements > len(requirement_rows):
+        lines.append("|  | 其余参数项 | 招标原文 / 待补投标方证据 | 详见延伸条款，需人工补充映射与投标方证据 | 技术偏离表后续行 |")
+
+    return "\n".join(lines)
