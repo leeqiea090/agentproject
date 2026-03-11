@@ -12,11 +12,12 @@ from pydantic import BaseModel, Field
 
 
 class ClauseCategory(str, Enum):
-    """条款分类枚举 — 8类细分，取代原先笼统的 '技术类'。"""
+    """条款分类枚举 — 9类细分，取代原先笼统的 '技术类'。"""
     technical_requirement = "technical_requirement"
     config_requirement = "config_requirement"
     service_requirement = "service_requirement"
     acceptance_requirement = "acceptance_requirement"
+    documentation_requirement = "documentation_requirement"
     commercial_requirement = "commercial_requirement"
     compliance_note = "compliance_note"
     attachment_requirement = "attachment_requirement"
@@ -25,8 +26,10 @@ class ClauseCategory(str, Enum):
 
 class DocumentMode(str, Enum):
     """文档目标模式 — 决定生成策略。"""
-    single_package = "single_package"       # 单包实装稿
-    multi_package_draft = "multi_package_draft"  # 多包底稿模式
+    single_package = "single_package"                     # 单包实装稿（兼容旧值）
+    single_package_deep_draft = "single_package_deep_draft"  # 单包深写模式（默认）
+    multi_package_master_draft = "multi_package_master_draft"  # 多包总母版底稿
+    multi_package_draft = "multi_package_draft"            # 多包底稿（兼容旧值）
 
 
 class DraftLevel(str, Enum):
@@ -113,14 +116,20 @@ class ProductProfile(BaseModel):
 
 
 class ValidationGate(BaseModel):
-    """硬校验门 — 4 个硬拦截条件。"""
+    """硬校验门 — 7 个硬拦截条件。"""
     package_contamination_detected: bool = Field(default=False, description="是否检出包件污染")
     placeholder_count: int = Field(default=0, description="关键占位符数量")
     bid_evidence_coverage: float = Field(default=0.0, description="投标侧证据覆盖率（0~1）")
     table_category_mixing: bool = Field(default=False, description="是否检出表格分类混装")
+    snippet_truncation_count: int = Field(default=0, description="半截条目/截断片段数量")
+    anchor_pollution_rate: float = Field(default=0.0, description="锚点污染率（0~1）")
+    evidence_blank_rate: float = Field(default=0.0, description="证据页码空白率（0~1）")
     # 阈值
     placeholder_threshold: int = Field(default=0, description="外发模式允许的最大占位符数")
     evidence_coverage_threshold: float = Field(default=0.6, description="外发模式最低证据覆盖率")
+    snippet_truncation_threshold: int = Field(default=0, description="外发模式允许的最大截断片段数")
+    anchor_pollution_threshold: float = Field(default=0.05, description="外发模式允许的最大锚点污染率")
+    evidence_blank_threshold: float = Field(default=0.3, description="外发模式允许的最大证据空白率")
 
     def passes_external_gate(self) -> bool:
         """外发稿是否通过所有硬校验。"""
@@ -131,6 +140,12 @@ class ValidationGate(BaseModel):
         if self.bid_evidence_coverage < self.evidence_coverage_threshold:
             return False
         if self.table_category_mixing:
+            return False
+        if self.snippet_truncation_count > self.snippet_truncation_threshold:
+            return False
+        if self.anchor_pollution_rate > self.anchor_pollution_threshold:
+            return False
+        if self.evidence_blank_rate > self.evidence_blank_threshold:
             return False
         return True
 
@@ -144,6 +159,8 @@ class RegressionMetrics(BaseModel):
     placeholder_leakage: float = Field(default=0.0, description="占位符泄漏率（0~1）")
     config_detail_score: float = Field(default=0.0, description="配置详细度得分（0~1）")
     fact_density_per_page: float = Field(default=0.0, description="每页事实密度")
+    snippet_cleanliness_score: float = Field(default=0.0, description="原文片段清洁度（0~1，无拖尾/串邻=1）")
+    draft_usability_score: float = Field(default=0.0, description="底稿可用性得分（0~1，越接近人工底稿=1）")
     quality_warnings: list[str] = Field(default_factory=list, description="质量告警列表（超出阈值时自动生成）")
 
 
@@ -153,7 +170,7 @@ class BidGenerationResult(BaseModel):
     validation_gate: ValidationGate = Field(default_factory=ValidationGate, description="硬校验门结果")
     regression_metrics: RegressionMetrics = Field(default_factory=RegressionMetrics, description="回归指标")
     draft_level: DraftLevel = Field(default=DraftLevel.internal_draft, description="稿件等级")
-    document_mode: DocumentMode = Field(default=DocumentMode.multi_package_draft, description="文档模式")
+    document_mode: DocumentMode = Field(default=DocumentMode.single_package_deep_draft, description="文档模式")
 
 
 class IngestTextRequest(BaseModel):
