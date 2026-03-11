@@ -20,6 +20,15 @@ from app.services.requirement_processor import _is_truncated_name
 
 logger = logging.getLogger(__name__)
 
+# ── 设备禁止词（按包号定义）──
+_DEVICE_FORBIDDEN_BY_PACKAGE: dict[str, tuple[str, ...]] = {
+    "1": ("柯勒照明", "无限远校正光学系统", "激光器", "检测通道", "检测器", "PMT", "荧光补偿", "流速模式"),
+    "2": ("进口荧光显微镜", "柯勒照明", "无限远校正光学系统"),
+    "3": ("琼脂凝胶电泳法", "电泳槽", "染色槽", "电泳系统"),
+}
+
+_BAD_NAME_SUFFIXES = ("（", "(", "为", "可", "单机", "至少", "最低", "最高")
+
 _PLACEHOLDER_PATTERNS = (
     r"\[待填写\]",
     r"\[投标方公司名称\]",
@@ -319,8 +328,55 @@ def compute_validation_gate(
                 # 检测噪音标记残留
                 if any(m in snip for m in _dirty_markers):
                     dirty_count += 1
+                    continue
+                # 检测嵌套占位符
+                if "待补充（待补充" in snip or "待补充(待补充" in snip:
+                    dirty_count += 1
+                    continue
+                # 检测明显别包设备名
+                for other_pid, forbidden in _DEVICE_FORBIDDEN_BY_PACKAGE.items():
+                    if other_pid != pkg_id and any(t in snip for t in forbidden):
+                        dirty_count += 1
+                        break
         if total_bind_count > 0:
             snippet_dirty_rate = dirty_count / total_bind_count
+
+    # 10) 设备术语污染检测 — 如果当前包 requirement 命中禁止词
+    device_contamination_count = 0
+    if normalized_reqs:
+        for pkg_id, reqs in normalized_reqs.items():
+            forbidden = _DEVICE_FORBIDDEN_BY_PACKAGE.get(pkg_id, ())
+            if not forbidden:
+                continue
+            for req in reqs:
+                raw = req.raw_text or ""
+                if any(t in raw for t in forbidden):
+                    device_contamination_count += 1
+                    logger.warning("设备术语污染: 包%s req=%s 命中禁止词", pkg_id, req.param_name[:40])
+    if device_contamination_count > 0 and not package_contamination:
+        package_contamination = True
+        logger.warning("设备术语污染触发包件污染标记: %d 条", device_contamination_count)
+
+    # 11) 半截字段后缀检测 — param_name 以 _BAD_NAME_SUFFIXES 结尾
+    bad_name_count = 0
+    if normalized_reqs:
+        for pkg_reqs in normalized_reqs.values():
+            for req in pkg_reqs:
+                name = (req.param_name or "").strip()
+                if name and name.endswith(_BAD_NAME_SUFFIXES):
+                    bad_name_count += 1
+    if bad_name_count > 0:
+        snippet_truncation_count += bad_name_count
+        logger.warning("半截字段后缀检测: %d 条参数名以悬空后缀结尾", bad_name_count)
+
+    # 12) 项目元信息数量一致性
+    if tender and target_package_ids:
+        for pkg in _target_packages(tender, target_package_ids):
+            qty_str = str(pkg.quantity)
+            qty_hits = [line for line in full_text.splitlines() if qty_str in line and pkg.item_name in line]
+            if not qty_hits:
+                project_meta_anomaly_detected = True
+                logger.warning("数量一致性异常: 包%s 数量%s 未在正文中与条目名同行出现", pkg.package_id, qty_str)
 
     return ValidationGate(
         project_meta_anomaly_detected=project_meta_anomaly_detected,

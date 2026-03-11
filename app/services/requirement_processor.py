@@ -158,6 +158,45 @@ _UNIT_PATTERN = re.compile(
 
 _MATERIAL_KEYWORDS = ("★", "▲", "实质性", "不可偏离", "否决", "必须满足")
 
+# ── 设备禁止串入词：按设备类型定义不应出现在该包中的其他设备术语 ──
+_DEVICE_FORBIDDEN_BY_HINT: dict[str, tuple[str, ...]] = {
+    "电泳": ("柯勒照明", "无限远校正光学系统", "激光器", "检测通道", "检测器", "PMT", "荧光补偿", "流速模式"),
+    "特种蛋白": ("进口荧光显微镜", "柯勒照明", "无限远校正光学系统"),
+    "显微": ("琼脂凝胶电泳", "电泳槽", "染色槽", "电泳系统"),
+}
+
+_BAD_NAME_SUFFIXES = ("（", "(", "为", "可", "单机", "至少", "最低", "最高")
+
+
+def _is_bad_requirement_name(name: str) -> bool:
+    """过滤半截条目、悬空条目等不应进入主表的参数名。"""
+    stripped = (name or "").strip()
+    if not stripped:
+        return True
+    if stripped.endswith(_BAD_NAME_SUFFIXES):
+        return True
+    if len(stripped) <= 2:
+        return True
+    return False
+
+
+def _package_forbidden_terms(
+    package_item_name: str,
+    other_package_item_names: list[str] | None = None,
+) -> set[str]:
+    """根据当前包设备名和其他包设备名，返回禁止词集合。"""
+    forbidden: set[str] = set()
+    # 从设备禁止词表中匹配
+    for hint, terms in _DEVICE_FORBIDDEN_BY_HINT.items():
+        if hint in (package_item_name or ""):
+            forbidden.update(terms)
+    # 其他包的产品名 token 也加入禁止词
+    for other_name in (other_package_item_names or []):
+        for tok in _extract_match_tokens(other_name):
+            if len(tok) >= 3:
+                forbidden.add(tok)
+    return forbidden
+
 
 # ── Helper functions ──
 
@@ -626,6 +665,7 @@ def normalize_requirements_to_objects(
     requirements: list[tuple[str, str]],
     source_page: int = 0,
     other_package_item_names: list[str] | None = None,
+    package_item_name: str = "",
 ) -> list[NormalizedRequirement]:
     """将原子化后的 (key, value) 对转化为 NormalizedRequirement 对象。
 
@@ -633,6 +673,7 @@ def normalize_requirements_to_objects(
     - 自动分类 category（9 类 ClauseCategory）
     - 自动检测 is_material（实质性条款）
     - 跨包词命中直接判噪音
+    - 设备禁止词污染过滤
     - 半截条目名自动过滤
     - 填充 source_text（完整原文片段）
     """
@@ -643,9 +684,17 @@ def normalize_requirements_to_objects(
             if len(tok) >= 3:
                 _cross_pkg_tokens.append(tok)
 
+    # 构建设备禁止词
+    forbidden_terms = _package_forbidden_terms(package_item_name, other_package_item_names)
+
     results: list[NormalizedRequirement] = []
     for idx, (key, val) in enumerate(requirements, start=1):
         raw_text = f"{key}：{val}" if val else key
+
+        # 坏名过滤
+        if _is_bad_requirement_name(key):
+            logger.debug("坏名过滤: pkg%s req#%d key=%s", package_id, idx, key)
+            continue
 
         # 半截条目名过滤：括号未闭合、过短无意义
         if _is_truncated_name(key):
@@ -655,6 +704,11 @@ def normalize_requirements_to_objects(
         # 半截值过滤：值部分也被截断（如"检测器为""单机"）
         if val and _is_truncated_name(f"{key}：{val}"):
             logger.debug("半截值过滤: pkg%s req#%d raw=%s", package_id, idx, raw_text[:60])
+            continue
+
+        # 设备禁止词污染过滤
+        if forbidden_terms and any(tok in raw_text for tok in forbidden_terms):
+            logger.debug("设备污染过滤: pkg%s req#%d 命中禁止词, text=%s", package_id, idx, raw_text[:60])
             continue
 
         # 跨包词命中检测：如果含其他包产品名 token，直接标噪音

@@ -29,6 +29,42 @@ from app.services.requirement_processor import (
 logger = logging.getLogger(__name__)
 
 
+# ── 证据片段清洗工具 ──
+
+def _clean_excerpt(text: str) -> str:
+    """清洗脏嵌套和多余空白的证据片段。"""
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    cleaned = re.sub(r"待补充（待补充（.*?））", "待补充", cleaned)
+    cleaned = re.sub(r"待补充\(待补充\(.*?\)\)", "待补充", cleaned)
+    return cleaned[:220].strip()
+
+
+def _locate_requirement_block(
+    req: Any,
+    doc_blocks: list[DocumentBlock],
+) -> DocumentBlock | None:
+    """从当前包的 DocumentBlock 里找最匹配 req 的块，不用全文 find()。"""
+    candidates = [
+        b for b in doc_blocks
+        if not b.is_noise and (not b.package_id or b.package_id == req.package_id)
+    ]
+    # 精确匹配：param_name 出现在块文本中
+    hits = [b for b in candidates if req.param_name and req.param_name in b.text]
+    if hits:
+        return hits[0]
+    # 次选：source_text 出现在块文本中
+    if hasattr(req, "source_text") and req.source_text:
+        source_hits = [b for b in candidates if req.source_text in b.text]
+        if source_hits:
+            return source_hits[0]
+    # 模糊匹配：按 char_start 最近
+    if hasattr(req, "source_page") and req.source_page:
+        page_hits = [b for b in candidates if b.page == req.source_page]
+        if page_hits:
+            return page_hits[0]
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Phase 5: 文档目标判定 — 单包实装 vs 多包底稿
 # ═══════════════════════════════════════════════════════════════════
@@ -88,14 +124,14 @@ def build_tender_source_bindings(
     tender_raw: str,
     *,
     package_scoped_text: str = "",
+    doc_blocks: list[DocumentBlock] | None = None,
 ) -> list[TenderSourceBinding]:
     """A层：从招标原文中定位每条需求的来源位置。
 
-    优先在 package_scoped_text（单包范围文本）中搜索，避免跨包串取。
-    仅当 package_scoped_text 未命中时，才回退到 tender_raw。
+    优先用 doc_blocks（块级精确匹配），其次在 package_scoped_text（单包范围文本）中搜索。
+    仅当前两者均未命中时，才回退到 tender_raw。
     """
     bindings: list[TenderSourceBinding] = []
-    # 优先使用包范围文本，避免跨包污染
     primary_text = package_scoped_text or tender_raw
     for req in requirements:
         if req.package_id != package_id:
@@ -103,37 +139,45 @@ def build_tender_source_bindings(
         excerpt = ""
         char_start = 0
         char_end = 0
-        # 在包范围文本中搜索参数名，找不到再回退全文
-        search_key = req.param_name
-        pos = primary_text.find(search_key)
-        search_text = primary_text
-        if pos < 0 and package_scoped_text:
-            pos = tender_raw.find(search_key)
-            search_text = tender_raw
-        if pos >= 0:
-            char_start = max(0, pos - 20)
-            # 从 pos 向后找到当前句子结尾（句号/分号/换行），避免串到下一条
-            raw_end = pos + len(search_key) + 100
-            raw_end = min(len(search_text), raw_end)
-            candidate = search_text[pos + len(search_key):raw_end]
-            # 找最近的句子边界
-            for sep in ("\n", "。", "；", ";"):
-                sep_pos = candidate.find(sep)
-                if sep_pos >= 0 and sep_pos < 80:
-                    raw_end = pos + len(search_key) + sep_pos + 1
-                    break
-            char_end = min(len(search_text), raw_end)
-            excerpt = search_text[char_start:char_end].replace("\n", " ").strip()
-            excerpt = re.sub(r"\s+", " ", excerpt).strip()
-            # 清洗 excerpt：去除噪音尾巴和跨包内容
-            excerpt = _trim_evidence_snippet(excerpt, search_key)
+
+        # 优先使用 doc_blocks 精确定位
+        matched_block: DocumentBlock | None = None
+        if doc_blocks:
+            matched_block = _locate_requirement_block(req, doc_blocks)
+
+        if matched_block:
+            char_start = matched_block.char_start
+            char_end = matched_block.char_end
+            excerpt = _clean_excerpt(matched_block.text)
+        else:
+            # 回退：在包范围文本中搜索参数名
+            search_key = req.param_name
+            pos = primary_text.find(search_key)
+            search_text = primary_text
+            if pos < 0 and package_scoped_text:
+                pos = tender_raw.find(search_key)
+                search_text = tender_raw
+            if pos >= 0:
+                char_start = max(0, pos - 20)
+                raw_end = pos + len(search_key) + 100
+                raw_end = min(len(search_text), raw_end)
+                candidate = search_text[pos + len(search_key):raw_end]
+                for sep in ("\n", "。", "；", ";"):
+                    sep_pos = candidate.find(sep)
+                    if sep_pos >= 0 and sep_pos < 80:
+                        raw_end = pos + len(search_key) + sep_pos + 1
+                        break
+                char_end = min(len(search_text), raw_end)
+                excerpt = search_text[char_start:char_end].replace("\n", " ").strip()
+                excerpt = re.sub(r"\s+", " ", excerpt).strip()
+                excerpt = _trim_evidence_snippet(excerpt, search_key)
 
         bindings.append(TenderSourceBinding(
             package_id=package_id,
             requirement_id=req.requirement_id,
-            source_page=req.source_page,
-            source_section="",
-            source_excerpt=excerpt,
+            source_page=matched_block.page if matched_block else req.source_page,
+            source_section=matched_block.section_title if matched_block else "",
+            source_excerpt=_clean_excerpt(excerpt),
             char_start=char_start,
             char_end=char_end,
         ))
@@ -194,14 +238,21 @@ def build_bid_evidence_bindings(
     """B层：从投标材料中定位每条需求的证据来源。"""
     bindings: list[BidEvidenceBinding] = []
     if not product:
-        # 无产品信息时，所有需求无证据
+        # 无产品信息时，预留"该补什么类型证据"的槽位
         for req in requirements:
             if req.package_id != package_id:
                 continue
+            # 根据需求类别推断应补证据类型
+            if req.category and "config" in str(req.category):
+                evidence_type = "brochure"
+            elif req.is_material:
+                evidence_type = "registration"
+            else:
+                evidence_type = "brochure"
             bindings.append(BidEvidenceBinding(
                 package_id=package_id,
                 requirement_id=req.requirement_id,
-                evidence_type="",
+                evidence_type=evidence_type,
                 file_name="",
                 file_page=0,
                 snippet="",
@@ -209,6 +260,7 @@ def build_bid_evidence_bindings(
                 evidence_page=0,
                 evidence_snippet="",
                 covers_requirement=False,
+                status="missing",
             ))
         return bindings
 

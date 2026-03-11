@@ -75,6 +75,7 @@ def generate_bid_sections(
         norm_reqs = normalize_requirements_to_objects(
             pkg.package_id, atomized,
             other_package_item_names=other_names,
+            package_item_name=pkg.item_name,
         )
         # 过滤掉噪音条款和跨包条款，不进入主表
         noise_count = sum(1 for r in norm_reqs if r.category == ClauseCategory.noise)
@@ -111,6 +112,7 @@ def generate_bid_sections(
         tender_bindings = build_tender_source_bindings(
             pkg.package_id, pkg_reqs, tender_raw,
             package_scoped_text=pkg_scope_text,
+            doc_blocks=doc_blocks,
         )
         # 用文档块的精确页码/章节覆盖粗估值
         tender_bindings = enrich_bindings_from_blocks(tender_bindings, doc_blocks)
@@ -219,6 +221,22 @@ def generate_bid_sections(
             break
 
         if heal_pass >= _MAX_HEAL_PASSES:
+            # ── 结构型错误直接 fail，不继续美化成待补稿 ──
+            structural_fail = (
+                gate.package_contamination_detected
+                or gate.table_category_mixing
+                or gate.snippet_truncation_count > gate.snippet_truncation_threshold
+                or gate.anchor_pollution_rate > gate.anchor_pollution_threshold
+                or gate.nested_placeholder_detected
+            )
+            if structural_fail and require_validation_pass:
+                raise ValueError(
+                    f"structural draft corruption: contamination={gate.package_contamination_detected}, "
+                    f"mixing={gate.table_category_mixing}, "
+                    f"truncation={gate.snippet_truncation_count}, "
+                    f"anchor_pollution={gate.anchor_pollution_rate:.2f}, "
+                    f"nested_placeholders={gate.nested_placeholder_detected}"
+                )
             sections = normalize_pending_draft_sections(sections)
             logger.warning(
                 "自愈已执行 %d 轮仍未通过硬校验，输出待补充底稿。原因: %s",

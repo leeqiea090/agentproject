@@ -207,12 +207,27 @@ class TenderParser:
         return tender_doc
 
     @staticmethod
+    def _find_next_package_start(lines: list[str], start_idx: int, current_package_id: str) -> int | None:
+        """从 start_idx 之后找到下一个不同采购包的起始行索引。"""
+        same_markers = (f"包{current_package_id}", f"第{current_package_id}包", f"{current_package_id}包")
+        for i in range(start_idx + 1, len(lines)):
+            line = lines[i].strip()
+            if not line:
+                continue
+            if re.search(r"包\s*\d+|第\s*\d+\s*包|\d+\s*包", line) and not any(
+                marker in line for marker in same_markers
+            ):
+                return i
+        return None
+
+    @staticmethod
     def _extract_package_scope(tender_text: str, package_id: str, item_name: str) -> str:
+        """按「当前包开始 → 下一包开始」切范围，找不到则返回空串。"""
         lines = tender_text.splitlines()
         if not lines:
-            return tender_text
+            return ""
 
-        item_tokens = [token for token in re.split(r"[，,、；;（）()\\s/]+", item_name) if len(token) >= 2]
+        item_tokens = [token for token in re.split(r"[，,、；;（）()\\s/]+", item_name or "") if len(token) >= 2]
         markers = (f"包{package_id}", f"第{package_id}包", f"{package_id}包")
         candidate_indexes: list[int] = []
 
@@ -224,7 +239,7 @@ class TenderParser:
                 candidate_indexes.append(idx)
 
         if not candidate_indexes:
-            return tender_text
+            return ""
 
         scopes: list[str] = []
         same_package_markers = (f"包{package_id}", f"第{package_id}包", f"{package_id}包")
@@ -240,38 +255,37 @@ class TenderParser:
                         break
                     start -= 1
 
-            end = idx + 1
-            while end < len(lines) and end - idx < 100:
-                following = lines[end].strip()
-                if following and re.search(r"包\s*\d+|第\s*\d+\s*包|\d+\s*包", following) and not any(
-                    marker in following for marker in same_package_markers
-                ):
-                    break
-                end += 1
-            scopes.append("\n".join(lines[start:end]).strip())
+            next_start = TenderParser._find_next_package_start(lines, idx, package_id)
+            end = next_start if next_start is not None else min(len(lines), idx + 120)
+            scope = "\n".join(lines[start:end]).strip()
+            if scope:
+                scopes.append(scope)
         return "\n".join(scope for scope in scopes if scope)
 
     @classmethod
     def _infer_package_quantity_from_text(cls, tender_text: str, package_id: str, item_name: str, current_quantity: int) -> int:
+        """数量只在当前包 scope 里找，找不到保留原值。"""
         scope = cls._extract_package_scope(tender_text, package_id, item_name)
+        if not scope.strip():
+            return max(1, current_quantity)
+
         patterns = (
             r"设备总台数\s*[:：;；]?\s*(\d+)\s*台",
             r"采购数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)?",
             r"数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)",
         )
 
-        for text in (scope, tender_text):
-            for raw_line in text.splitlines():
-                line = raw_line.strip()
-                if not line:
+        for raw_line in scope.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, line)
+                if not match:
                     continue
-                for pattern in patterns:
-                    match = re.search(pattern, line)
-                    if not match:
-                        continue
-                    quantity = int(match.group(1))
-                    if quantity > 0:
-                        return quantity
+                quantity = int(match.group(1))
+                if quantity > 0:
+                    return quantity
 
         return max(1, current_quantity)
 
@@ -420,7 +434,7 @@ class TenderParser:
                 f" 2) API Key 无权限 3) 模型名称不正确。"
             ) from e
 
-    def extract_technical_requirements(self, tender_text: str, package_id: str) -> dict[str, Any]:
+    def extract_technical_requirements(self, tender_text: str, package_id: str, item_name=None) -> dict[str, Any]:
         """
         针对特定采购包提取详细技术要求
 
@@ -466,7 +480,15 @@ class TenderParser:
 
         llm = self._ensure_parse_tokens(self.llm)
         chain = prompt | llm
-        response = chain.invoke({"tender_text": tender_text})
+        scope_text = self._extract_package_scope(tender_text, package_id, item_name)
+        if not scope_text.strip():
+            logger.warning("采购包%s 未解析到稳定范围，跳过技术参数补充提取", package_id)
+            return {}
+        response = chain.invoke({
+            "tender_text": scope_text,
+            "package_id": package_id,
+            "item_name": item_name,
+        })
         self._check_finish_reason(response, context=f"extract_tech_pkg{package_id}")
 
         try:

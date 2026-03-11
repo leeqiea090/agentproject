@@ -53,6 +53,21 @@ def _detect_block_type(line: str) -> str:
     return "paragraph"
 
 
+_PACKAGE_SCOPE_RESET_PREFIXES = ("附件", "附录", "目录", "资格性证明文件", "符合性承诺", "报价书", "报价一览表")
+
+
+def _should_reset_package_scope(text: str) -> bool:
+    """遇到特定章节标题时，清空当前 package_id 以避免错误继承。"""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if any(stripped.startswith(prefix) for prefix in _PACKAGE_SCOPE_RESET_PREFIXES):
+        return True
+    if re.match(r"^(附件|附录)\s*[一二三四五六七八九十\dⅠⅡⅢⅣⅤ]", stripped):
+        return True
+    return False
+
+
 def _is_noise_cell(text: str) -> bool:
     """判断单元格内容是否为噪音（表头说明、脚注、纯序号等）。"""
     stripped = text.strip()
@@ -181,6 +196,8 @@ def split_to_blocks(
         detected_package_id = _detect_package_hint(stripped)
         if detected_package_id:
             current_package_id = detected_package_id
+        elif _should_reset_package_scope(stripped):
+            current_package_id = ""
         package_hint = f"包{current_package_id}" if current_package_id else ""
 
         block_type = _detect_block_type(stripped)
