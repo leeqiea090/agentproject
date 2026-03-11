@@ -319,8 +319,9 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
                 cfg_idx += 1
             else:
                 # technical_requirement → 技术偏离表（仅技术参数）
+                model_name = product.model or "待补充（投标型号）"
                 tech_rows.append(
-                    f"| {tech_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(response_text)} | {deviation_status} | {_markdown_cell(evidence_text)} |"
+                    f"| {tech_idx} | {_markdown_cell(req_name)} | {_markdown_cell(req_text)} | {_markdown_cell(model_name)} | {_markdown_cell(response_text)} | {deviation_status} | {_markdown_cell(evidence_text)} | | |"
                 )
                 evidence_rows.append(
                     f"| {tech_idx} | {_markdown_cell(req_name)} | 招标技术条款 | {_markdown_cell(evidence_text)} | 技术偏离表第{tech_idx}行 |"
@@ -328,7 +329,7 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
                 tech_idx += 1
     else:
         tech_rows.append(
-            "| 1 | 核心技术参数 | 详见招标文件 | 待核实（未提取到结构化技术要求） | 待核实 | 招标条款+产品参数待人工补充 |"
+            "| 1 | 核心技术参数 | 详见招标文件 | 待补充（投标型号） | 待核实（未提取到结构化技术要求） | 待核实 | 招标条款+产品参数待人工补充 | | |"
         )
         evidence_rows.append("| 1 | 核心技术参数 | 招标技术条款 | 暂未匹配到产品参数，需补充证据 | 技术偏离表第1行 |")
 
@@ -339,8 +340,8 @@ def _build_structured_technical_block(package: Any, product: ProductSpecificatio
     deviation_table = "\n".join(
         [
             "#### 1) 技术偏离表",
-            "| 序号 | 参数项 | 招标要求 | 投标产品响应参数 | 偏离说明 | 证据映射 |",
-            "|---:|---|---|---|---|---|",
+            "| 序号 | 条款编号/参数项 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 备注 |",
+            "|---:|---|---|---|---|---|---|---|---|",
             *tech_rows,
         ]
     )

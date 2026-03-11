@@ -81,4 +81,5 @@ def test_structured_technical_block_keeps_unverified_items_pending() -> None:
     block = _build_structured_technical_block(package, product)
 
     assert "待核实（未匹配到已证实产品事实）" in block
-    assert "| 2 | 荧光通道 | ≥11 | 待核实（未匹配到已证实产品事实） | 待核实 |" in block
+    # 技术偏离表新增列：投标型号 + 页码 + 备注
+    assert "| 2 | 荧光通道 | ≥11 | X100 | 待核实（未匹配到已证实产品事实） | 待核实 |" in block

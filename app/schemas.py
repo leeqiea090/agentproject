@@ -41,6 +41,7 @@ class DraftLevel(str, Enum):
 
 class DocumentBlock(BaseModel):
     """可引用文档块 — 替代原始 chunk 纯文本。"""
+    doc_id: str = Field(default="", description="文档唯一标识，用于溯源")
     text: str = Field(description="块内文本内容")
     package_id: str = Field(default="", description="所属采购包 ID，未识别时为空")
     package_hint: str = Field(default="", description="所属采购包提示，如 '包1'")
@@ -75,6 +76,7 @@ class NormalizedRequirement(BaseModel):
     category: ClauseCategory = Field(default=ClauseCategory.technical_requirement, description="条款分类")
     is_material: bool = Field(default=False, description="是否为实质性条款（不可偏离）")
     needs_bid_fact: bool = Field(default=True, description="是否需要投标侧事实来响应")
+    needs_manual_confirmation: bool = Field(default=False, description="是否需要人工确认（拆分存疑/跨包/总括）")
     source_page: int = Field(default=0, description="来源页码")
     source_text: str = Field(default="", description="来源原文片段（完整句子，不截断）")
     source_clause_no: str = Field(default="", description="来源条款编号")
@@ -106,6 +108,10 @@ class BidEvidenceBinding(BaseModel):
     evidence_page: int = Field(default=0, description="证据页码别名")
     evidence_snippet: str = Field(default="", description="证据片段别名")
     covers_requirement: bool = Field(default=False, description="该证据是否充分覆盖需求")
+    status: str = Field(
+        default="missing",
+        description="证据绑定状态：missing（未绑定）/ candidate（候选待确认）/ confirmed（已确认）"
+    )
 
     @model_validator(mode="after")
     def _sync_alias_fields(self) -> BidEvidenceBinding:
@@ -121,6 +127,11 @@ class BidEvidenceBinding(BaseModel):
             self.snippet = self.evidence_snippet
         if not self.evidence_snippet and self.snippet:
             self.evidence_snippet = self.snippet
+        # 根据 covers_requirement 推断 status（向后兼容）
+        if self.status == "missing" and self.covers_requirement:
+            self.status = "confirmed"
+        elif self.status == "missing" and (self.file_name or self.snippet):
+            self.status = "candidate"
         return self
 
 
