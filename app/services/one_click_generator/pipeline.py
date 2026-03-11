@@ -156,9 +156,11 @@ def generate_bid_sections(
 
     sections = _apply_template_pollution_guard(sections)
 
-    # ── Step 4: 硬校验门 + 自愈循环 ──
-    #    如果检测到混装/污染，进行最多 _MAX_HEAL_PASSES 次清洗后重新校验
+    # ── Step 4: 硬校验 + 自愈循环 ──
+    #    生成 → 校验 → 如有可修复问题 → 修复 → 重新校验
+    #    最多 _MAX_HEAL_PASSES 次，直到通过或无法再修复
     _MAX_HEAL_PASSES = 3
+    gate = None
     for heal_pass in range(_MAX_HEAL_PASSES + 1):
         gate = compute_validation_gate(
             sections=sections,
@@ -167,27 +169,43 @@ def generate_bid_sections(
             target_package_ids=target_package_ids,
             mode=doc_mode,
         )
+        reasons = gate.failure_reasons()
         logger.info(
-            "硬校验门(pass=%d): contamination=%s, placeholders=%d, evidence_cov=%.1f%%, table_mixing=%s",
+            "硬校验(pass=%d): mixing=%s, contamination=%s, placeholders=%d, "
+            "evidence=%.1f%%, reasons=%s",
             heal_pass,
+            gate.table_category_mixing,
             gate.package_contamination_detected,
             gate.placeholder_count,
             gate.bid_evidence_coverage * 100,
-            gate.table_category_mixing,
+            reasons or "无",
         )
 
-        # 如果没有混装和污染，校验通过，退出循环
-        if not gate.table_category_mixing and not gate.package_contamination_detected:
+        # 没有可修复问题 → 退出循环
+        if not gate.has_fixable_issues():
+            if heal_pass > 0:
+                logger.info("自愈成功: 经 %d 轮修复后可修复问题已清除", heal_pass)
             break
 
-        # 已达最大修复次数，退出
+        # 达到上限 → 退出
         if heal_pass >= _MAX_HEAL_PASSES:
-            logger.warning("自愈循环已达 %d 次上限，仍有校验问题，降级为内部草稿", _MAX_HEAL_PASSES)
+            logger.warning(
+                "自愈循环达 %d 次上限仍有问题: %s，降级为内部草稿",
+                _MAX_HEAL_PASSES, reasons,
+            )
             break
 
-        # ── 自愈：清洗技术表中的非技术行 ──
-        logger.info("自愈 pass %d: 清洗技术表中的非技术条款", heal_pass + 1)
-        sections = _heal_table_mixing(sections)
+        # ── 自愈动作 ──
+        logger.info("自愈 pass %d: 修复 %s", heal_pass + 1, reasons)
+
+        # 修复1: 表格混装 → 从技术表移除非技术行
+        if gate.table_category_mixing:
+            sections = _heal_table_mixing(sections)
+
+        # 修复2: 包件污染 → 重新过滤（已在生成阶段做过包隔离，这里做文本级兜底）
+        if gate.package_contamination_detected and target_package_ids:
+            sections = _heal_package_contamination(sections, target_package_ids)
+
         sections = _apply_template_pollution_guard(sections)
 
     # ── Step 5: 稿件等级判定 & 双输出 ──

@@ -262,6 +262,18 @@ async def download_one_click_result(job_id: str):
     if job_info.get("status") != "completed":
         raise HTTPException(status_code=409, detail="任务尚未完成")
 
+    # 硬校验拦截：如果有可修复问题仍未通过，阻止下载
+    gate_data = job_info.get("validation_gate")
+    if gate_data:
+        from app.schemas import ValidationGate
+        gate = ValidationGate(**gate_data)
+        if gate.has_fixable_issues():
+            reasons = gate.failure_reasons()
+            raise HTTPException(
+                status_code=409,
+                detail=f"硬校验未通过，已阻断外发下载。问题: {'; '.join(reasons)}",
+            )
+
     output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
     if not output_file.exists():
         raise HTTPException(status_code=404, detail="生成文件不存在")

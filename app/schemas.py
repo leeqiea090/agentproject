@@ -155,6 +155,37 @@ class ValidationGate(BaseModel):
             return False
         return True
 
+    def has_fixable_issues(self) -> bool:
+        """是否存在可通过自愈修复的问题（混装、污染、截断）。
+
+        占位符和证据覆盖率不属于可自愈问题（需要外部数据补充）。
+        """
+        return (
+            self.table_category_mixing
+            or self.package_contamination_detected
+            or self.snippet_truncation_count > self.snippet_truncation_threshold
+            or self.anchor_pollution_rate > self.anchor_pollution_threshold
+        )
+
+    def failure_reasons(self) -> list[str]:
+        """返回当前未通过的校验项列表。"""
+        reasons: list[str] = []
+        if self.package_contamination_detected:
+            reasons.append("包件污染")
+        if self.table_category_mixing:
+            reasons.append("表格分类混装")
+        if self.placeholder_count > self.placeholder_threshold:
+            reasons.append(f"占位符过多({self.placeholder_count})")
+        if self.bid_evidence_coverage < self.evidence_coverage_threshold:
+            reasons.append(f"证据覆盖不足({self.bid_evidence_coverage:.0%})")
+        if self.snippet_truncation_count > self.snippet_truncation_threshold:
+            reasons.append(f"半截条目({self.snippet_truncation_count})")
+        if self.anchor_pollution_rate > self.anchor_pollution_threshold:
+            reasons.append(f"锚点污染({self.anchor_pollution_rate:.1%})")
+        if self.evidence_blank_rate > self.evidence_blank_threshold:
+            reasons.append(f"证据空白({self.evidence_blank_rate:.1%})")
+        return reasons
+
 
 class RegressionMetrics(BaseModel):
     """评测回归指标 — 衡量生成稿与标准标书的质量差距。

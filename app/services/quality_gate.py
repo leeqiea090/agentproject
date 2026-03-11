@@ -134,35 +134,35 @@ def compute_validation_gate(
         all_bindings.extend(pkg_bindings)
     evidence_cov = _compute_evidence_coverage(all_bindings)
 
-    # 4) 表格分类混装检测 — 检查最终输出中技术表是否混入非技术条款
-    #    通过扫描 sections 内容中的技术偏离表行来判断，而非仅检查归一化数据
+    # 4) 表格分类混装检测 — 只检查"技术偏离表"，不检查配置明细表
+    #    配置明细表合法包含培训/文件/耗材等项，不算混装
     table_mixing = False
-    _TECH_TABLE_HEADER_PATTERN = re.compile(r"技术偏离|详细配置明细")
+    _TECH_TABLE_START = re.compile(r"技术偏离")
+    _TECH_TABLE_END = re.compile(r"^#{2,}|^（二）|详细配置明细")
     for section in sections:
         in_tech_table = False
         for line in section.content.splitlines():
             stripped = line.strip()
-            if _TECH_TABLE_HEADER_PATTERN.search(stripped):
+            if _TECH_TABLE_START.search(stripped):
                 in_tech_table = True
                 continue
+            if in_tech_table and _TECH_TABLE_END.search(stripped):
+                in_tech_table = False
             if in_tech_table and stripped.startswith("#"):
                 in_tech_table = False
-            # 在技术表区域内检测混入的非技术条款关键词
+            # 在技术偏离表区域内检测混入的非技术条款关键词
             if in_tech_table and stripped.startswith("|"):
-                _svc_leak = any(k in stripped for k in ("售后", "质保", "维修", "保修", "培训", "安装调试"))
-                _doc_leak = any(k in stripped for k in ("说明书", "合格证", "使用手册", "操作手册"))
-                _compliance_leak = any(k in stripped for k in ("投标文件格式", "正本与副本", "装订成册", "签字确认"))
-                if _svc_leak or _doc_leak or _compliance_leak:
-                    # 排除表头行和证据列引用
-                    cells = [c.strip() for c in stripped.split("|") if c.strip()]
-                    if len(cells) >= 2:
-                        req_cell = cells[1] if len(cells) > 1 else ""
-                        # 如果条款本体（第二列）含非技术关键词，才视为混装
-                        if any(k in req_cell for k in ("售后", "质保", "维修", "保修", "培训",
-                                                         "安装调试", "说明书", "合格证",
-                                                         "投标文件格式", "正本与副本")):
-                            table_mixing = True
-                            logger.warning("表格分类混装检测：技术表中发现非技术条款行: %s", req_cell[:60])
+                cells = [c.strip() for c in stripped.split("|") if c.strip()]
+                if len(cells) >= 2:
+                    req_cell = cells[1] if len(cells) > 1 else ""
+                    # 跳过表头/分隔行
+                    if req_cell.startswith("---") or req_cell in ("招标要求", "参数项", "条款编号"):
+                        continue
+                    if any(k in req_cell for k in ("售后", "质保", "维修", "保修", "培训",
+                                                     "安装调试", "交付与培训", "说明书", "合格证",
+                                                     "技术文件（合格证", "投标文件格式", "正本与副本")):
+                        table_mixing = True
+                        logger.warning("表格分类混装检测：技术表中发现非技术条款行: %s", req_cell[:60])
 
     # 补充：基于归一化数据的静态混装检测（如果已做好分表，各 category 不应只有技术表）
     if not table_mixing and normalized_reqs:
@@ -340,13 +340,13 @@ def compute_regression_metrics(
                     break
     contamination_rate = contaminated / total_sections if total_sections > 0 else 0.0
 
-    # 3) table_category_mixing_rate — 基于最终输出检测
-    #    扫描技术偏离表区域，统计混入非技术行的比率
+    # 3) table_category_mixing_rate — 只扫描"技术偏离表"区域
     total_tech_table_rows = 0
     mixed_rows_in_tech = 0
-    _TECH_HDR = re.compile(r"技术偏离|详细配置明细")
-    _SVC_KW = ("售后", "质保", "维修", "保修", "培训", "安装调试", "技术支持", "巡检")
-    _DOC_KW = ("说明书", "合格证", "使用手册", "操作手册", "保修卡")
+    _TECH_HDR = re.compile(r"技术偏离")
+    _TECH_END = re.compile(r"^#{2,}|^（二）|详细配置明细")
+    _SVC_KW = ("售后", "质保", "维修", "保修", "培训", "安装调试", "技术支持", "巡检", "交付与培训")
+    _DOC_KW = ("说明书", "合格证", "使用手册", "操作手册", "保修卡", "技术文件（合格证")
     _CMP_KW = ("投标文件格式", "正本与副本", "装订成册", "签字确认")
     for section in sections:
         in_tech = False
@@ -355,6 +355,8 @@ def compute_regression_metrics(
             if _TECH_HDR.search(s):
                 in_tech = True
                 continue
+            if in_tech and _TECH_END.search(s):
+                in_tech = False
             if in_tech and s.startswith("#"):
                 in_tech = False
             if in_tech and s.startswith("|") and not s.startswith("|---") and not s.startswith("| 序号") and not s.startswith("| 条款编号"):
@@ -562,10 +564,11 @@ def _apply_template_pollution_guard(sections: list[BidDocumentSection]) -> list[
 
 
 # ── 自愈：技术表混装清洗 ──
-_HEAL_SVC_KW = ("售后", "质保", "维修", "保修", "培训", "安装调试", "技术支持", "巡检", "响应时间")
-_HEAL_DOC_KW = ("说明书", "合格证", "使用手册", "操作手册", "保修卡", "技术文档", "随机文件")
+_HEAL_SVC_KW = ("售后", "质保", "维修", "保修", "培训", "安装调试", "技术支持", "巡检", "响应时间", "交付与培训", "质保与售后")
+_HEAL_DOC_KW = ("说明书", "合格证", "使用手册", "操作手册", "保修卡", "技术文档", "随机文件", "技术文件（合格证")
 _HEAL_CMP_KW = ("投标文件格式", "正本与副本", "装订成册", "签字确认", "页码要求")
-_HEAL_TECH_TABLE_HDR = re.compile(r"技术偏离|详细配置明细")
+_HEAL_TECH_TABLE_HDR = re.compile(r"技术偏离")
+_HEAL_TECH_TABLE_END = re.compile(r"^#{2,}|^（二）|详细配置明细")
 
 
 def _heal_table_mixing(sections: list[BidDocumentSection]) -> list[BidDocumentSection]:
@@ -586,7 +589,7 @@ def _heal_table_mixing(sections: list[BidDocumentSection]) -> list[BidDocumentSe
                 in_tech_table = True
                 new_lines.append(line)
                 continue
-            if in_tech_table and stripped.startswith("#"):
+            if in_tech_table and (_HEAL_TECH_TABLE_END.search(stripped) or stripped.startswith("#")):
                 in_tech_table = False
 
             if in_tech_table and stripped.startswith("|") and not stripped.startswith("|---"):
@@ -649,3 +652,49 @@ def _renumber_row(idx: int, row: str) -> str:
     if cells:
         cells[0] = str(idx)
     return "| " + " | ".join(cells) + " |"
+
+
+def _heal_package_contamination(
+    sections: list[BidDocumentSection],
+    target_package_ids: list[str],
+) -> list[BidDocumentSection]:
+    """文本级包件污染清洗：移除引用非目标包号的行。"""
+    if not target_package_ids:
+        return sections
+
+    target_set = set(target_package_ids)
+    healed: list[BidDocumentSection] = []
+
+    for section in sections:
+        # 报价总览表允许出现多包信息
+        if "报价" in section.section_title:
+            healed.append(section)
+            continue
+
+        new_lines: list[str] = []
+        removed = 0
+        for line in section.content.splitlines():
+            # 检查该行是否引用了非目标包
+            has_other_pkg = False
+            for pkg_num in range(1, 20):
+                pkg_id = str(pkg_num)
+                if pkg_id in target_set:
+                    continue
+                if f"包{pkg_id}" in line and f"包{pkg_id}" not in section.section_title:
+                    has_other_pkg = True
+                    break
+            if has_other_pkg and line.strip().startswith("|"):
+                removed += 1
+                continue
+            new_lines.append(line)
+
+        if removed:
+            logger.info("包件污染清洗：章节[%s] 移除 %d 行跨包引用", section.section_title, removed)
+
+        healed.append(BidDocumentSection(
+            section_title=section.section_title,
+            content="\n".join(new_lines),
+            attachments=section.attachments,
+        ))
+
+    return healed
