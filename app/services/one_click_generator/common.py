@@ -319,11 +319,14 @@ def _supplier_commitment_title(tender: TenderDocument) -> str:
     return f"{region}政府采购供应商资格承诺函" if region else "政府采购供应商资格承诺函"
 
 
-def _package_scope(tender: TenderDocument) -> str:
-    if not tender.packages:
+def _package_scope(
+    tender: TenderDocument,
+    packages: list[ProcurementPackage] | None = None,
+) -> str:
+    pkgs = packages if packages is not None else tender.packages
+    if not pkgs:
         return "全部包"
-    return "、".join(f"包{pkg.package_id}" for pkg in tender.packages)
-
+    return "、".join(f"包{pkg.package_id}" for pkg in pkgs)
 
 def _infer_package_quantity(pkg: ProcurementPackage, tender_raw: str) -> int:
     package_scope = _extract_package_scope_text(pkg, tender_raw)
@@ -352,12 +355,17 @@ def _infer_package_quantity(pkg: ProcurementPackage, tender_raw: str) -> int:
     return max(1, pkg.quantity)
 
 
-def _package_detail_lines(tender: TenderDocument, tender_raw: str) -> str:
-    if not tender.packages:
+def _package_detail_lines(
+    tender: TenderDocument,
+    tender_raw: str,
+    packages: list[ProcurementPackage] | None = None,
+) -> str:
+    pkgs = packages if packages is not None else tender.packages
+    if not pkgs:
         return "- 包信息：详见招标文件。"
 
     lines: list[str] = []
-    for pkg in tender.packages:
+    for pkg in pkgs:
         delivery = _safe_text(pkg.delivery_time, "按招标文件约定")
         place = _safe_text(pkg.delivery_place, "采购人指定地点")
         quantity = _infer_package_quantity(pkg, tender_raw)
@@ -368,16 +376,23 @@ def _package_detail_lines(tender: TenderDocument, tender_raw: str) -> str:
     return "\n".join(lines)
 
 
-def _quote_overview_table(tender: TenderDocument, tender_raw: str) -> str:
+
+
+def _quote_overview_table(
+    tender: TenderDocument,
+    tender_raw: str,
+    packages: list[ProcurementPackage] | None = None,
+) -> str:
     headers = [
         "| 序号(包号) | 货物名称 | 数量 | 预算金额(元) | 投标报价(元) | 交货期 |",
         "|---|---|---:|---:|---:|---|",
     ]
+    pkgs = packages if packages is not None else tender.packages
     rows: list[str] = []
 
-    if tender.packages:
+    if pkgs:
         total_budget = 0.0
-        for idx, pkg in enumerate(tender.packages, start=1):
+        for idx, pkg in enumerate(pkgs, start=1):
             total_budget += pkg.budget
             quantity = _infer_package_quantity(pkg, tender_raw)
             rows.append(
@@ -385,13 +400,15 @@ def _quote_overview_table(tender: TenderDocument, tender_raw: str) -> str:
                 f"{_fmt_money(pkg.budget)} | [待填写] | {_safe_text(pkg.delivery_time, '按招标文件约定')} |"
             )
         rows.append(
-            f"|  | **合计** |  | **{_fmt_money(total_budget)}** | **[待填写]** |  |"
+            f"|  | **预算合计（参考）** |  | **{_fmt_money(total_budget)}** |  |  |"
+        )
+        rows.append(
+            "|  | **投标总报价** |  |  | **[待填写]** |  |"
         )
     else:
         rows.append("| 1 | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] |")
 
     return "\n".join(headers + rows)
-
 
 # ─── 分类过滤与包隔离辅助函数 ───
 

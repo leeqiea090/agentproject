@@ -16,16 +16,14 @@ from app.schemas import (
     ValidationGate,
 )
 from app.services.evidence_binder import _compute_evidence_coverage
-from app.services.requirement_processor import _is_truncated_name
+from collections import Counter
+from app.services.requirement_processor import (
+    _is_bad_requirement_value,
+    _is_truncated_name,
+    _package_forbidden_terms,
+)
 
 logger = logging.getLogger(__name__)
-
-# ── 设备禁止词（按包号定义）──
-_DEVICE_FORBIDDEN_BY_PACKAGE: dict[str, tuple[str, ...]] = {
-    "1": ("柯勒照明", "无限远校正光学系统", "激光器", "检测通道", "检测器", "PMT", "荧光补偿", "流速模式"),
-    "2": ("进口荧光显微镜", "柯勒照明", "无限远校正光学系统"),
-    "3": ("琼脂凝胶电泳法", "电泳槽", "染色槽", "电泳系统"),
-}
 
 _BAD_NAME_SUFFIXES = ("（", "(", "为", "可", "单机", "至少", "最低", "最高")
 
@@ -81,6 +79,9 @@ _REGRESSION_THRESHOLDS = {
     "draft_usability_score": 0.5,             # 底稿可用性应 ≥ 0.5
     "project_meta_consistency_score": 0.8,    # 项目名称/编号/数量一致性应 ≥ 0.8
 }
+
+def _section_title_text(section: BidDocumentSection) -> str:
+    return (getattr(section, "section_title", "") or "").strip()
 
 
 def _target_packages(
@@ -154,6 +155,152 @@ def _compute_project_meta_consistency_score(
     return sum(1 for ok in checks if ok) / len(checks)
 
 
+def _req_value_text(req: NormalizedRequirement) -> str:
+    raw = (req.raw_text or "").strip()
+    if "：" in raw:
+        return raw.split("：", 1)[1].strip()
+    bits = [str(req.threshold or "").strip(), str(req.unit or "").strip()]
+    return "".join(bits).strip()
+
+
+def _count_bad_requirement_values(
+    normalized_reqs: dict[str, list[NormalizedRequirement]] | None,
+) -> int:
+    if not normalized_reqs:
+        return 0
+
+    count = 0
+    for reqs in normalized_reqs.values():
+        for req in reqs:
+            val = _req_value_text(req)
+            if val and _is_bad_requirement_value(val):
+                count += 1
+    return count
+
+
+def _count_duplicate_requirement_keys(
+    normalized_reqs: dict[str, list[NormalizedRequirement]] | None,
+) -> int:
+    if not normalized_reqs:
+        return 0
+
+    dup_groups = 0
+    for reqs in normalized_reqs.values():
+        keys = [
+            (req.param_name or "").strip()
+            for req in reqs
+            if (req.param_name or "").strip()
+        ]
+        counter = Counter(keys)
+        dup_groups += sum(1 for _, n in counter.items() if n > 1)
+    return dup_groups
+
+
+def _count_rendered_forbidden_hits(
+    sections: list[BidDocumentSection],
+    tender: TenderDocument | None,
+) -> int:
+    if tender is None:
+        return 0
+
+    package_name_map = {pkg.package_id: pkg.item_name for pkg in tender.packages}
+    hit_count = 0
+
+    for section in sections:
+        content = section.content or ""
+        if not content:
+            continue
+
+        # 只扫描第三章技术正文，跳过第四章附件/报价附件
+        title = _section_title_text(section)
+        if title and ("第四章" in title or "报价书附件" in title):
+            continue
+        if "第四章 报价书附件" in content:
+            content = content.split("第四章 报价书附件", 1)[0]
+
+        for pkg in tender.packages:
+            other_names = [
+                name for other_id, name in package_name_map.items()
+                if other_id != pkg.package_id
+            ]
+            forbidden = tuple(_package_forbidden_terms(pkg.item_name, other_names))
+            if not forbidden:
+                continue
+
+            block_pattern = re.compile(
+                rf"###\s*包{re.escape(pkg.package_id)}[^\n]*\n(.*?)(?=\n###\s*包\d+[：:]|\n#|\n##|\n###\s*第[一二三四五六七八九十\d]+|\Z)",
+                re.S,
+            )
+            for match in block_pattern.finditer(content):
+                block = match.group(1)
+                if any(tok in block for tok in forbidden):
+                    hit_count += 1
+
+    return hit_count
+
+def _collect_duplicate_requirement_keys(
+    normalized_reqs: dict[str, list[NormalizedRequirement]] | None,
+) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    if not normalized_reqs:
+        return result
+
+    for pkg_id, reqs in normalized_reqs.items():
+        keys = [(req.param_name or "").strip() for req in reqs if (req.param_name or "").strip()]
+        counter = Counter(keys)
+        dups = [k for k, n in counter.items() if n > 1]
+        if dups:
+            result[pkg_id] = dups
+    return result
+
+
+def _collect_rendered_forbidden_hits(
+    sections: list[BidDocumentSection],
+    tender: TenderDocument | None,
+) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    if tender is None:
+        return result
+
+    package_name_map = {pkg.package_id: pkg.item_name for pkg in tender.packages}
+
+    for section in sections:
+        content = section.content or ""
+        if not content:
+            continue
+
+        title = _section_title_text(section)
+        if title and ("第四章" in title or "报价书附件" in title):
+            continue
+        if "第四章 报价书附件" in content:
+            content = content.split("第四章 报价书附件", 1)[0]
+
+        for pkg in tender.packages:
+            other_names = [
+                name for other_id, name in package_name_map.items()
+                if other_id != pkg.package_id
+            ]
+            forbidden = tuple(_package_forbidden_terms(pkg.item_name, other_names))
+            if not forbidden:
+                continue
+
+            block_pattern = re.compile(
+                rf"###\s*包{re.escape(pkg.package_id)}[^\n]*\n(.*?)(?=\n###\s*包\d+[：:]|\n#|\n##|\n###\s*第[一二三四五六七八九十\d]+|\Z)",
+                re.S,
+            )
+            hits: list[str] = []
+            for match in block_pattern.finditer(content):
+                block = match.group(1)
+                hits.extend(tok for tok in forbidden if tok in block)
+
+            if hits:
+                result.setdefault(pkg.package_id, [])
+                result[pkg.package_id].extend(hits)
+
+    return {k: sorted(set(v)) for k, v in result.items()}
+
+
+
 def compute_validation_gate(
     sections: list[BidDocumentSection],
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
@@ -166,6 +313,14 @@ def compute_validation_gate(
     normalized_reqs = normalized_reqs or {}
     evidence_bindings = evidence_bindings or {}
     target_package_ids = target_package_ids or []
+
+    dup_detail = _collect_duplicate_requirement_keys(normalized_reqs)
+    if dup_detail:
+        logger.warning("重复参数键明细: %s", dup_detail)
+
+    forbidden_detail = _collect_rendered_forbidden_hits(sections, tender)
+    if forbidden_detail:
+        logger.warning("渲染后术语污染明细: %s", forbidden_detail)
 
     # 1) 占位符计数
     placeholder_count = 0
@@ -233,7 +388,7 @@ def compute_validation_gate(
         in_tech_table = False
         for line in section.content.splitlines():
             stripped = line.strip()
-            if _TECH_TABLE_START.search(stripped):
+            if stripped.startswith("#") and _TECH_TABLE_START.search(stripped):
                 in_tech_table = True
                 continue
             if in_tech_table and _TECH_TABLE_END.search(stripped):
@@ -308,6 +463,18 @@ def compute_validation_gate(
             logger.warning("嵌套占位符检测：发现嵌套模式 %s", np_pat)
             break
 
+    forbidden_terms_by_package: dict[str, tuple[str, ...]] = {}
+    if tender is not None:
+        package_name_map = {pkg.package_id: pkg.item_name for pkg in tender.packages}
+        for pkg in tender.packages:
+            other_names = [
+                name for other_id, name in package_name_map.items()
+                if other_id != pkg.package_id
+            ]
+            forbidden_terms_by_package[pkg.package_id] = tuple(
+                _package_forbidden_terms(pkg.item_name, other_names)
+            )
+
     # 9) 证据片段不洁净率 — 检测跨包文本和噪音标记残留
     snippet_dirty_rate = 0.0
     if evidence_bindings:
@@ -333,11 +500,10 @@ def compute_validation_gate(
                 if "待补充（待补充" in snip or "待补充(待补充" in snip:
                     dirty_count += 1
                     continue
-                # 检测明显别包设备名
-                for other_pid, forbidden in _DEVICE_FORBIDDEN_BY_PACKAGE.items():
-                    if other_pid != pkg_id and any(t in snip for t in forbidden):
-                        dirty_count += 1
-                        break
+                forbidden = forbidden_terms_by_package.get(pkg_id, ())
+                if forbidden and any(t in snip for t in forbidden):
+                    dirty_count += 1
+                    continue
         if total_bind_count > 0:
             snippet_dirty_rate = dirty_count / total_bind_count
 
@@ -345,7 +511,7 @@ def compute_validation_gate(
     device_contamination_count = 0
     if normalized_reqs:
         for pkg_id, reqs in normalized_reqs.items():
-            forbidden = _DEVICE_FORBIDDEN_BY_PACKAGE.get(pkg_id, ())
+            forbidden = forbidden_terms_by_package.get(pkg_id, ())
             if not forbidden:
                 continue
             for req in reqs:
@@ -368,6 +534,27 @@ def compute_validation_gate(
     if bad_name_count > 0:
         snippet_truncation_count += bad_name_count
         logger.warning("半截字段后缀检测: %d 条参数名以悬空后缀结尾", bad_name_count)
+
+    # 11b) 半截字段值检测
+    bad_value_count = _count_bad_requirement_values(normalized_reqs)
+    if bad_value_count > 0:
+        snippet_truncation_count += bad_value_count
+        logger.warning("半截字段值检测: %d 条需求值疑似残缺", bad_value_count)
+
+    # 11c) 重复参数键检测
+    duplicate_key_count = _count_duplicate_requirement_keys(normalized_reqs)
+    if duplicate_key_count > 0:
+        table_mixing = True
+        logger.warning("重复参数键检测: %d 组参数键重复，视为表格混装/标签退化", duplicate_key_count)
+
+    # 11d) 渲染后术语污染检测
+    rendered_forbidden_hits = _count_rendered_forbidden_hits(sections, tender)
+    if rendered_forbidden_hits > 0:
+        package_contamination = True
+        logger.warning("渲染后术语污染: %d 处包内内容命中禁止词", rendered_forbidden_hits)
+
+
+
 
     # 12) 项目元信息数量一致性
     if tender and target_package_ids:
@@ -404,16 +591,7 @@ def annotate_draft_level(
     if draft_level == DraftLevel.external_ready:
         return sections
 
-    # 内部稿：在每个章节内容前加水印
-    watermark = "**【内部草稿 — 含待核实/待补证项，不可外发】**\n\n"
-    annotated: list[BidDocumentSection] = []
-    for s in sections:
-        annotated.append(BidDocumentSection(
-            section_title=s.section_title,
-            content=watermark + s.content,
-            attachments=s.attachments,
-        ))
-    return annotated
+    return render_editable_draft_sections(sections, add_draft_watermark=True)
 
 
 def _flatten_nested_placeholders(text: str) -> str:
@@ -430,6 +608,102 @@ def _flatten_nested_placeholders(text: str) -> str:
         if text == prev:
             break
     return text
+
+
+def _editable_placeholder(label: str, prefix: str = "待填写") -> str:
+    normalized = re.sub(r"\s+", "", (label or "").strip("：:;；，,。 "))
+    return f"【{prefix}：{normalized}】" if normalized else f"【{prefix}】"
+
+
+def _pending_placeholder_repl(match: re.Match[str]) -> str:
+    label = (match.group(1) or "").strip()
+    if not label:
+        return "【待填写】"
+    if any(token in label for token in ("证据", "截图", "彩页", "证书", "报告", "材料", "证件", "复印件")):
+        prefix = "待补证" if "证据" in label else "待上传"
+    elif any(token in label for token in ("原文", "片段", "定位")):
+        prefix = "待定位"
+    elif any(token in label for token in ("核实", "确认")):
+        prefix = "待确认"
+    else:
+        prefix = "待填写"
+    return _editable_placeholder(label, prefix)
+
+
+def _todo_placeholder_repl(match: re.Match[str]) -> str:
+    label = (match.group(1) or "").strip()
+    return _editable_placeholder(label, "待填写")
+
+
+def _render_editable_draft_content(content: str) -> str:
+    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\*\*【内部草稿.*?】\*\*\n*", "", text)
+    text = re.sub(r"\*\*【待补充底稿.*?】\*\*\n*", "", text)
+    text = _flatten_nested_placeholders(text)
+
+    text = re.sub(r"\[TODO:待补([^\]]*)\]", _todo_placeholder_repl, text)
+    text = re.sub(r"\[TODO:待核实([^\]]*)\]", lambda m: _editable_placeholder((m.group(1) or "").strip(), "待确认"), text)
+    text = re.sub(r"\[TODO:[^\]]*\]", "【待填写】", text)
+
+    explicit_mappings = {
+        "[投标方公司名称]": _editable_placeholder("投标人名称"),
+        "[法定代表人]": _editable_placeholder("法定代表人"),
+        "[授权代表]": _editable_placeholder("授权代表"),
+        "[联系电话]": _editable_placeholder("联系电话"),
+        "[联系地址]": _editable_placeholder("联系地址"),
+        "[公司注册地址]": _editable_placeholder("公司注册地址"),
+        "[品牌型号]": _editable_placeholder("品牌型号"),
+        "[生产厂家]": _editable_placeholder("生产厂家"),
+        "[品牌]": _editable_placeholder("品牌"),
+        "[待填写]": "【待填写】",
+        "[待补充]": "【待填写】",
+        "待核实（需填入投标产品实参）": _editable_placeholder("投标产品实参"),
+        "待核实（未匹配到已证实产品事实）": _editable_placeholder("投标产品实参"),
+        "待补充投标方证据": _editable_placeholder("投标方证据", "待补证"),
+        "待补投标方证据": _editable_placeholder("投标方证据", "待补证"),
+        "投标方证据待补充": _editable_placeholder("投标方证据", "待补证"),
+        "投标方证据：未绑定": "投标方证据：【待补证】",
+        "待定位片段": _editable_placeholder("招标原文片段", "待定位"),
+    }
+    for marker, replacement in explicit_mappings.items():
+        text = text.replace(marker, replacement)
+
+    text = re.sub(r"（此处留空，待上传([^）]+)）", lambda m: _editable_placeholder((m.group(1) or "").strip(), "待上传"), text)
+    text = re.sub(r"\(此处留空，待上传([^)]*)\)", lambda m: _editable_placeholder((m.group(1) or "").strip(), "待上传"), text)
+    text = re.sub(r"（此处留空，待按([^）]+)）", lambda m: _editable_placeholder(f"按{(m.group(1) or '').strip()}", "待填写"), text)
+    text = re.sub(r"\(此处留空，待按([^)]*)\)", lambda m: _editable_placeholder(f"按{(m.group(1) or '').strip()}", "待填写"), text)
+
+    text = re.sub(r"待补充（([^）]{1,40})）", _pending_placeholder_repl, text)
+    text = re.sub(r"待补充\(([^)]{1,40})\)", _pending_placeholder_repl, text)
+    text = re.sub(r"待核实（([^）]{1,40})）", lambda m: _editable_placeholder((m.group(1) or "").strip(), "待确认"), text)
+    text = re.sub(r"待核实\(([^)]{1,40})\)", lambda m: _editable_placeholder((m.group(1) or "").strip(), "待确认"), text)
+    text = re.sub(r"(?<!【)待补充(?![（(【])", "【待填写】", text)
+    text = re.sub(r"(?<!【)待核实(?![（(【])", "【待确认】", text)
+
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def render_editable_draft_sections(
+    sections: list[BidDocumentSection],
+    *,
+    add_draft_watermark: bool | None = None,
+) -> list[BidDocumentSection]:
+    """将内部待补稿渲染成适合人工直接编辑的 Markdown。"""
+    if add_draft_watermark is None:
+        add_draft_watermark = any(
+            "【内部草稿" in section.content or "【待补充底稿" in section.content
+            for section in sections
+        )
+
+    watermark = "**【内部草稿（可编辑底稿）：含待填写/待补证项，补齐后再外发】**\n\n"
+    rendered: list[BidDocumentSection] = []
+    for idx, section in enumerate(sections):
+        content = _render_editable_draft_content(section.content)
+        if add_draft_watermark and idx == 0:
+            content = watermark + content
+        rendered.append(section.model_copy(update={"content": content}))
+    return rendered
 
 
 def normalize_pending_draft_sections(
@@ -645,7 +919,7 @@ def compute_regression_metrics(
         in_tech = False
         for line in section.content.splitlines():
             s = line.strip()
-            if _TECH_HDR.search(s):
+            if s.startswith("#") and _TECH_HDR.search(s):
                 in_tech = True
                 continue
             if in_tech and _TECH_END.search(s):
@@ -900,7 +1174,7 @@ def _heal_table_mixing(sections: list[BidDocumentSection]) -> list[BidDocumentSe
         in_tech_table = False
         for line in section.content.splitlines():
             stripped = line.strip()
-            if _HEAL_TECH_TABLE_HDR.search(stripped):
+            if stripped.startswith("#") and _HEAL_TECH_TABLE_HDR.search(stripped):
                 in_tech_table = True
                 new_lines.append(line)
                 continue

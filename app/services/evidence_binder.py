@@ -65,6 +65,58 @@ def _locate_requirement_block(
     return None
 
 
+def _extract_scope_excerpt(text: str, pos: int, matched: str, anchor: str) -> tuple[str, int, int]:
+    if pos < 0:
+        return "", 0, 0
+
+    line_start = text.rfind("\n", 0, pos)
+    if line_start < 0:
+        line_start = 0
+    else:
+        line_start += 1
+
+    line_end = text.find("\n", pos)
+    if line_end < 0:
+        line_end = len(text)
+
+    excerpt = text[line_start:line_end].replace("\n", " ").strip()
+    excerpt = re.sub(r"\s+", " ", excerpt).strip()
+    excerpt = _trim_evidence_snippet(excerpt, anchor)
+    return _clean_excerpt(excerpt), line_start, line_end
+
+
+def _is_non_technical_excerpt(excerpt: str) -> bool:
+    bad_hints = (
+        "投标报价", "报价书", "预算", "履约保证金",
+        "付款方式", "交货期", "商务条款", "资格审查",
+        "技术参数符合要求", "完成科室操作人员培训",
+        "安装调试", "培训服务",
+    )
+    return any(tok in (excerpt or "") for tok in bad_hints)
+
+def _find_requirement_excerpt_in_scope(text: str, req_key: str, req_val: str) -> tuple[str, int, int]:
+    # 1) key + value 精确/近似配对
+    pos, matched = _find_requirement_pair_position(text, req_key, req_val)
+    if pos >= 0 and matched:
+        excerpt, char_start, char_end = _extract_scope_excerpt(text, pos, matched, req_key)
+        if excerpt and not _is_non_technical_excerpt(excerpt):
+            return excerpt, char_start, char_end
+
+    # 2) key-only 包内弱命中，但必须不是商务/报价行
+    candidates = [req_key]
+    key_tokens = [tok for tok in _extract_match_tokens(req_key) if len(tok) >= 2]
+    candidates.extend(key_tokens[:3])
+
+    pos, matched = _find_evidence_position(text, candidates)
+    if pos >= 0 and matched:
+        excerpt, char_start, char_end = _extract_scope_excerpt(text, pos, matched, req_key)
+        if excerpt and not _is_non_technical_excerpt(excerpt):
+            # key-only 回退时，excerpt 至少要和 req_val 有一点重合
+            val_tokens = [tok for tok in _extract_match_tokens(req_val) if len(tok) >= 2]
+            if not val_tokens or any(tok in excerpt for tok in val_tokens[:3]):
+                return excerpt, char_start, char_end
+
+    return "", 0, 0
 # ═══════════════════════════════════════════════════════════════════
 #  Phase 5: 文档目标判定 — 单包实装 vs 多包底稿
 # ═══════════════════════════════════════════════════════════════════
@@ -150,31 +202,28 @@ def build_tender_source_bindings(
             char_end = matched_block.char_end
             excerpt = _clean_excerpt(matched_block.text)
         else:
-            # 回退：仅在包范围文本中搜索参数名（不回退全文，避免串包）
-            search_key = req.param_name
-            pos = primary_text.find(search_key)
-            search_text = primary_text
-            if pos >= 0:
-                char_start = max(0, pos - 20)
-                raw_end = pos + len(search_key) + 100
-                raw_end = min(len(search_text), raw_end)
-                candidate = search_text[pos + len(search_key):raw_end]
-                for sep in ("\n", "。", "；", ";"):
-                    sep_pos = candidate.find(sep)
-                    if sep_pos >= 0 and sep_pos < 80:
-                        raw_end = pos + len(search_key) + sep_pos + 1
-                        break
-                char_end = min(len(search_text), raw_end)
-                excerpt = search_text[char_start:char_end].replace("\n", " ").strip()
-                excerpt = re.sub(r"\s+", " ", excerpt).strip()
-                excerpt = _trim_evidence_snippet(excerpt, search_key)
+            req_val = ""
+            if "：" in req.raw_text:
+                req_val = req.raw_text.split("：", 1)[1].strip()
+
+            excerpt, char_start, char_end = _find_requirement_excerpt_in_scope(
+                primary_text,
+                req.param_name,
+                req_val,
+            )
+
+        clean_excerpt = _clean_excerpt(excerpt)
+        if _is_non_technical_excerpt(clean_excerpt):
+            clean_excerpt = ""
+            char_start = 0
+            char_end = 0
 
         bindings.append(TenderSourceBinding(
             package_id=package_id,
             requirement_id=req.requirement_id,
             source_page=matched_block.page if matched_block else req.source_page,
             source_section=matched_block.section_title if matched_block else "",
-            source_excerpt=_clean_excerpt(excerpt),
+            source_excerpt=clean_excerpt,
             char_start=char_start,
             char_end=char_end,
         ))
@@ -456,11 +505,31 @@ def _trim_evidence_snippet(snippet: str, anchor: str) -> str:
     return normalized
 
 
+def _is_dirty_evidence_snippet(text: str) -> bool:
+    q = re.sub(r"\s+", " ", (text or "").strip())
+    if not q:
+        return True
+
+    bad_terms = (
+        "投标报价", "报价书", "预算", "履约保证金",
+        "付款方式", "交货期", "商务条款", "资格审查",
+    )
+    if any(tok in q for tok in bad_terms):
+        return True
+
+    bad_patterns = (
+        r"设备名称：\s*设备名称：",
+        r"技术参数：\s*技术参数：",
+        r"参数：\s*参数：",
+        r"秒\s*[~～\-]\s*\d+\s*分\s*秒",
+        r"[≥≤><]\s*(?:个|ul|μl|ml|mm|cm|kg|g|l)\b",
+    )
+    return any(re.search(p, q, flags=re.IGNORECASE) for p in bad_patterns)
+
 def _extract_evidence_snippet(package_raw: str, req_key: str, req_val: str, fallback_raw: str = "") -> tuple[str, str, bool]:
     source = "招标原文片段"
     if not package_raw.strip() and not fallback_raw.strip():
-        quote = f"{_markdown_cell(req_key)}：{_markdown_cell(req_val)}（依据结构化解析结果）"
-        return source, quote, False
+        return source, "", False
 
     idx = -1
     matched = ""
@@ -475,20 +544,27 @@ def _extract_evidence_snippet(package_raw: str, req_key: str, req_val: str, fall
             if idx >= 0:
                 text = package_raw
 
-    if idx < 0 and fallback_raw.strip() and fallback_raw != package_raw:
+    if idx < 0 and not package_raw.strip() and fallback_raw.strip():
         idx, matched = _find_requirement_pair_position(fallback_raw, req_key, req_val)
         if idx >= 0:
             text = fallback_raw
 
     if idx < 0:
-        quote = f"{_markdown_cell(req_key)}：{_markdown_cell(req_val)}（原文未定位到完全同名片段）"
-        return source, quote, False
+        return source, "", False
 
     start = max(0, idx - 24)
     end = min(len(text), idx + max(24, len(matched)) + 36)
     snippet = text[start:end].replace("\n", " ").replace("\r", " ")
     snippet = re.sub(r"\s+", " ", snippet).strip()
     snippet = _trim_evidence_snippet(snippet, matched)
+
+    if _is_dirty_evidence_snippet(snippet):
+        return source, "", False
+
+    if len(snippet) < 6:
+        return source, "", False
+
     if len(snippet) > 120:
         snippet = snippet[:120] + "..."
+
     return source, _markdown_cell(snippet), True

@@ -7,6 +7,48 @@ import app.services.evidence_binder as _evidence_binder
 import app.services.quality_gate as _quality_gate
 import app.services.requirement_processor as _requirement_processor
 
+def _sanitize_rows_for_section(
+    pkg: ProcurementPackage,
+    rows: list[dict[str, Any]],
+    *,
+    expected_category: ClauseCategory | None = None,
+) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    forbidden = _package_forbidden_terms(pkg.item_name)
+
+    for row in rows:
+        key = _safe_text(row.get("key"), "")
+        req = _safe_text(row.get("requirement"), "")
+        text = f"{key} {req}"
+
+        if not key or not req:
+            continue
+        if _is_bad_requirement_name(key) or _is_bad_requirement_value(req):
+            continue
+        if forbidden and any(tok in text for tok in forbidden):
+            continue
+
+        inferred_cat = _classify_clause_category(key, req)
+        if expected_category is not None and inferred_cat != expected_category:
+            continue
+
+        dedupe_key = re.sub(r"[（(]\d+[）)]$", "", key).strip()
+        dedupe_req = re.sub(r"\s+", " ", req).strip()
+        marker = (dedupe_key, dedupe_req)
+        if marker in seen:
+            continue
+        seen.add(marker)
+
+        row = dict(row)
+        row["key"] = dedupe_key
+        row["category"] = inferred_cat.value
+        cleaned.append(row)
+
+    return cleaned
+
+
+
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
         if name.startswith("__"):
@@ -105,8 +147,8 @@ def _build_post_table_narratives(
         )
     else:
         perf_lines.append(
-            f"综上，{p_name}的核心性能指标均满足或优于采购文件技术要求，"
-            "能够有效支撑采购人的日常业务需求。"
+            f"综上，{p_name}当前已形成逐条响应框架；待补充投标型号、产品实参及对应证据材料后，"
+            "再形成最终技术结论。"
         )
     sections.append("\n".join(perf_lines))
 
@@ -434,25 +476,27 @@ def _gen_technical(
     tender: TenderDocument,
     tender_raw: str,
     products: dict | None = None,
-        *,
+    *,
     normalized_result: dict[str, Any] | None = None,
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
     tender_bindings: dict[str, list] | None = None,
     bid_bindings: dict[str, list] | None = None,
+    active_packages: list[ProcurementPackage] | None = None,
 ) -> BidDocumentSection:
     """第三章：商务及技术部分 — 增强版：分类分表"""
+    packages = active_packages or tender.packages
     _ = llm
     products = products or {}
     today = _today()
     purchaser = _safe_text(tender.purchaser, "[采购人名称]")
-    package_details = _package_detail_lines(tender, tender_raw)
-    quote_table = _quote_overview_table(tender, tender_raw)
+    package_details = _package_detail_lines(tender, tender_raw, packages=packages)
+    quote_table = _quote_overview_table(tender, tender_raw, packages=packages)
 
     technical_sections: list[str] = []
     service_sections: list[str] = []
-    if tender.packages:
-        for pkg in tender.packages:
+    if packages:
+        for pkg in packages:
             product = products.get(pkg.package_id)
             product_profile = (product_profiles or {}).get(pkg.package_id)
             # 构建 binding 索引（按 requirement_id 查找）
@@ -488,19 +532,31 @@ def _gen_technical(
             acceptance_rows = []
             doc_rows = []
             for row in requirement_rows:
-                # 优先使用归一化阶段已标注的 category，避免重新分类导致的偏差
-                raw_cat = row.get("category", "")
-                if raw_cat:
+                key = _safe_text(row.get("key"), "")
+                req = _safe_text(row.get("requirement"), "")
+
+                # 永远先做一次基于文本的重分类
+                inferred_cat = _classify_clause_category(key, req)
+
+                raw_cat_text = _safe_text(row.get("category"), "")
+                raw_cat: ClauseCategory | None = None
+                if raw_cat_text:
                     try:
-                        cat = ClauseCategory(raw_cat)
+                        raw_cat = ClauseCategory(raw_cat_text)
                     except ValueError:
-                        cat = _classify_clause_category(
-                            row.get("key", ""), row.get("requirement", "")
-                        )
+                        raw_cat = None
+
+                # 规则：
+                # 1) 如果 inferred 是明显非技术类，则以 inferred 为准
+                # 2) 只有 inferred == technical_requirement 时，才允许相信 raw_cat
+                if inferred_cat != ClauseCategory.technical_requirement:
+                    cat = inferred_cat
                 else:
-                    cat = _classify_clause_category(
-                        row.get("key", ""), row.get("requirement", "")
-                    )
+                    cat = raw_cat or inferred_cat
+
+                row = dict(row)
+                row["category"] = cat.value
+
                 if cat == ClauseCategory.service_requirement:
                     svc_rows.append(row)
                 elif cat == ClauseCategory.config_requirement:
@@ -509,20 +565,43 @@ def _gen_technical(
                     acceptance_rows.append(row)
                 elif cat == ClauseCategory.documentation_requirement:
                     doc_rows.append(row)
-                elif cat in (ClauseCategory.commercial_requirement,
-                             ClauseCategory.compliance_note,
-                             ClauseCategory.attachment_requirement,
-                             ClauseCategory.noise):
-                    pass  # 不进任何技术表
+                elif cat in (
+                        ClauseCategory.commercial_requirement,
+                        ClauseCategory.compliance_note,
+                        ClauseCategory.attachment_requirement,
+                        ClauseCategory.noise,
+                ):
+                    pass
                 else:
                     tech_rows.append(row)
 
             # ── 技术偏离表最小行数检查 ──
-            min_rows = _DETAIL_TARGETS.get("deviation_table_min_rows", 10)
-            if len(tech_rows) < min_rows:
+            tech_rows = _sanitize_rows_for_section(
+                pkg, tech_rows, expected_category=ClauseCategory.technical_requirement
+            )
+            svc_rows = _sanitize_rows_for_section(
+                pkg, svc_rows, expected_category=ClauseCategory.service_requirement
+            )
+            config_rows_list = _sanitize_rows_for_section(
+                pkg, config_rows_list, expected_category=ClauseCategory.config_requirement
+            )
+            acceptance_rows = _sanitize_rows_for_section(
+                pkg, acceptance_rows, expected_category=ClauseCategory.acceptance_requirement
+            )
+            doc_rows = _sanitize_rows_for_section(
+                pkg, doc_rows, expected_category=ClauseCategory.documentation_requirement
+            )
+            base_min_rows = _DETAIL_TARGETS.get("deviation_table_min_rows", 10)
+
+            # 自适应阈值：
+            # 至少要求 6 条；但如果本包清洗后就只有 8 条有效技术项，
+            # 就不再强行按 10 条报警。
+            adaptive_min_rows = min(base_min_rows, max(6, len(tech_rows)))
+
+            if len(tech_rows) < adaptive_min_rows:
                 logger.warning(
                     "包%s 技术偏离表行数不足: %d < %d (最小要求)，建议补充技术条款",
-                    pkg.package_id, len(tech_rows), min_rows,
+                    pkg.package_id, len(tech_rows), adaptive_min_rows,
                 )
 
             mapped_count = sum(1 for row in tech_rows if bool(row.get("mapped")))
@@ -546,21 +625,24 @@ def _gen_technical(
                     normalized_result=normalized_result,
                 )
             )
-            technical_sections.append(
-                _build_response_checklist_table(
-                    pkg=pkg,
-                    mapped_count=mapped_count,
-                    total_requirements=len(tech_rows),
-                    requirement_rows=tech_rows,
+            include_internal_diagnostics = False
+
+            if include_internal_diagnostics:
+                technical_sections.append(
+                    _build_response_checklist_table(
+                        pkg=pkg,
+                        mapped_count=mapped_count,
+                        total_requirements=len(tech_rows),
+                        requirement_rows=tech_rows,
+                    )
                 )
-            )
-            technical_sections.append(
-                _build_evidence_mapping_table(
-                    pkg=pkg,
-                    requirement_rows=tech_rows,
-                    total_requirements=len(tech_rows),
+                technical_sections.append(
+                    _build_evidence_mapping_table(
+                        pkg=pkg,
+                        requirement_rows=tech_rows,
+                        total_requirements=len(tech_rows),
+                    )
                 )
-            )
             # ── 详细技术响应说明章节（post-table narratives）──
             technical_sections.append(
                 _build_post_table_narratives(
@@ -573,6 +655,7 @@ def _gen_technical(
             )
 
             # ── 售后服务要求分表 ──
+            # ── 售后服务要求分表 ──
             if svc_rows:
                 svc_table_lines = [
                     f"### 包{pkg.package_id} 售后服务要求响应表",
@@ -581,13 +664,22 @@ def _gen_technical(
                 ]
                 for idx, row in enumerate(svc_rows, start=1):
                     key = _markdown_cell(row.get("key", ""))
-                    val = _markdown_cell(row.get("value", ""))
-                    resp = _markdown_cell(row.get("response", "满足"))
-                    evidence = _markdown_cell(row.get("evidence", "详见售后服务方案"))
-                    svc_table_lines.append(f"| {idx} | {key}：{val} | {resp} | {evidence} |")
+                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
+                    resp = _markdown_cell(row.get("response", "【待填写：响应承诺】"))
+                    raw_evidence = (
+                        row.get("bidder_evidence")
+                        or row.get("evidence_quote")
+                        or row.get("evidence")
+                        or ""
+                    )
+                    bad_tail_hints = ("投标报价", "报价书", "预算", "履约保证金", "付款方式", "交货期")
+                    if any(tok in _safe_text(raw_evidence, "") for tok in bad_tail_hints):
+                        raw_evidence = ""
+                    evidence = _markdown_cell(raw_evidence or "【待补证：售后服务方案/厂家承诺】")
+                    svc_table_lines.append(f"| {idx} | {key}：{req} | {resp} | {evidence} |")
                 service_sections.append("\n".join(svc_table_lines))
 
-            # ── 配置类要求分表（如原先未在配置表中处理） ──
+            # ── 配置类要求分表 ──
             if config_rows_list:
                 cfg_table_lines = [
                     f"### 包{pkg.package_id} 配置要求响应表",
@@ -596,10 +688,19 @@ def _gen_technical(
                 ]
                 for idx, row in enumerate(config_rows_list, start=1):
                     key = _markdown_cell(row.get("key", ""))
-                    val = _markdown_cell(row.get("value", ""))
-                    resp = _markdown_cell(row.get("response", "满足"))
-                    evidence = _markdown_cell(row.get("evidence", "详见配置清单"))
-                    cfg_table_lines.append(f"| {idx} | {key}：{val} | {resp} | {evidence} |")
+                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
+                    resp = _markdown_cell(row.get("response", "【待填写：配置响应】"))
+                    raw_evidence = (
+                        row.get("bidder_evidence")
+                        or row.get("evidence_quote")
+                        or row.get("evidence")
+                        or ""
+                    )
+                    bad_tail_hints = ("投标报价", "报价书", "预算", "履约保证金", "付款方式", "交货期")
+                    if any(tok in _safe_text(raw_evidence, "") for tok in bad_tail_hints):
+                        raw_evidence = ""
+                    evidence = _markdown_cell(raw_evidence or "【待补证：配置清单/彩页/说明书】")
+                    cfg_table_lines.append(f"| {idx} | {key}：{req} | {resp} | {evidence} |")
                 service_sections.append("\n".join(cfg_table_lines))
 
             # ── 验收要求分表 ──
@@ -611,10 +712,21 @@ def _gen_technical(
                 ]
                 for idx, row in enumerate(acceptance_rows, start=1):
                     key = _markdown_cell(row.get("key", ""))
-                    val = _markdown_cell(row.get("value", ""))
-                    resp = _markdown_cell(row.get("response", "满足"))
-                    evidence = _markdown_cell(row.get("evidence", "详见验收方案"))
-                    acc_table_lines.append(f"| {idx} | {key}：{val} | {resp} | 按招标文件要求 | {evidence} |")
+                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
+                    resp = _markdown_cell(row.get("response", "【待填写：验收承诺】"))
+                    raw_evidence = (
+                        row.get("bidder_evidence")
+                        or row.get("evidence_quote")
+                        or row.get("evidence")
+                        or ""
+                    )
+                    bad_tail_hints = ("投标报价", "报价书", "预算", "履约保证金", "付款方式", "交货期")
+                    if any(tok in _safe_text(raw_evidence, "") for tok in bad_tail_hints):
+                        raw_evidence = ""
+                    evidence = _markdown_cell(raw_evidence or "【待补证：验收方案/技术资料】")
+                    acc_table_lines.append(
+                        f"| {idx} | {key}：{req} | {resp} | 【待填写：验收方式】 | {evidence} |"
+                    )
                 service_sections.append("\n".join(acc_table_lines))
 
             # ── 资料/文档要求分表 ──
@@ -626,10 +738,21 @@ def _gen_technical(
                 ]
                 for idx, row in enumerate(doc_rows, start=1):
                     key = _markdown_cell(row.get("key", ""))
-                    val = _markdown_cell(row.get("value", ""))
-                    resp = _markdown_cell(row.get("response", "满足"))
-                    evidence = _markdown_cell(row.get("evidence", "详见随机资料"))
-                    doc_table_lines.append(f"| {idx} | {key}：{val} | {resp} | 随设备提供 | {evidence} |")
+                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
+                    resp = _markdown_cell(row.get("response", "【待填写：资料提供承诺】"))
+                    raw_evidence = (
+                        row.get("bidder_evidence")
+                        or row.get("evidence_quote")
+                        or row.get("evidence")
+                        or ""
+                    )
+                    bad_tail_hints = ("投标报价", "报价书", "预算", "履约保证金", "付款方式", "交货期")
+                    if any(tok in _safe_text(raw_evidence, "") for tok in bad_tail_hints):
+                        raw_evidence = ""
+                    evidence = _markdown_cell(raw_evidence or "【待补证：说明书/合格证/注册证/授权文件】")
+                    doc_table_lines.append(
+                        f"| {idx} | {key}：{req} | {resp} | 【待填写：提供方式】 | {evidence} |"
+                    )
                 service_sections.append("\n".join(doc_table_lines))
     else:
         technical_sections.append(
@@ -645,16 +768,9 @@ def _gen_technical(
                     "|---:|---|---|---:|---|---|---|",
                     "| 1 | 核心配置 | 项 | 1 | 是 | 核心设备 | 待按项目补充 |",
                     "",
-                    "### （三）技术响应检查清单",
-                    "| 序号 | 校验项 | 响应结论 | 证据载体 | 校验状态 |",
-                    "|---:|---|---|---|---|",
-                    "| 1 | 技术参数逐条响应 | 已覆盖 | 技术偏离表 | 已完成 |",
-                    "| 2 | 技术条款证据映射 | 未提取参数，需人工补充映射 | 技术条款证据映射表 | 待复核 |",
-                    "",
-                    "### （四）技术条款证据映射表",
-                    "| 序号 | 技术参数项 | 证据来源 | 原文片段 | 应用位置 |",
-                    "|---:|---|---|---|---|",
-                    "| 1 | 核心技术参数 | 结构化解析结果 | 未提取到可映射原文片段，需人工复核原文 | 技术偏离表第1行 |",
+                    "### （三）编辑提示",
+                    "- 当前仅生成基础技术响应框架。",
+                    "- 待补充拟投型号、关键参数实参、配置清单及投标方证据后，再输出完整技术说明。",
                 ]
             )
         )
@@ -668,7 +784,7 @@ def _gen_technical(
 {purchaser}：
 
 我方{_COMPANY}已详细研究“{tender.project_name}”（项目编号：{tender.project_number}）采购文件，愿按采购文件及合同条款要求提供合格货物及服务，并承担相应责任义务。现提交报价文件如下：
-1. 投标范围：{_package_scope(tender)}
+1. 投标范围：{_package_scope(tender, packages)}
 2. 报价原则：满足招标文件实质性条款，报价包含货物、运输、安装、调试、培训、税费、售后服务等全部费用
 3. 履约承诺：严格按合同约定进度组织供货、安装、验收及售后服务
 4. 有效期承诺：投标有效期按招标文件约定执行
@@ -706,17 +822,19 @@ def _gen_appendix(
     normalized_result: dict[str, Any] | None = None,
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
+    active_packages: list[ProcurementPackage] | None = None,
 ) -> BidDocumentSection:
     """第四章：报价书附件（技术参数明细 + 售后服务方案）"""
     _ = llm
+    packages = active_packages or tender.packages
     products = products or {}
     today = _today()
     warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
     payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
 
     parameter_tables: list[str] = []
-    if tender.packages:
-        for pkg in tender.packages:
+    if packages:
+        for pkg in packages:
             parameter_tables.append(
                 _build_main_parameter_table(
                     pkg,
@@ -747,7 +865,7 @@ def _gen_appendix(
 项目名称：{tender.project_name}  
 项目编号：{tender.project_number}
 
-{_build_detail_quote_table(tender, tender_raw)}
+{_build_detail_quote_table(tender, tender_raw, packages=packages)}
 
 ## 二、技术服务和售后服务的内容及措施
 ### （一）技术服务

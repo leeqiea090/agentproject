@@ -107,19 +107,24 @@ def _build_consortium_declaration_block(tender: TenderDocument, today: str) -> s
 日期：{today}"""
 
 
-def _build_detail_quote_table(tender: TenderDocument, tender_raw: str) -> str:
+def _build_detail_quote_table(
+    tender: TenderDocument,
+    tender_raw: str,
+    packages: list[ProcurementPackage] | None = None,
+) -> str:
     lines = [
         "| 序号 | 货物名称 | 规格型号 | 生产厂家 | 品牌 | 单价(元) | 数量 | 总价(元) |",
         "|---:|---|---|---|---|---:|---|---:|",
     ]
 
-    if not tender.packages:
+    pkgs = packages if packages is not None else tender.packages
+    if not pkgs:
         lines.append("| 1 | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] |")
         lines.append("|  | **合计报价** |  |  |  |  |  | **[待填写]** |")
         return "\n".join(lines)
 
     total_budget = 0.0
-    for idx, pkg in enumerate(tender.packages, start=1):
+    for idx, pkg in enumerate(pkgs, start=1):
         total_budget += pkg.budget
         quantity = _infer_package_quantity(pkg, tender_raw)
         lines.append(
@@ -127,15 +132,17 @@ def _build_detail_quote_table(tender: TenderDocument, tender_raw: str) -> str:
             f"{quantity} | [待填写] |"
         )
 
-    lines.append(
-        f"|  | **预算合计（参考）** |  |  |  |  |  | **{_fmt_money(total_budget)}** |"
-    )
+    lines.append(f"|  | **预算合计（参考）** |  |  |  |  |  | **{_fmt_money(total_budget)}** |")
     lines.append("|  | **投标总报价** |  |  |  |  |  | **[待填写]** |")
     return "\n".join(lines)
 
 
-def _gen_qualification(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSection:
-    """第一章：资格性证明文件"""
+def _gen_qualification(
+    llm: ChatOpenAI,
+    tender: TenderDocument,
+    *,
+    active_packages: list[ProcurementPackage] | None = None,
+) -> BidDocumentSection:
     _ = llm
     today = _today()
     purchaser = _safe_text(tender.purchaser, "[采购人名称]")
@@ -144,7 +151,7 @@ def _gen_qualification(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSe
     content = f"""## 一、符合《中华人民共和国政府采购法》第二十二条规定声明
 {purchaser}：
 
-{_COMPANY}参与贵方组织的“{tender.project_name}”（项目编号：{tender.project_number}，投标范围：{_package_scope(tender)}）项目投标活动，现郑重声明如下：
+{_COMPANY}参与贵方组织的“{tender.project_name}”（项目编号：{tender.project_number}，投标范围：{_package_scope(tender, active_packages)}）项目投标活动，现郑重声明如下：
 1. 具备独立承担民事责任的能力；
 2. 具有良好的商业信誉和健全的财务会计制度；
 3. 具有履行合同所必需的设备和专业技术能力；

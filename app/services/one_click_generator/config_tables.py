@@ -502,6 +502,39 @@ def _build_main_parameter_table(
         evidence_result=evidence_result,
         product_profile=product_profile,
     )
+    technical_rows: list[dict[str, Any]] = []
+    for row in requirement_rows:
+        key = _safe_text(row.get("key"), "")
+        req = _safe_text(row.get("requirement"), "")
+
+        inferred = _classify_clause_category(key, req)
+        if inferred != ClauseCategory.technical_requirement:
+            continue
+
+        tender_quote = _safe_text(row.get("tender_quote"), "")
+        bidder_quote = _safe_text(row.get("bidder_evidence"), "")
+
+        if not _row_is_usable_for_package(
+                pkg,
+                key,
+                req,
+                tender_quote=tender_quote,
+                bidder_quote=bidder_quote,
+        ):
+            continue
+
+        # 商务尾巴进参数表，一律丢弃
+        bad_tail_hints = ("履约保证金", "付款方式", "交货期", "投标报价", "报价书")
+        if any(tok in tender_quote for tok in bad_tail_hints):
+            continue
+
+        row = dict(row)
+        row["category"] = ClauseCategory.technical_requirement.value
+        technical_rows.append(row)
+
+    requirement_rows = technical_rows
+    total_requirements = len(requirement_rows)
+
     if not requirement_rows:
         lines.append(f"| 1 | 核心技术参数 | 详见招标文件 | {_PENDING_BIDDER_RESPONSE} | 待核实 |")
         return "\n".join(lines)
@@ -529,26 +562,47 @@ def _build_response_checklist_table(
     requirement_rows: list[dict[str, Any]] | None = None,
 ) -> str:
     real_response_count = 0
+    high_mapping_count = 0
+    weak_mapping_count = 0
+
     if requirement_rows:
         real_response_count = sum(1 for r in requirement_rows if r.get("has_real_response"))
+        high_mapping_count = sum(1 for r in requirement_rows if r.get("mapping_confidence") == "high")
+        weak_mapping_count = sum(1 for r in requirement_rows if r.get("mapping_confidence") == "weak")
 
     if total_requirements <= 0:
-        evidence_result = "未提取到结构化参数，已保留待核实框架"
+        evidence_result = (
+            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
+            f"弱映射 {weak_mapping_count} 项，"
+            f"其余待人工补映射/补证"
+        )
         evidence_status = "待补证"
         param_conclusion = "未提取到结构化参数，待人工补充"
         param_status = "待补实参"
     elif real_response_count == total_requirements:
-        evidence_result = f"已完成 {mapped_count}/{total_requirements} 项招标原文映射，已绑定投标方证据"
+        evidence_result = (
+            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
+            f"弱映射 {weak_mapping_count} 项，"
+            f"其余待人工补映射/补证"
+        )
         evidence_status = "已完成"
         param_conclusion = f"已证实 {real_response_count}/{total_requirements} 项，全部已填入投标产品实参"
         param_status = "已完成"
     elif real_response_count > 0:
-        evidence_result = f"已完成 {mapped_count}/{total_requirements} 项招标原文映射，部分已绑定投标方证据"
+        evidence_result = (
+            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
+            f"弱映射 {weak_mapping_count} 项，"
+            f"其余待人工补映射/补证"
+        )
         evidence_status = "部分完成"
         param_conclusion = f"已证实 {real_response_count}/{total_requirements} 项，其余 {total_requirements - real_response_count} 项待补实参"
         param_status = "部分完成"
     else:
-        evidence_result = f"已完成 {mapped_count}/{total_requirements} 项招标原文映射，投标方证据待补"
+        evidence_result = (
+            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
+            f"弱映射 {weak_mapping_count} 项，"
+            f"其余待人工补映射/补证"
+        )
         evidence_status = "待补证"
         param_conclusion = "已形成逐条响应框架，待填入投标产品实参"
         param_status = "待补实参"
@@ -573,8 +627,8 @@ def _build_evidence_mapping_table(
 ) -> str:
     lines = [
         "### （四）技术条款证据映射表",
-        "| 序号 | 技术参数项 | 证据来源 | 原文片段 | 应用位置 |",
-        "|---:|---|---|---|---|",
+        "| 序号 | 技术参数项 | 映射状态 | 证据来源 | 原文片段 | 应用位置 |",
+        "|---:|---|---|---|---|---|",
     ]
 
     if not requirement_rows:
@@ -582,23 +636,32 @@ def _build_evidence_mapping_table(
         return "\n".join(lines)
 
     for idx, row in enumerate(requirement_rows, start=1):
+        mapping_conf = _safe_text(row.get("mapping_confidence"), "none")
+        status_text = {
+            "high": "精确命中",
+            "weak": "弱命中待复核",
+            "none": "未命中",
+        }.get(mapping_conf, "未命中")
+
         has_real = row.get("has_real_response", False)
         bidder_ev = _safe_text(row.get("bidder_evidence"), "")
         bidder_source = _safe_text(row.get("bidder_evidence_source"), "")
         tender_quote = _safe_text(row.get("tender_quote"), "")
         bidder_page = row.get("bidder_evidence_page")
+
         if has_real and bidder_ev:
             page_text = f"（第{bidder_page}页）" if bidder_page is not None else ""
-            source_text = _markdown_cell(bidder_source or _safe_text(row.get("evidence_source"), "投标方资料"))
-            quote_text = f"{_markdown_cell(bidder_ev)}{page_text}"
-            if tender_quote:
+            source_text = _markdown_cell(bidder_source or "投标方资料")
+            quote_text = _markdown_cell(bidder_ev) + page_text
+            if mapping_conf == "high" and tender_quote:
                 quote_text = f"{quote_text}；{_markdown_cell(tender_quote)}"
         else:
-            source_text = f"{_markdown_cell('招标原文')} / 待补投标方证据"
-            quote_text = f"{_markdown_cell(tender_quote or _safe_text(row.get('evidence_quote'), '未定位到招标原文片段'))}；投标方证据待补充"
+            source_text = _markdown_cell("待补投标方证据")
+            quote_text = _markdown_cell(tender_quote) if mapping_conf in {"high", "weak"} else ""
+
         lines.append(
-            f"| {idx} | {_markdown_cell(str(row['key']))} | {source_text} | "
-            f"{quote_text} | 技术偏离表第{idx}行 |"
+            f"| {idx} | {_markdown_cell(str(row['key']))} | {status_text} | {source_text} | "
+            f"{quote_text or ' '} | 技术偏离表第{idx}行 |"
         )
 
     if total_requirements > len(requirement_rows):

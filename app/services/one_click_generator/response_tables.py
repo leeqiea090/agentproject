@@ -330,6 +330,79 @@ def _format_structured_bidder_evidence(
         quote_text = f"{quote_text}（第{bid_page}页）"
     return source_text, quote_text, bid_page
 
+def _mapping_confidence_for_row(
+    pkg: ProcurementPackage,
+    req_key: str,
+    req_val: str,
+    tender_quote: str,
+) -> str:
+    quote = _as_text(tender_quote)
+    if not quote:
+        return "none"
+
+    if _is_dirty_evidence_snippet(quote):
+        return "none"
+
+    if "待定位" in quote or "未定位" in quote:
+        return "none"
+
+    if _is_bad_requirement_name(req_key) or _is_bad_requirement_value(req_val):
+        return "none"
+
+    forbidden_terms = _package_forbidden_terms(pkg.item_name)
+    if forbidden_terms and any(tok in quote for tok in forbidden_terms):
+        return "none"
+
+    business_hints = (
+        "投标报价", "报价书", "预算", "履约保证金",
+        "付款方式", "交货期", "商务条款", "资格审查",
+    )
+    if any(tok in quote for tok in business_hints):
+        return "none"
+
+    key_tokens = [t for t in _extract_match_tokens(req_key) if len(t) >= 2]
+    val_tokens = [t for t in _extract_match_tokens(req_val) if len(t) >= 2]
+
+    key_overlap = [t for t in key_tokens[:3] if t in quote]
+    val_overlap = [t for t in val_tokens[:4] if t in quote]
+
+    if not key_overlap:
+        return "none"
+
+    if val_tokens and not val_overlap:
+        return "none"
+
+    if len(quote) < max(8, len(req_key) + 2):
+        return "weak"
+
+    tail_noise = (
+        "履约保证金", "付款方式", "交货期",
+        "技术参数符合要求", "完成科室操作人员培训",
+    )
+    if any(tok in quote for tok in tail_noise):
+        return "weak"
+
+    return "high"
+
+
+def _row_is_usable_for_package(
+    pkg: ProcurementPackage,
+    req_key: str,
+    req_val: str,
+    tender_quote: str = "",
+    bidder_quote: str = "",
+) -> bool:
+    if _is_bad_requirement_name(req_key):
+        return False
+    if _is_bad_requirement_value(req_val):
+        return False
+
+    forbidden_terms = _package_forbidden_terms(pkg.item_name)
+    row_text = " ".join(x for x in [req_key, req_val, tender_quote, bidder_quote] if x)
+    if forbidden_terms and any(tok in row_text for tok in forbidden_terms):
+        return False
+
+    return True
 
 def _build_requirement_rows(
     pkg: ProcurementPackage,
@@ -365,13 +438,20 @@ def _build_requirement_rows(
                 response = _PENDING_BIDDER_RESPONSE
 
             bidder_source, bidder_quote, bidder_page = _format_structured_bidder_evidence(match, req_key, response)
+            # 先拿 binding，再回退到 match / requirement，避免旧的 source_text 抢占更干净的 excerpt
+            _tender_bind = (tender_bindings or {}).get(requirement_id, {})
             tender_quote = _safe_text(
-                (match or {}).get("tender_source_text")
-                or requirement.get("source_text")
-                or requirement.get("source_excerpt"),
+                _tender_bind.get("source_excerpt")
+                or (match or {}).get("tender_source_text")
+                or requirement.get("source_excerpt")
+                or requirement.get("source_text"),
                 "",
             )
-            tender_page = (match or {}).get("tender_source_page") or requirement.get("source_page")
+            tender_page = (
+                _tender_bind.get("source_page")
+                or (match or {}).get("tender_source_page")
+                or requirement.get("source_page")
+            )
             has_real_response = response != _PENDING_BIDDER_RESPONSE
             if not bidder_quote and has_real_response:
                 bidder_source = bidder_source or _safe_text(
@@ -384,16 +464,27 @@ def _build_requirement_rows(
                 )
 
             # 合并 tender/bid binding 信息
-            _tender_bind = (tender_bindings or {}).get(requirement_id, {})
             _bid_bind = (bid_bindings or {}).get(requirement_id, {})
-            if not tender_quote and _tender_bind:
-                tender_quote = _safe_text(_tender_bind.get("source_excerpt"), "")
+            if _tender_bind:
+                tender_quote = _safe_text(_tender_bind.get("source_excerpt"), tender_quote)
                 if not tender_page:
                     tender_page = _tender_bind.get("source_page")
             if not bidder_quote and _bid_bind:
                 bidder_source = _safe_text(_bid_bind.get("evidence_file"), "") or bidder_source
                 bidder_quote = _safe_text(_bid_bind.get("evidence_snippet"), "")
                 bidder_page = _bid_bind.get("evidence_page") or bidder_page
+
+            if _is_bad_requirement_name(req_key):
+                continue
+            if _is_bad_requirement_value(req_val):
+                continue
+
+            forbidden_terms = _package_forbidden_terms(pkg.item_name)
+            row_text = " ".join(x for x in [req_key, req_val, tender_quote, bidder_quote] if x)
+            if forbidden_terms and any(tok in row_text for tok in forbidden_terms):
+                continue
+
+            mapping_confidence = _mapping_confidence_for_row(pkg, req_key, req_val, tender_quote)
 
             rows.append(
                 {
@@ -404,8 +495,9 @@ def _build_requirement_rows(
                     "category": _safe_text(requirement.get("category"), "technical_requirement"),
                     "package_id": _safe_text(requirement.get("package_id"), pkg.package_id),
                     "evidence_source": bidder_source or "招标原文",
-                    "evidence_quote": bidder_quote or tender_quote,
-                    "mapped": bool(tender_quote or bidder_quote),
+                    "evidence_quote": bidder_quote if (has_real_response and bidder_quote) else "",
+                    "mapping_confidence": mapping_confidence,
+                    "mapped": mapping_confidence == "high",
                     "has_real_response": has_real_response,
                     "bidder_evidence": bidder_quote,
                     "bidder_evidence_source": bidder_source,
@@ -429,26 +521,51 @@ def _build_requirement_rows(
     requirements = _effective_requirements(pkg, tender_raw)
     package_scoped_raw = _extract_package_technical_scope_text(pkg, tender_raw)
     rows: list[dict[str, Any]] = []
+
     for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
         source, quote, mapped = _extract_evidence_snippet(package_scoped_raw, req_key, req_val, tender_raw)
         response = _build_response_value(req_val, req_key=req_key, product=product)
         has_real_response = response != _PENDING_BIDDER_RESPONSE
-        # Build bidder evidence from product if available
+
         bidder_evidence = ""
+        bidder_source = ""
         if has_real_response and product is not None:
-            bidder_evidence = f"产品参数库：{req_key}={response}"
+            bidder_source = "产品参数库"
+            bidder_evidence = f"{req_key}：{response}"
+
+        if not _row_is_usable_for_package(
+                pkg,
+                req_key,
+                req_val,
+                tender_quote=quote,
+                bidder_quote=bidder_evidence,
+        ):
+            continue
+
+        mapping_confidence = _mapping_confidence_for_row(pkg, req_key, req_val, quote)
+
         rows.append(
             {
+                "requirement_id": "",
                 "key": req_key,
                 "requirement": req_val,
                 "response": response,
-                "evidence_source": source,
+                "category": category_filter or "technical_requirement",
+                "package_id": pkg.package_id,
+                "evidence_source": source or "招标原文",
                 "evidence_quote": quote,
-                "mapped": mapped,
+                "mapping_confidence": mapping_confidence,
+                "mapped": mapping_confidence == "high",
                 "has_real_response": has_real_response,
                 "bidder_evidence": bidder_evidence,
+                "bidder_evidence_source": bidder_source,
+                "bidder_evidence_page": None,
+                "source_page": None,
+                "tender_quote": quote,
+                "deviation_status": "无偏离" if has_real_response and bidder_evidence else "待核实",
             }
         )
+
     return rows, len(requirements)
 
 
@@ -464,7 +581,7 @@ def _build_deviation_table(
     只接收 technical_requirement 类别的行，非技术行会被过滤并记录日志。
     """
     # 过滤：技术偏离表只接受技术参数类行
-    _ALLOWED_TECH_CATEGORIES = {"technical_requirement", "config_requirement", ""}
+    _ALLOWED_TECH_CATEGORIES = {"technical_requirement", ""}
     filtered_rows = []
     for row in requirement_rows:
         cat = row.get("category", "")
@@ -514,13 +631,9 @@ def _build_deviation_table(
             deviation = _safe_text(row.get("deviation_status"), "无偏离")
             remark = "已匹配产品参数"
         else:
-            tender_quote = _safe_text(row.get("tender_quote"), "")
-            evidence_text = (
-                f"{_markdown_cell(_safe_text(row.get('evidence_source'), '招标原文'))}；"
-                f"{_markdown_cell(tender_quote or '待补充（投标方证据）')}"
-            )
+            evidence_text = "【待补证：投标方证据】"
             deviation = _safe_text(row.get("deviation_status"), "待核实")
-            remark = "需补充投标方证据"
+            remark = "待补投标方证据后再判定"
 
         if bidder_page is not None:
             page_ref = str(bidder_page)
@@ -539,5 +652,4 @@ def _build_deviation_table(
         )
 
     return "\n".join(lines)
-
 

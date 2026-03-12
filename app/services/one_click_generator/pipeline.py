@@ -138,7 +138,7 @@ def generate_bid_sections(
             pp_dict[pid] = prof.model_dump()
 
     sections = [
-        _gen_qualification(llm, tender),
+        _gen_qualification(llm, tender, active_packages=active_packages),
         _gen_compliance(llm, tender),
         _gen_technical(
             llm,
@@ -150,6 +150,7 @@ def generate_bid_sections(
             product_profiles=pp_dict,
             tender_bindings=all_tender_bindings,
             bid_bindings=all_bid_bindings,
+            active_packages=active_packages,
         ),
         _gen_appendix(
             llm,
@@ -159,6 +160,7 @@ def generate_bid_sections(
             normalized_result=normalized_result,
             evidence_result=evidence_result,
             product_profiles=pp_dict,
+            active_packages=active_packages,
         ),
     ]
 
@@ -230,7 +232,7 @@ def generate_bid_sections(
                 or gate.anchor_pollution_rate > gate.anchor_pollution_threshold
                 or gate.nested_placeholder_detected
             )
-            if structural_fail and require_validation_pass:
+            if structural_fail:
                 raise ValueError(
                     f"structural draft corruption: contamination={gate.package_contamination_detected}, "
                     f"mixing={gate.table_category_mixing}, "
@@ -238,12 +240,10 @@ def generate_bid_sections(
                     f"anchor_pollution={gate.anchor_pollution_rate:.2f}, "
                     f"nested_placeholders={gate.nested_placeholder_detected}"
                 )
+
+            if require_validation_pass:
+                raise ValueError("validation gate failed")
             sections = normalize_pending_draft_sections(sections)
-            logger.warning(
-                "自愈已执行 %d 轮仍未通过硬校验，输出待补充底稿。原因: %s",
-                heal_pass,
-                "；".join(reasons) or "未知原因",
-            )
             break
 
         # ── 自愈动作 ──
@@ -272,7 +272,15 @@ def generate_bid_sections(
         after_snapshot = tuple((s.section_title, s.content) for s in sections)
         heal_pass += 1
         if after_snapshot == before_snapshot:
-            # 无新修复动作 — 若有不可自愈的问题，转为待补充底稿
+            structural_fail = (
+                    gate.package_contamination_detected
+                    or gate.table_category_mixing
+                    or gate.snippet_truncation_count > gate.snippet_truncation_threshold
+                    or gate.anchor_pollution_rate > gate.anchor_pollution_threshold
+                    or gate.nested_placeholder_detected
+            )
+            if structural_fail:
+                raise ValueError("no heal progress and structural corruption remains")
             if not gate.passes_external_gate():
                 sections = normalize_pending_draft_sections(sections)
             logger.info(

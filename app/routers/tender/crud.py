@@ -3,6 +3,8 @@ from __future__ import annotations
 import app.routers.tender.common as _common
 import importlib
 
+from app.services.quality_gate import render_editable_draft_sections
+
 
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
@@ -542,7 +544,9 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
         )
 
     elif format == "markdown":
-        sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
+        sections = render_editable_draft_sections(
+            [BidDocumentSection(**s) for s in bid_info["sections"]]
+        )
         output_file = BID_OUTPUT_DIR / f"{bid_id}.md"
 
         with output_file.open("w", encoding="utf-8") as f:

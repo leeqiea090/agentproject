@@ -51,8 +51,8 @@ def test_structured_technical_block_contains_evidence_mapping() -> None:
         price=10.0,
     )
     block = _build_structured_technical_block(package, product)
-    assert "技术条款证据映射表" in block
-    assert "证据映射完整性" in block
+    assert "技术条款证据映射表" not in block
+    assert "证据映射完整性" not in block
     assert "参数待补充" not in block
     assert "承诺满足" not in block
     assert "3个" in block

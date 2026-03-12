@@ -14,6 +14,9 @@ from app.services.one_click_generator import (
     _gen_technical,
     generate_bid_sections,
 )
+from app.services.evidence_binder import _extract_evidence_snippet
+from app.services.one_click_generator.config_tables import _build_main_parameter_table
+from app.services.requirement_processor import _extract_package_scope_text
 from app.services.tender_parser import TenderParser
 
 
@@ -106,8 +109,8 @@ def test_technical_section_is_forced_structured() -> None:
     assert "### 包1：" in section.content
     assert "技术偏离及详细配置明细表" in section.content
     assert "详细配置明细表" in section.content
-    assert "技术响应检查清单" in section.content
-    assert "技术条款证据映射表" in section.content
+    assert "技术响应检查清单" not in section.content
+    assert "技术条款证据映射表" not in section.content
     assert "（第1包）" not in section.content
     assert "具体参数待填写" not in section.content
     assert "招标原文长度" not in section.content
@@ -476,6 +479,89 @@ def test_configuration_table_can_use_product_profile_config_items() -> None:
     assert "说明书 | 份 | 1 |" in table
 
 
+def test_extract_package_scope_text_skips_multi_package_summary_lines() -> None:
+    pkg = ProcurementPackage(
+        package_id="1",
+        item_name="进口全自动电泳仪（2025342）",
+        quantity=1,
+        budget=100000.0,
+        technical_requirements={},
+        delivery_time="",
+        delivery_place="",
+    )
+    tender_raw = (
+        "投标范围：包1、包2、包3\n"
+        "包1：进口全自动电泳仪（2025342）\n"
+        "技术参数：\n"
+        "检测原理：琼脂凝胶电泳法\n"
+        "包2：进口荧光显微镜（2025344）\n"
+        "技术参数：\n"
+        "照明系统：柯勒照明\n"
+    )
+
+    scope = _extract_package_scope_text(
+        pkg,
+        tender_raw,
+        other_package_names=("进口荧光显微镜（2025344）",),
+    )
+
+    assert "投标范围：包1、包2、包3" not in scope
+    assert "检测原理：琼脂凝胶电泳法" in scope
+    assert "照明系统：柯勒照明" not in scope
+
+
+def test_evidence_snippet_does_not_fallback_to_other_package_text() -> None:
+    source, quote, mapped = _extract_evidence_snippet(
+        "包1 技术参数\n检测原理：琼脂凝胶电泳法\n",
+        "照明系统",
+        "柯勒照明",
+        fallback_raw="包2 技术参数\n照明系统：柯勒照明\n",
+    )
+
+    assert source == "招标原文片段"
+    assert not mapped
+    assert quote == ""
+
+
+def test_main_parameter_table_filters_out_non_technical_rows() -> None:
+    tender = _sample_tender(project_name="检验科设备采购项目")
+    pkg = tender.packages[0]
+
+    table = _build_main_parameter_table(
+        pkg,
+        tender_raw="",
+        normalized_result={
+            "technical_requirements": [
+                {
+                    "package_id": "1",
+                    "requirement_id": "pkg1-req-001",
+                    "param_name": "激光器",
+                    "normalized_value": "≥3",
+                    "category": "technical_requirement",
+                },
+                {
+                    "package_id": "1",
+                    "requirement_id": "pkg1-req-002",
+                    "param_name": "质保",
+                    "normalized_value": "进口一年，国产三年",
+                    "category": "service_requirement",
+                },
+                {
+                    "package_id": "1",
+                    "requirement_id": "pkg1-req-003",
+                    "param_name": "装箱配置单",
+                    "normalized_value": "详见招标文件",
+                    "category": "config_requirement",
+                },
+            ]
+        },
+    )
+
+    assert "激光器" in table
+    assert "质保" not in table
+    assert "装箱配置单" not in table
+
+
 def test_requirement_rows_trim_evidence_before_configuration_and_complaint_sections() -> None:
     tender = _sample_tender(project_name="检验科设备采购项目")
     pkg = tender.packages[0]
@@ -575,6 +661,44 @@ def test_validation_gate_does_not_flag_meaningful_short_param_names_as_truncated
     assert gate.snippet_truncation_count == 0
 
 
+def test_validation_gate_does_not_use_fixed_package_ids_for_device_pollution() -> None:
+    tender = _sample_tender(project_name="流式细胞分析仪采购项目")
+    sections = [
+        BidDocumentSection(
+            section_title="第三章 商务及技术部分",
+            content=(
+                "### 包1：流式细胞分析仪\n"
+                "### （一）技术偏离及详细配置明细表\n"
+                "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 说明/验收备注 |\n"
+                "|---|---|---|---|---|---|---|---|\n"
+                "| 1.1 | 激光器：≥3 | X100 | 3个独立激光器 | 无偏离 | 产品参数 | 8 | 已匹配产品参数 |\n"
+            ),
+            attachments=[],
+        )
+    ]
+    normalized_reqs = {
+        "1": [
+            NormalizedRequirement(
+                package_id="1",
+                requirement_id="pkg1-req-001",
+                param_name="激光器",
+                raw_text="激光器：≥3",
+                source_text="激光器：≥3",
+            )
+        ]
+    }
+
+    gate = compute_validation_gate(
+        sections=sections,
+        normalized_reqs=normalized_reqs,
+        evidence_bindings={},
+        target_package_ids=["1"],
+        tender=tender,
+    )
+
+    assert not gate.package_contamination_detected
+
+
 def test_generate_bid_sections_strict_mode_outputs_pending_draft_when_validation_still_fails() -> None:
     tender = _sample_tender(project_name="单包严格外发校验项目")
     raw_text = (
@@ -592,5 +716,9 @@ def test_generate_bid_sections_strict_mode_outputs_pending_draft_when_validation
 
     combined = "\n".join(section.content for section in result.sections)
     assert result.draft_level.value == "internal_draft"
-    assert "待补充" in combined
     assert "【内部草稿" in combined
+    assert combined.count("【内部草稿") == 1
+    assert "【待填写" in combined
+    assert "[TODO:" not in combined
+    assert "（此处留空，待上传" not in combined
+    assert not any(section.section_title == "售后服务要求响应表" for section in result.sections)

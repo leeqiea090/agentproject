@@ -14,7 +14,12 @@ from app.schemas import (
     TenderDocument,
     ProcurementPackage
 )
-
+from app.services.requirement_processor import (
+    _find_requirement_pair_position,
+    _is_bad_requirement_name,
+    _is_bad_requirement_value,
+    _package_forbidden_terms,
+)
 try:
     from docx import Document as _DocxDocument
     _DOCX_AVAILABLE = True
@@ -501,7 +506,47 @@ class TenderParser:
                 content = content[:-3]
             content = content.strip()
 
-            return json.loads(content)
+            raw = json.loads(content)
+            if not isinstance(raw, dict):
+                return {}
+
+            forbidden_terms = _package_forbidden_terms(item_name or "")
+            cleaned: dict[str, str] = {}
+
+            for k, v in raw.items():
+                key = str(k).strip()
+                val = str(v).strip()
+                if not key or not val:
+                    continue
+                if _is_bad_requirement_name(key):
+                    continue
+                if _is_bad_requirement_value(val):
+                    continue
+
+                raw_text = f"{key}：{val}"
+                if forbidden_terms and any(tok in raw_text for tok in forbidden_terms):
+                    continue
+
+                # 回贴验证：必须能在当前包 scope 中找到
+                pos, matched = _find_requirement_pair_position(scope_text, key, val)
+                if pos < 0:
+                    # 放宽一档：至少 key 要在当前包 scope 中出现
+                    key_pos = scope_text.find(key)
+                    if key_pos < 0:
+                        continue
+
+                    # 只检查 key 附近的局部上下文，不能扫整个 scope_text
+                    left = max(0, key_pos - 40)
+                    right = min(len(scope_text), key_pos + len(key) + 80)
+                    local_excerpt = scope_text[left:right]
+
+                    bad_scope_hints = ("投标报价", "报价书", "预算", "履约保证金", "付款方式", "交货期")
+                    if any(tok in local_excerpt for tok in bad_scope_hints):
+                        continue
+
+                cleaned[key] = val
+
+            return cleaned
         except:
             logger.warning(f"无法解析采购包{package_id}的技术要求")
             return {}
