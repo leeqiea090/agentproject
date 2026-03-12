@@ -36,10 +36,10 @@ _ONE_CLICK_STEP_LABELS = {
 
 _PLACEHOLDER_COMPANY = CompanyProfile(
     company_id="placeholder",
-    name="[投标方公司名称]",
-    legal_representative="[法定代表人]",
-    address="[公司注册地址]",
-    phone="[联系电话]",
+    name="【待填写：投标人名称】",
+    legal_representative="【待填写：法定代表人】",
+    address="【待填写：公司注册地址】",
+    phone="【待填写：联系电话】",
 )
 
 def _set_one_click_job_status(

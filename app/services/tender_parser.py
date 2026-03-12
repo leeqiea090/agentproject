@@ -29,6 +29,29 @@ except ImportError:
 logger = logging.getLogger(__name__)
 _FALLBACK_PARSE_CHAR_LIMITS = (24000, 16000, 10000)
 
+def _fails_package_domain_guard(item_name: str, key: str, req: str) -> bool:
+    """
+    防止不同包的技术条款串包。
+    例如：化学发光设备不应出现“琼脂凝胶电泳法”，
+    电泳设备不应出现“流式细胞分析仪”“化学发光法”。
+    """
+    item = _safe_text(item_name, "")
+    text = f"{_safe_text(key, '')} {_safe_text(req, '')}"
+
+    guards: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+        (("电泳",), ("化学发光", "流式细胞")),
+        (("化学发光",), ("电泳", "流式细胞")),
+        (("流式细胞",), ("电泳", "化学发光")),
+        (("荧光显微镜",), ("流式细胞", "化学发光", "电泳法")),
+        (("荧光操作仪",), ("流式细胞", "化学发光", "电泳法")),
+    ]
+
+    for item_tokens, bad_tokens in guards:
+        if any(tok in item for tok in item_tokens):
+            if any(bad in text for bad in bad_tokens):
+                return True
+    return False
+
 
 class TenderParser:
     """招标文件解析器"""

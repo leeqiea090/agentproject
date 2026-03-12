@@ -75,6 +75,14 @@ def _normalize_title(text: str) -> str:
     """标题归一化（用于去重匹配）"""
     return re.sub(r"[\s#`*:：、（）()\-—_]", "", text or "")
 
+def _normalize_cover_placeholder(value: str, label: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return f"【待填写：{label}】"
+    if text.startswith("[") and text.endswith("]"):
+        return f"【待填写：{label}】"
+    return text
+
 
 def _clean_markdown_content(section_title: str, content: str) -> str:
     """
@@ -312,9 +320,9 @@ def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     info = [
-        ("供应商全称", company.name),
-        ("法定代表人", company.legal_representative),
-        ("联系电话", company.phone),
+        ("供应商全称", _normalize_cover_placeholder(company.name, "投标人名称")),
+        ("法定代表人", _normalize_cover_placeholder(company.legal_representative, "法定代表人")),
+        ("联系电话", _normalize_cover_placeholder(company.phone, "联系电话")),
         ("日期", datetime.now().strftime("%Y年%m月%d日")),
     ]
     for row_idx, (label, val) in enumerate(info):

@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 import logging
+import re
+from typing import Any
 
 import app.services.one_click_generator.common as _common
 import app.services.evidence_binder as _evidence_binder
 import app.services.requirement_processor as _requirement_processor
+from app.schemas import ProcurementPackage, TenderDocument
+from app.services.evidence_binder import _extract_evidence_snippet, _is_dirty_evidence_snippet
+from app.services.one_click_generator.common import (
+    _HARD_REQUIREMENT_MARKERS,
+    _MAX_TECH_ROWS_PER_PACKAGE,
+    _PENDING_BIDDER_RESPONSE,
+    _RICH_EXPANSION_MODE,
+    _as_text,
+    _safe_text,
+)
+from app.services.requirement_processor import (
+    _effective_requirements,
+    _extract_match_tokens,
+    _extract_package_technical_scope_text,
+    _is_bad_requirement_name,
+    _is_bad_requirement_value,
+    _markdown_cell,
+    _package_forbidden_terms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -600,17 +621,22 @@ def _build_requirement_rows(
 
     return rows, len(requirements)
 
-def _recommended_evidence_label(req_key: str) -> str:
-    key = _as_text(req_key)
+def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
+    text = f"{_as_text(req_key)} {_as_text(requirement)}"
 
-    if any(k in key for k in ("注册", "备案", "说明书", "标签", "合格证", "追溯", "电子签名", "审计追踪")):
-        return "【待补证：注册证/说明书/标签/厂家承诺】"
+    if any(k in text for k in ("注册证", "备案凭证", "合格证", "说明书", "标签", "授权文件")):
+        return "【待补证：注册证/备案凭证/说明书/标签/授权文件】"
 
-    if any(k in key for k in ("培训", "维修", "售后", "响应", "质保", "保修", "备用机", "升级服务")):
-        return "【待补证：售后方案/培训方案/厂家服务承诺】"
+    if any(k in text for k in ("室间质评", "能力验证", "检测报告", "质控品", "临检中心")):
+        return "【待补证：室间质评报告/能力验证报告/检测报告】"
 
-    return "【待补证：说明书/彩页对应页码】"
+    if any(k in text for k in ("LIS", "分析软件", "审计追踪", "电子签名", "双向传输")):
+        return "【待补证：软件说明书/功能截图/厂家说明】"
 
+    if any(k in text for k in ("培训", "安装调试", "售后", "响应时间", "维护保养", "备用机")):
+        return "【待补证：售后服务方案/培训计划/厂家承诺】"
+
+    return "【待补证：说明书/彩页/厂家参数表】"
 
 def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
     text = _safe_text(raw_value, "")
@@ -618,7 +644,7 @@ def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
         "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充",
     }
     if text in bad_values or "待填写" in text:
-        return "无偏离" if has_real else "待确认"
+        return "无偏离" if has_real else "【待填写：无偏离/正偏离/负偏离】"
     return text
 
 def _build_deviation_table(
@@ -633,14 +659,34 @@ def _build_deviation_table(
     只接收 technical_requirement 类别的行，非技术行会被过滤并记录日志。
     """
     # 过滤：技术偏离表只接受技术参数类行
-    _ALLOWED_TECH_CATEGORIES = {"technical_requirement", ""}
+    # 过滤：技术偏离表只接受“纯技术参数”条目。
+    # 即使 category 为空，只要文本里明显是服务/验收/商务/执行标准，也强制剔除。
+    _NONTECH_HINTS = (
+        "售后", "维修", "维保", "保修", "培训", "响应时间", "备用机",
+        "验收", "试运行", "安装调试", "到货验收", "验收标准", "计量检测",
+        "执行标准", "包装标准", "商务", "付款", "交货期", "违约",
+    )
+
     filtered_rows = []
     for row in requirement_rows:
-        cat = row.get("category", "")
-        if cat and cat not in _ALLOWED_TECH_CATEGORIES:
+        cat = _safe_text(row.get("category"), "")
+        text = f"{_safe_text(row.get('key'), '')} {_safe_text(row.get('requirement'), '')}"
+
+        if cat == "technical_requirement":
+            filtered_rows.append(row)
+            continue
+
+        if cat and cat != "technical_requirement":
             logger.debug("技术偏离表剔除非技术行: key=%s category=%s", row.get("key", "?"), cat)
             continue
+
+        # category 为空时，增加一层文本兜底过滤
+        if any(tok in text for tok in _NONTECH_HINTS):
+            logger.debug("技术偏离表剔除疑似非技术行: key=%s text=%s", row.get("key", "?"), text[:80])
+            continue
+
         filtered_rows.append(row)
+
     requirement_rows = filtered_rows
 
     # 产品身份信息
@@ -656,16 +702,15 @@ def _build_deviation_table(
         f"项目编号：{tender.project_number}",
         f"投标型号：{p_mfr} {p_model}" if p_model else "",
         "",
-        "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 说明/验收备注 |",
+        "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 备注 |",
         "|---|---|---|---|---|---|---|---|",
     ]
     lines = [line for line in lines if line or line == ""]
 
     if not requirement_rows:
         lines.append(
-            f"| {pkg.package_id}.1 | 详见招标文件采购需求 | {p_model or '[待填写]'} | {_PENDING_BIDDER_RESPONSE} | 待核实 | 结构化解析结果 | — | 建议复核原文并补齐投标方证据 |"
+            f"| {pkg.package_id}.1 | 详见招标文件采购需求 | {p_model or '[待填写]'} | {_PENDING_BIDDER_RESPONSE} | 【待填写：无偏离/正偏离/负偏离】 | 【待补证：说明书/彩页/厂家参数表】 | 【待填写：页码】 | — |"
         )
-        return "\n".join(lines)
 
     for idx, row in enumerate(requirement_rows, start=1):
         clause_no = f"{pkg.package_id}.{idx}"
@@ -681,27 +726,31 @@ def _build_deviation_table(
             source_text = bidder_source or _safe_text(row.get("evidence_source"), "投标方资料")
             evidence_text = f"{_markdown_cell(source_text)}；{_markdown_cell(bidder_ev)}"
             deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
-            remark = "已匹配产品参数"
+            remark = "_"
         else:
-            evidence_text = _recommended_evidence_label(str(row.get("key", "")))
+            evidence_text = _recommended_evidence_label(
+                str(row.get("key", "")),
+                str(row.get("requirement", "")),
+            )
             deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
-            remark = "待补证后人工复核"
+            remark = "_"
 
         if bidder_page is not None:
             page_ref = str(bidder_page)
         elif row.get("source_page") is not None:
             page_ref = str(row.get("source_page"))
         else:
-            page_ref = "—"
+            page_ref = "【待填写：页码】"
 
         lines.append(
             f"| {clause_no} | {req} | {model_cell} | {response_cell} | {deviation} | {evidence_text} | {page_ref} | {remark} |"
         )
 
     if total_requirements > len(requirement_rows):
+        lines.append("")
         lines.append(
-            f"| — | 其余技术参数 | {p_model or '[待填写]'} | {_PENDING_BIDDER_RESPONSE} | 待核实 | 【待补证：投标方证据】 | — | 其余条款待补实参及证据 |"
+            f"> 说明：当前仅结构化展示 {len(requirement_rows)} / {total_requirements} 条技术要求；"
+            "未结构化条款请回看原采购文件原文逐条补齐，不再使用“其余技术参数”笼统占位。"
         )
 
     return "\n".join(lines)
-

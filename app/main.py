@@ -23,15 +23,15 @@ app = FastAPI(
     openapi_tags=[
         {
             "name": "知识库",
-            "description": "管理知识库：导入文本/文件、语义检索、查看统计信息",
+            "description": "",
         },
         {
             "name": "智能体",
-            "description": "运行多智能体团队，完成招投标文档分析与生成任务",
+            "description": "",
         },
         {
             "name": "招投标系统",
-            "description": "招标文件解析、企业信息管理、投标文件自动生成",
+            "description": "",
         },
     ],
 )

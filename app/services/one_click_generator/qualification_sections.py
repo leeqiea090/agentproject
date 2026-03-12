@@ -2,6 +2,26 @@ from __future__ import annotations
 
 import app.services.one_click_generator.common as _common
 import app.services.one_click_generator.table_builders as _table_builders
+from langchain_openai import ChatOpenAI
+
+from app.schemas import BidDocumentSection, ProcurementPackage, TenderDocument
+from app.services.one_click_generator.common import (
+    _ADDRESS,
+    _AUTHORIZED_REP,
+    _COMPANY,
+    _LEGAL_REP,
+    _PHONE,
+    _allow_consortium,
+    _fmt_money,
+    _has_imported_clues,
+    _infer_package_quantity,
+    _is_medical_project,
+    _normalize_commitment_term,
+    _package_scope,
+    _safe_text,
+    _supplier_commitment_title,
+    _today,
+)
 
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
@@ -15,54 +35,32 @@ for _module in (_common, _table_builders,):
 del _module
 def _build_qualification_license_block(tender: TenderDocument) -> str:
     lines = [
-        "### （一）投标公司资质-营业执照",
-        "（此处留空，待上传证件）",
+        "### 证照/注册文件台账",
+        "| 材料项 | 对应主体 | 是否适用 | 建议文件名 | 核对要点 |",
+        "|---|---|---|---|---|",
+        "| 投标公司营业执照 | 投标人 | 必须 | 01_投标人营业执照.pdf | 核对名称、统一社会信用代码、经营状态 |",
     ]
 
     if _is_medical_project(tender):
-        lines.extend(
-            [
-                "",
-                "### （二）投标公司资质-医疗器械经营许可证/备案凭证（如适用）",
-                "（此处留空，待上传证件）",
-                "",
-                "### （三）生产厂家资质-营业执照",
-                "（此处留空，待上传证件）",
-                "",
-                "### （四）生产厂家资质-医疗器械生产/经营许可文件（如适用）",
-                "（此处留空，待上传证件）",
-                "",
-                "### （五）投标产品注册证/备案证明（如适用）",
-                "（此处留空，待上传证件）",
-            ]
-        )
+        lines.extend([
+            "| 投标公司医疗器械经营许可证/备案凭证 | 投标人 | 如适用 | 02_投标人医疗器械经营许可或备案.pdf | 核对主体名称、许可/备案范围、有效状态 |",
+            "| 生产厂家营业执照 | 生产厂家 | 必须 | 03_生产厂家营业执照.pdf | 核对主体名称与授权链、注册证信息一致 |",
+            "| 生产厂家医疗器械生产/经营许可文件 | 生产厂家 | 如适用 | 04_生产厂家医疗器械生产或经营许可.pdf | 核对许可范围与产品类别匹配 |",
+            "| 投标产品注册证/备案证明 | 产品 | 如适用 | 05_产品注册证或备案凭证.pdf | 核对产品名称、型号规格、注册人、有效期 |",
+        ])
     else:
-        lines.extend(
-            [
-                "",
-                "### （二）与项目相关的行业资质证书（如适用）",
-                "（此处留空，待上传证件）",
-                "",
-                "### （三）质量管理体系或服务能力证明（如适用）",
-                "（此处留空，待上传证件）",
-            ]
-        )
+        lines.extend([
+            "| 行业资质证书 | 投标人 | 如适用 | 02_行业资质证书.pdf | 核对资质范围与项目内容匹配 |",
+            "| 质量管理体系或服务能力证明 | 投标人 | 如适用 | 03_质量体系或服务能力证明.pdf | 核对证书有效期与认证范围 |",
+        ])
 
-    lines.extend(
-        [
-            "",
-            "### （六）投标产品授权文件",
-            "（此处留空，待上传证件）",
-        ]
+    lines.append(
+        "| 投标产品授权文件 | 投标人/生产厂家 | 如需授权 | 06_授权文件.pdf | 核对授权链、品牌型号、有效期 |"
     )
 
     if _has_imported_clues(tender):
-        lines.extend(
-            [
-                "",
-                "### （七）进口产品合法来源与报关资料（如适用）",
-                "（此处留空，待上传证明材料）",
-            ]
+        lines.append(
+            "| 进口产品合法来源与报关资料 | 产品/进口链路 | 如适用 | 07_进口合法来源及报关资料.pdf | 核对报关单、海关信息、供货链路 |"
         )
 
     return "\n".join(lines)
@@ -70,24 +68,20 @@ def _build_qualification_license_block(tender: TenderDocument) -> str:
 
 def _build_enterprise_declaration_block(tender: TenderDocument, today: str) -> str:
     _ = tender
-    return f"""## 八、企业类型声明函（分支选择）
-请按企业实际情况勾选并提交对应材料：
+    return f"""## 八、企业类型声明函（单选保留一项）
+办理说明：请仅保留与企业实际情况一致的一项，其余整段删除；不要只勾选不删除。
 
-### 分支A：中小企业声明函（货物/服务）
-□ 适用。  
+### 选项A：中小企业声明函（货物/服务）
 本公司郑重声明：本次投标所提供货物/服务由符合《中小企业划型标准规定》的企业制造/承接。
-（此处留空，待按采购文件附表填写企业名称、从业人数、营业收入、资产总额等信息）
+【待填写：按采购文件附表填写企业名称、从业人数、营业收入、资产总额等信息】
 
-### 分支B：监狱企业证明材料
-□ 适用。  
+### 选项B：监狱企业证明材料
 如本单位属于监狱企业，提交由省级以上监狱管理局、戒毒管理局（含新疆生产建设兵团）出具的证明文件。
 
-### 分支C：残疾人福利性单位声明函
-□ 适用。  
+### 选项C：残疾人福利性单位声明函
 如本单位属于残疾人福利性单位，提交残疾人福利性单位声明函及相关证明材料。
 
-### 分支D：非中小企业声明
-□ 适用。  
+### 选项D：非中小企业声明
 本公司郑重声明：本次投标所提供货物/服务不属于中小企业政策优惠适用范围，并对声明真实性负责。
 
 企业名称（盖章）：{_COMPANY}  
@@ -95,17 +89,49 @@ def _build_enterprise_declaration_block(tender: TenderDocument, today: str) -> s
 日期：{today}"""
 
 
+def _build_social_insurance_checklist() -> str:
+    return "\n".join([
+        "### 社保/保险证明清单",
+        "| 材料项 | 建议期间 | 建议文件名 | 备注 |",
+        "|---|---|---|---|",
+        "| 基本养老保险缴纳证明 | 最近1-3个月，以采购文件为准 | 01_基本养老保险缴纳证明.pdf | 主体应与投标人名称一致 |",
+        "| 基本医疗保险及生育保险缴纳证明 | 最近1-3个月，以采购文件为准 | 02_基本医疗及生育保险缴纳证明.pdf | 主体应与投标人名称一致 |",
+        "| 工伤保险缴纳证明 | 最近1-3个月，以采购文件为准 | 03_工伤保险缴纳证明.pdf | 主体应与投标人名称一致 |",
+        "| 失业保险缴纳证明 | 最近1-3个月，以采购文件为准 | 04_失业保险缴纳证明.pdf | 主体应与投标人名称一致 |",
+    ])
+
+
+def _build_public_record_checklist() -> str:
+    return "\n".join([
+        "### 查询/截图清单",
+        "| 平台 | 查询主体 | 建议保留内容 | 建议文件名 |",
+        "|---|---|---|---|",
+        "| 国家企业信用信息公示系统 | 投标人 | 主体名称、统一社会信用代码、登记状态 | 01_国家企业信用信息公示系统.png |",
+        "| 中国执行信息公开网 | 法定代表人/单位负责人 | 查询关键词、查询结果页 | 02_中国执行信息公开网.png |",
+        "| 中国裁判文书网 | 投标人/法定代表人 | 查询关键词、结果页 | 03_中国裁判文书网.png |",
+        "| 信用中国 | 投标人 | 主体名称、统一社会信用代码、信用结果页 | 04_信用中国.png |",
+        "| 中国政府采购网 | 投标人 | 严重违法失信行为记录查询结果 | 05_中国政府采购网.png |",
+    ])
+
 def _build_consortium_declaration_block(tender: TenderDocument, today: str) -> str:
     allows = _allow_consortium(tender)
-    branch_b_hint = "如选择分支B，须同步提交联合体协议书及职责分工。" if allows else "分支B本项目不适用。"
-    return f"""## 四、联合体投标声明（分支选择）
-请按投标组织形式勾选：
-- □ 分支A：本次以独立投标方式参与，不组成联合体；
-- □ 分支B：本次以联合体方式参与；{branch_b_hint}
+    if not allows:
+        return f"""## 四、联合体投标声明
+本项目采购文件未允许联合体投标，现声明本次以独立投标方式参与，不组成联合体。
 
 投标人名称：{_COMPANY}  
 日期：{today}"""
+    return f"""## 四、联合体投标声明（单选保留一项）
+办理说明：请仅保留与实际投标组织形式一致的一项，其余整段删除，不要只勾选不删除。
 
+### 选项A：独立投标
+本次以独立投标方式参与，不组成联合体。
+
+### 选项B：联合体投标
+本次以联合体方式参与，并将同步提交联合体协议书及职责分工文件。
+
+投标人名称：{_COMPANY}  
+日期：{today}"""
 
 def _build_detail_quote_table(
     tender: TenderDocument,
@@ -134,7 +160,9 @@ def _build_detail_quote_table(
 
     lines.append(f"|  | **预算合计（参考）** |  |  |  |  |  | **{_fmt_money(total_budget)}** |")
     lines.append("|  | **投标总报价** |  |  |  |  |  | **[待填写]** |")
-    return "\n".join(lines)
+    table = "\n".join(lines)
+    table += "\n\n> 填写规则：每行“总价(元)” = “单价(元)” × “数量”；底部“投标总报价”应与第三章《报价一览表》保持一致。"
+    return table
 
 
 def _gen_qualification(
@@ -180,17 +208,7 @@ def _gen_qualification(
 承诺人（供应商盖章）：{_COMPANY}  
 日期：{today}
 
-### （一）基本养老保险缴纳证明
-（此处留空，待上传证明材料）
-
-### （二）基本医疗保险及生育保险缴纳证明
-（此处留空，待上传证明材料）
-
-### （三）工伤保险缴纳证明
-（此处留空，待上传证明材料）
-
-### （四）失业保险缴纳证明
-（此处留空，待上传证明材料）
+{_build_social_insurance_checklist()}
 
 ## 三、承诺通过合法渠道可查证无行贿犯罪记录
 {purchaser}：
@@ -201,20 +219,7 @@ def _gen_qualification(
 投标人名称：{_COMPANY}  
 日期：{today}
 
-### （一）全国企业信用信息公示系统截图
-（此处留空，待上传截图）
-
-### （二）中国执行信息公开网截图
-（此处留空，待上传截图）
-
-### （三）中国裁判文书网截图
-（此处留空，待上传截图）
-
-### （四）信用中国截图
-（此处留空，待上传截图）
-
-### （五）中国政府采购网截图
-（此处留空，待上传截图）
+{_build_public_record_checklist()}
 
 ## 四、其他承诺
 {purchaser}：
@@ -237,11 +242,11 @@ def _gen_qualification(
 日期：{today}
 
 ## 六、法定代表人及授权代表身份证明
-### （一）法定代表人身份证明
-（此处留空，待上传法定代表人身份证正反面复印件）
-
-### （二）授权代表身份证明
-（此处留空，待上传授权代表身份证正反面复印件）
+| 材料项 | 建议文件名 | 核对要点 | 备注 |
+|---|---|---|---|
+| 法定代表人身份证正反面复印件 | 01_法定代表人身份证.pdf | 姓名应与营业执照/授权书一致；身份证应在有效期内 | 【待填写：是否加盖公章】 |
+| 授权代表身份证正反面复印件 | 02_授权代表身份证.pdf | 姓名应与授权书一致；身份证应在有效期内 | 【待填写：是否加盖公章】 |
+| 授权委托书签字页 | 03_授权委托书签字盖章页.pdf | 法定代表人、授权代表、项目名称、项目编号应完整一致 | 【待填写：是否签字/盖章完成】 |
 
 ## 七、相关证件
 {license_block}
@@ -332,5 +337,4 @@ def _gen_compliance(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSecti
 {medical_extra_block}
 """
     return BidDocumentSection(section_title="第二章 符合性承诺", content=content.strip())
-
 

@@ -587,11 +587,14 @@ def annotate_draft_level(
     sections: list[BidDocumentSection],
     draft_level: DraftLevel,
 ) -> list[BidDocumentSection]:
-    """根据稿件等级添加水印/标注。"""
+    """根据稿件等级渲染可编辑底稿。
+    internal_draft 允许占位符，但默认不再把“内部草稿”横幅写进正文首段，
+    以免人工审核时忘删。
+    """
     if draft_level == DraftLevel.external_ready:
         return sections
 
-    return render_editable_draft_sections(sections, add_draft_watermark=True)
+    return render_editable_draft_sections(sections, add_draft_watermark=False)
 
 
 def _flatten_nested_placeholders(text: str) -> str:
@@ -1202,7 +1205,15 @@ def _heal_table_mixing(sections: list[BidDocumentSection]) -> list[BidDocumentSe
         ))
 
     # 将提取出的非技术行组成独立分表章节
-    if extracted_svc_lines:
+    # 如果正文里已经有结构化的非技术响应章节，则只做“从技术表移除”，
+    # 不再追加“自动分离”尾章。
+    has_structured_nontech_section = any(
+        "## 四、售后服务/配置/验收/资料要求响应" in (section.content or "")
+        for section in healed
+    )
+
+    # 将提取出的非技术行组成独立分表章节
+    if extracted_svc_lines and not has_structured_nontech_section:
         svc_content = "\n".join([
             "### 售后服务/培训要求响应表（自动分离）",
             "| 序号 | 要求内容 | 响应承诺 |",
@@ -1214,7 +1225,7 @@ def _heal_table_mixing(sections: list[BidDocumentSection]) -> list[BidDocumentSe
             content=svc_content,
         ))
 
-    if extracted_doc_lines:
+    if extracted_doc_lines and not has_structured_nontech_section:
         doc_content = "\n".join([
             "### 资料/文档要求响应表（自动分离）",
             "| 序号 | 要求内容 | 响应承诺 |",

@@ -1,14 +1,47 @@
 from __future__ import annotations
 
 import logging
+import re
+from typing import Any
 
 import app.services.one_click_generator.common as _common
 import app.services.one_click_generator.response_tables as _response_tables
 import app.services.evidence_binder as _evidence_binder
 import app.services.requirement_processor as _requirement_processor
-from app.schemas import ProcurementPackage
+from app.schemas import ClauseCategory, ProcurementPackage
+from app.services.one_click_generator.common import (
+    _CONFIG_EXIT_HINTS,
+    _CONFIG_ITEM_UNITS,
+    _CONFIG_REQUIREMENT_KEYS,
+    _CONFIG_SECTION_HINTS,
+    _as_text,
+    _contains_any,
+    _infer_package_quantity,
+    _safe_text,
+)
+from app.services.one_click_generator.response_tables import (
+    _build_requirement_rows,
+    _fuzzy_spec_lookup,
+    _row_is_usable_for_package,
+    _structured_requirements_for_package,
+)
+from app.services.requirement_processor import (
+    _classify_clause_category,
+    _effective_requirements,
+    _extract_package_configuration_scope_text,
+    _markdown_cell,
+    _normalize_requirement_line,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_main_param_note(raw_value: Any, has_real_response: bool) -> str:
+    text = _safe_text(raw_value, "")
+    bad_values = {"", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充"}
+    if text in bad_values or "待填写" in text:
+        return "无偏离" if has_real_response else "待确认"
+    return text
 
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
@@ -416,34 +449,9 @@ def _build_configuration_table(
         config_descriptions.append((name, usage, remark_full))
         idx += 1
 
-    # ── 第二层：配置功能描述章节 ──
-    # ── 第二层：只保留对人工审核真正有用的补充说明 ──
-    desc_lines: list[str] = []
-
-    if config_descriptions:
-        manual_items: list[str] = []
-
-        for name, usage, remark in config_descriptions:
-            if "【待填写" in remark or "【待补证" in remark:
-                manual_items.append(f"- {name}：{remark}")
-            elif any(k in name for k in ("说明书", "合格证", "装箱单", "保修卡")):
-                manual_items.append(f"- {name}：交货验收时核对文件清单")
-            elif any(k in name for k in ("培训", "安装", "调试")):
-                manual_items.append(f"- {name}：需补具体培训计划/实施安排")
-
-        if manual_items:
-            desc_lines.extend([
-                "",
-                "### （二-B）配置补充说明",
-                "",
-                "以下项目需人工补齐后再外发：",
-                *manual_items,
-                "",
-            ])
-
-    if desc_lines:
-        lines.extend(desc_lines)
-
+    # 备注列已经包含【待填写】/【待补证】占位，
+    # 不再重复生成“配置补充说明”，避免每包都出现一段解释性文字，
+    # 增加人工删改成本。
     return "\n".join(lines)
 
 
@@ -561,9 +569,14 @@ def _build_main_parameter_table(
     if total_rows == 0 or real_response_count / max(total_rows, 1) < 0.3:
         return "\n".join([
             f"### 包{pkg.package_id}：{pkg.item_name}",
-            "- 当前参数附件不展开重复主表内容。",
-            "- 请优先补齐第三章《技术偏离及详细配置明细表》中的“实际响应值、证据材料、页码”。",
-            "- 附件待补：产品彩页、说明书、注册证/备案凭证、厂家承诺、检测/质评数据。",
+            "| 待补项 | 回填位置 | 建议来源 | 处理动作 |",
+            "|---|---|---|---|",
+            "| 实际响应值 | 第三章对应包《技术偏离及详细配置明细表》 | 产品说明书/彩页/厂家参数表 | 逐条回填“实际响应值” |",
+            "| 证据材料 | 第三章对应包《技术偏离及详细配置明细表》 | 说明书/注册证/功能截图/厂家承诺 | 逐条回填“证据材料” |",
+            "| 页码 | 第三章对应包《技术偏离及详细配置明细表》 | 已整理PDF或彩页页码 | 逐条回填“页码” |",
+            "| 产品彩页 | 第四章《产品彩页》 | 厂家彩页/PDF | 上传附件并按包归档 |",
+            "| 注册证/备案凭证 | 第一章《相关证件》或第四章附件 | 国家药监局注册/备案信息、注册证扫描件 | 核对型号后上传 |",
+            "| 检测/质评数据 | 第四章《检测/质评数据节选》 | 室间质评报告/检测报告 | 上传附件并标明对应项目 |",
         ])
 
     lines = [
@@ -573,9 +586,9 @@ def _build_main_parameter_table(
     ]
 
     for idx, row in enumerate(technical_rows, start=1):
-        note = _safe_text(
+        note = _normalize_main_param_note(
             row.get("deviation_status"),
-            "无偏离" if row.get("has_real_response") else "待确认",
+            bool(row.get("has_real_response")),
         )
         lines.append(
             f"| {idx} | {_markdown_cell(str(row['key']))} | {_markdown_cell(str(row['requirement']))} | "

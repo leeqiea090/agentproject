@@ -408,7 +408,9 @@ def _quote_overview_table(
     else:
         rows.append("| 1 | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] |")
 
-    return "\n".join(headers + rows)
+    table = "\n".join(headers + rows)
+    table += "\n\n> 填写规则：每包“投标报价(元)”应与第四章《报价明细表》中对应包总价一致；“投标总报价”应等于各包投标报价合计。"
+    return table
 
 # ─── 分类过滤与包隔离辅助函数 ───
 

@@ -181,13 +181,26 @@ _DEVICE_FORBIDDEN_BY_HINT: dict[str, tuple[str, ...]] = {
         "液面探测技术", "移液量",
     ),
     "化学发光": (
-        "柯勒照明", "无限远校正光学系统",
-        "电泳槽", "染色槽", "电泳系统",
-        "激光器", "检测通道", "PMT", "流速模式"
+        "琼脂凝胶电泳法",
+        "琼脂凝胶电泳",
+        "电泳槽",
+        "染色槽",
+        "电泳系统",
+        "柯勒照明",
+        "无限远校正光学系统",
+        "激光器",
+        "检测通道",
+        "PMT",
+        "流速模式",
     ),
     "流式": (
-        "琼脂凝胶电泳", "电泳槽", "染色槽", "电泳系统",
-        "柯勒照明", "无限远校正光学系统"
+        "琼脂凝胶电泳法",
+        "琼脂凝胶电泳",
+        "电泳槽",
+        "染色槽",
+        "电泳系统",
+        "柯勒照明",
+        "无限远校正光学系统",
     ),
 }
 
@@ -704,6 +717,65 @@ def _strip_clause_prefix(text: str) -> str:
     return t.strip()
 
 
+def _looks_like_pure_document_clause(key: str, value: str) -> bool:
+    """
+    仅当条款本质上是在要求“提供资料/文件/证书”时，才归入 documentation_requirement。
+    如果是“技术/质量要求 + 需提供注册证/报告”，仍应保留在技术或质量主表里。
+    """
+    k = _safe_text(key, "")
+    v = _safe_text(value, "")
+    text = f"{k} {v}"
+
+    doc_heads = (
+        "说明书", "标签", "合格证", "装箱单", "技术资料", "中文技术资料",
+        "用户手册", "安装手册", "维护手册", "操作手册",
+        "注册证", "备案凭证", "授权文件", "随机文件", "维修保养手册",
+        "培训方案", "检测报告", "质评报告",
+    )
+    tech_heads = (
+        "检测项目", "质量要求", "检测性能", "性能", "速度", "通道", "样本位", "试剂位",
+        "适用标本", "稀释功能", "LIS", "检测器", "激光器", "分辨率", "流速",
+        "上样", "质控", "系统", "软件", "工作站", "试剂", "孔径", "颗粒", "温度控制",
+        "升级扩展", "液流模式", "数据处理", "临床应用",
+    )
+
+    if any(h in k for h in tech_heads):
+        return False
+    if any(h in k for h in doc_heads):
+        return True
+
+    pure_doc_patterns = (
+        "需提供注册证", "提供注册证",
+        "需提供备案凭证", "提供备案凭证",
+        "需提供授权文件", "提供授权文件",
+        "需提供说明书", "提供说明书",
+        "需提供合格证", "提供合格证",
+        "提供技术资料", "提供维修保养手册",
+        "提供培训方案", "提供检测报告",
+        "提供室间质评报告", "提供试剂列表",
+    )
+    if any(p in text for p in pure_doc_patterns):
+        # 只要同时带明显技术语义，就不要整条归到资料表
+        if any(h in text for h in tech_heads):
+            return False
+        return True
+
+    return False
+
+def _looks_like_explicit_technical_clause(text: str) -> bool:
+    technical_terms = (
+        "检测原理", "检测方法", "测试项目", "检测项目", "质量要求",
+        "检测速度", "分析速度", "样本位", "样本容量", "试剂位",
+        "进样方式", "加样系统", "急诊样本", "首个测试出结果时间",
+        "反应单元温度控制", "LIS", "双向传输", "反应系统",
+        "激光器", "检测通道", "检测器", "流速模式", "数据分辨率",
+        "自动加样工作站", "适用标本", "稀释功能", "分析软件",
+        "荧光补偿", "流动室", "交叉污染率", "检测分辨率",
+    )
+    return any(term in text for term in technical_terms)
+
+
+
 def _classify_clause_category(key: str, value: str) -> ClauseCategory:
     """
     条款分类：先走硬路由，再走关键词打分。
@@ -721,6 +793,9 @@ def _classify_clause_category(key: str, value: str) -> ClauseCategory:
     # 0) 重要/实质性条款标记：单独归类，后续不进技术主表
     if re.match(r"^\s*(实质性条款|重要条款|一般条款)", raw_key):
         return ClauseCategory.compliance_note
+
+    if _looks_like_explicit_technical_clause(text):
+        return ClauseCategory.technical_requirement
 
     # 1) 配置类硬路由
     if any(tok in key_n for tok in (
@@ -744,11 +819,8 @@ def _classify_clause_category(key: str, value: str) -> ClauseCategory:
         return ClauseCategory.service_requirement
 
     # 4) 文档/资料类硬路由
-    if any(tok in text for tok in (
-        "说明书", "标签", "合格证", "装箱单", "技术资料", "中文技术资料",
-        "用户手册", "安装手册", "维护手册", "操作手册",
-        "注册证", "备案凭证", "授权文件", "随机文件",
-    )):
+    # 4) 文档/资料类硬路由（仅限“纯资料条款”）
+    if _looks_like_pure_document_clause(key_n, val_n):
         return ClauseCategory.documentation_requirement
 
     # 5) 次级硬规则：明显服务词
