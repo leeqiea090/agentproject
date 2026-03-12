@@ -6,6 +6,7 @@ import app.services.one_click_generator.common as _common
 import app.services.one_click_generator.response_tables as _response_tables
 import app.services.evidence_binder as _evidence_binder
 import app.services.requirement_processor as _requirement_processor
+from app.schemas import ProcurementPackage
 
 logger = logging.getLogger(__name__)
 
@@ -20,29 +21,31 @@ for _module in (_common, _response_tables, _evidence_binder, _requirement_proces
 
 del _module
 def _classify_config_item(name: str) -> str:
-    """按关键词对配置项进行类别归类。
-
-    增强分类：核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料
+    """
+    配置项分类要优先保证“可人工审核”：
+    - 先判软件，再判随机文件/培训资料，再判耗材，再判附件，最后才判核心模块
+    - 严禁用单字“液”判断耗材，避免“液晶显示器”误伤
     """
     n = name.strip()
-    if any(k in n for k in ("主机", "整机", "仪器", "设备", "分析仪", "检测仪", "模块", "单元")):
-        return "核心模块"
-    if any(k in n for k in ("软件", "系统", "程序", "平台", "中间件")):
+
+    if any(k in n for k in ("软件", "程序", "平台", "分析软件", "应用软件", "工作站软件")):
         return "配套软件"
-    if any(k in n for k in ("试剂", "耗材", "液", "管路", "滤芯", "滤器", "消耗品", "墨盒", "色带")):
-        return "初始耗材"
+
     if any(k in n for k in ("说明书", "文件", "手册", "合格证", "报告", "彩页", "装箱单", "保修卡")):
         return "随机文件"
+
     if any(k in n for k in ("安装", "培训", "调试", "指导", "服务")):
         return "安装/培训资料"
-    if any(k in n for k in ("工具", "扳手", "螺丝", "钥匙")):
-        return "随机工具"
-    if any(k in n for k in ("附件", "配件", "接头", "适配", "支架", "台车", "推车", "底座", "托盘")):
+
+    if any(k in n for k in ("试剂", "耗材", "微球", "清洗液", "鞘液", "废液桶", "流式管", "滤芯", "墨盒", "色带")):
+        return "初始耗材"
+
+    if any(k in n for k in ("显示器", "打印机", "稳压电源", "UPS", "附件", "配件", "接头", "适配", "支架", "台车", "推车", "底座", "托盘", "电源线", "数据线", "连接线", "电缆", "网线")):
         return "标准附件"
-    if any(k in n for k in ("电源线", "数据线", "连接线", "电缆", "网线")):
-        return "标准附件"
-    if any(k in n for k in ("UPS", "稳压", "电源", "不间断")):
-        return "标准附件"
+
+    if any(k in n for k in ("主机", "整机", "检测主机", "分析主机", "检测单元", "核心模块")):
+        return "核心模块"
+
     return "标准附件"
 
 
@@ -394,12 +397,15 @@ def _build_configuration_table(
 
     # 收集配置项描述信息，用于第二层
     config_descriptions: list[tuple[str, str, str]] = []  # (name, usage, remark)
-
+    package_qty = str(_infer_package_quantity(pkg, tender_raw))
     for name, unit, qty, remark in config_items:
         # Enhance remark with product spec value if available
         matched_spec = _fuzzy_spec_lookup(product, name) if product else ""
         usage = _infer_config_usage(name)
         is_standard = "是" if _is_standard_config(name) else "选配"
+
+        if _classify_config_item(name) == "核心模块":
+            qty = package_qty
 
         if matched_spec:
             remark_full = f"{remark}；投标产品：{matched_spec}"
@@ -411,23 +417,33 @@ def _build_configuration_table(
         idx += 1
 
     # ── 第二层：配置功能描述章节 ──
-    desc_lines = [
-        "",
-        "### （二-B）配置功能描述",
-        "",
-    ]
-    p_name = _as_text(getattr(product, "product_name", "")) if product else pkg.item_name
-    for name, usage, remark in config_descriptions:
-        desc_lines.append(f"**{name}**")
-        desc_lines.append(f"- 用途说明：{usage}")
-        desc_lines.append(f"- 在{p_name}设备运行中的作用：{_infer_config_role(name, p_name)}")
-        if any(kw in name for kw in ("软件", "系统", "模块", "程序")):
-            desc_lines.append("- 涉及安装/培训：是，需安装调试后进行操作培训")
-        elif any(kw in name for kw in ("试剂", "耗材")):
-            desc_lines.append("- 涉及验收：是，需核对品名、规格、有效期")
-        desc_lines.append("")
+    # ── 第二层：只保留对人工审核真正有用的补充说明 ──
+    desc_lines: list[str] = []
 
-    lines.extend(desc_lines)
+    if config_descriptions:
+        manual_items: list[str] = []
+
+        for name, usage, remark in config_descriptions:
+            if "【待填写" in remark or "【待补证" in remark:
+                manual_items.append(f"- {name}：{remark}")
+            elif any(k in name for k in ("说明书", "合格证", "装箱单", "保修卡")):
+                manual_items.append(f"- {name}：交货验收时核对文件清单")
+            elif any(k in name for k in ("培训", "安装", "调试")):
+                manual_items.append(f"- {name}：需补具体培训计划/实施安排")
+
+        if manual_items:
+            desc_lines.extend([
+                "",
+                "### （二-B）配置补充说明",
+                "",
+                "以下项目需人工补齐后再外发：",
+                *manual_items,
+                "",
+            ])
+
+    if desc_lines:
+        lines.extend(desc_lines)
+
     return "\n".join(lines)
 
 
@@ -442,42 +458,54 @@ def _is_standard_config(name: str) -> bool:
 
 
 def _infer_config_usage(name: str) -> str:
-    """根据配置名称推断用途说明。"""
     n = name.strip()
-    if any(k in n for k in ("主机", "整机", "仪器", "设备", "分析仪", "检测仪")):
+
+    if any(k in n for k in ("主机", "整机", "检测主机", "分析主机", "检测单元", "核心模块")):
         return "核心检测/分析设备"
-    if any(k in n for k in ("软件", "系统", "模块", "程序")):
-        return "数据处理/分析/管理功能"
-    if any(k in n for k in ("试剂", "耗材", "液", "管路", "滤芯")):
-        return "日常运行消耗品"
-    if any(k in n for k in ("说明书", "文件", "手册", "合格证", "彩页")):
-        return "操作指导与合规文件"
-    if any(k in n for k in ("工具", "扳手", "螺丝", "钥匙")):
-        return "设备维护保障工具"
-    if any(k in n for k in ("附件", "配件", "接头", "适配", "支架", "台车")):
-        return "设备功能扩展/辅助配件"
-    if any(k in n for k in ("电源线", "数据线", "连接线", "电缆", "网线")):
-        return "设备连接/供电保障"
-    if any(k in n for k in ("UPS", "稳压", "电源", "不间断")):
-        return "设备电源稳定保障"
-    return "按招标文件配置要求提供"
+
+    if any(k in n for k in ("软件", "程序", "平台", "分析软件", "应用软件", "工作站软件")):
+        return "数据采集/分析/管理"
+
+    if any(k in n for k in ("试剂", "耗材", "微球", "清洗液", "鞘液", "流式管", "滤芯", "墨盒")):
+        return "首批运行耗材"
+
+    if any(k in n for k in ("说明书", "文件", "手册", "合格证", "彩页", "装箱单", "保修卡")):
+        return "随机文件"
+
+    if any(k in n for k in ("安装", "培训", "调试", "服务")):
+        return "安装/培训资料"
+
+    if any(k in n for k in ("显示器", "打印机", "稳压电源", "UPS", "支架", "台车", "电源线", "数据线")):
+        return "配套附件"
+
+    return "配套附件"
 
 
 def _infer_config_role(name: str, product_name: str) -> str:
-    """推断配置项在设备中的功能角色。"""
     n = name.strip()
-    if any(k in n for k in ("主机", "整机", "仪器", "设备")):
-        return f"作为{product_name}的核心运行单元，承载主要检测/分析功能"
-    if any(k in n for k in ("软件", "系统", "模块")):
-        return f"为{product_name}提供数据采集、分析和管理支持，是设备智能化运行的关键组件"
-    if any(k in n for k in ("试剂", "耗材")):
-        return f"为{product_name}日常运行提供必需消耗品，直接影响检测结果准确性"
-    if any(k in n for k in ("UPS", "稳压", "电源")):
-        return f"为{product_name}提供稳定电源保障，防止意外断电导致数据丢失或设备损坏"
-    if any(k in n for k in ("附件", "配件", "支架")):
-        return f"辅助{product_name}完成特定功能或扩展应用场景"
-    return f"配合{product_name}正常运行使用"
 
+    if any(k in n for k in ("显示器",)):
+        return "用于显示采集与分析界面"
+
+    if any(k in n for k in ("打印机",)):
+        return "用于输出检测结果或报告"
+
+    if any(k in n for k in ("稳压电源", "UPS")):
+        return "用于供电保护和设备稳定运行"
+
+    if any(k in n for k in ("软件", "程序", "平台", "分析软件", "应用软件")):
+        return "用于数据采集、分析与管理"
+
+    if any(k in n for k in ("说明书", "手册", "合格证", "装箱单", "保修卡")):
+        return "用于交付、验收、操作和留档"
+
+    if any(k in n for k in ("试剂", "耗材", "微球", "流式管")):
+        return "用于试机、质控或首批运行"
+
+    if any(k in n for k in ("主机", "整机", "检测主机", "分析主机")):
+        return f"作为{product_name}核心检测单元"
+
+    return "详见配置清单和产品资料"
 
 def _build_main_parameter_table(
     pkg: ProcurementPackage,
@@ -488,13 +516,7 @@ def _build_main_parameter_table(
     evidence_result: dict[str, Any] | None = None,
     product_profile: dict[str, Any] | None = None,
 ) -> str:
-    lines = [
-        f"### 包{pkg.package_id}：{pkg.item_name}",
-        "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
-        "|---:|---|---|---|---|",
-    ]
-
-    requirement_rows, total_requirements = _build_requirement_rows(
+    requirement_rows, _ = _build_requirement_rows(
         pkg,
         tender_raw,
         product=product,
@@ -502,6 +524,7 @@ def _build_main_parameter_table(
         evidence_result=evidence_result,
         product_profile=product_profile,
     )
+
     technical_rows: list[dict[str, Any]] = []
     for row in requirement_rows:
         key = _safe_text(row.get("key"), "")
@@ -515,15 +538,14 @@ def _build_main_parameter_table(
         bidder_quote = _safe_text(row.get("bidder_evidence"), "")
 
         if not _row_is_usable_for_package(
-                pkg,
-                key,
-                req,
-                tender_quote=tender_quote,
-                bidder_quote=bidder_quote,
+            pkg,
+            key,
+            req,
+            tender_quote=tender_quote,
+            bidder_quote=bidder_quote,
         ):
             continue
 
-        # 商务尾巴进参数表，一律丢弃
         bad_tail_hints = ("履约保证金", "付款方式", "交货期", "投标报价", "报价书")
         if any(tok in tender_quote for tok in bad_tail_hints):
             continue
@@ -532,28 +554,35 @@ def _build_main_parameter_table(
         row["category"] = ClauseCategory.technical_requirement.value
         technical_rows.append(row)
 
-    requirement_rows = technical_rows
-    total_requirements = len(requirement_rows)
+    real_response_count = sum(1 for r in technical_rows if r.get("has_real_response"))
+    total_rows = len(technical_rows)
 
-    if not requirement_rows:
-        lines.append(f"| 1 | 核心技术参数 | 详见招标文件 | {_PENDING_BIDDER_RESPONSE} | 待核实 |")
-        return "\n".join(lines)
+    # 实参覆盖率太低时，不再重复展开“未完成的大参数表”
+    if total_rows == 0 or real_response_count / max(total_rows, 1) < 0.3:
+        return "\n".join([
+            f"### 包{pkg.package_id}：{pkg.item_name}",
+            "- 当前参数附件不展开重复主表内容。",
+            "- 请优先补齐第三章《技术偏离及详细配置明细表》中的“实际响应值、证据材料、页码”。",
+            "- 附件待补：产品彩页、说明书、注册证/备案凭证、厂家承诺、检测/质评数据。",
+        ])
 
-    for idx, row in enumerate(requirement_rows, start=1):
+    lines = [
+        f"### 包{pkg.package_id}：{pkg.item_name}",
+        "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
+        "|---:|---|---|---|---|",
+    ]
+
+    for idx, row in enumerate(technical_rows, start=1):
         note = _safe_text(
             row.get("deviation_status"),
-            "无偏离" if row.get("has_real_response") else "待核实",
+            "无偏离" if row.get("has_real_response") else "待确认",
         )
         lines.append(
             f"| {idx} | {_markdown_cell(str(row['key']))} | {_markdown_cell(str(row['requirement']))} | "
             f"{_markdown_cell(str(row['response']))} | {note} |"
         )
 
-    if total_requirements > len(requirement_rows):
-        lines.append(f"|  | 其余参数 | 详见附录参数表 | {_PENDING_BIDDER_RESPONSE} | 待核实 |")
-
     return "\n".join(lines)
-
 
 def _build_response_checklist_table(
     pkg: ProcurementPackage,

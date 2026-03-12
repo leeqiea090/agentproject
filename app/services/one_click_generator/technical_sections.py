@@ -7,6 +7,27 @@ import app.services.evidence_binder as _evidence_binder
 import app.services.quality_gate as _quality_gate
 import app.services.requirement_processor as _requirement_processor
 
+
+def _canonicalize_clause_text(text: str) -> str:
+    t = _safe_text(text, "")
+    t = re.sub(r"^(实质性条款|重要条款|一般条款)[:：]\s*", "", t)
+    t = t.replace("★", "").replace("▲", "").replace("■", "")
+    t = re.sub(r"^\d+(?:\.\d+)*[:：]?\s*", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def _row_signature(key: str, req: str) -> str:
+    """
+    去重签名优先使用 requirement 文本。
+    这样“检测性能：当SIT...<0.05%”和“重要条款：当SIT...<0.05%”会被视为同一条。
+    """
+    key_n = _canonicalize_clause_text(key)
+    req_n = _canonicalize_clause_text(req)
+    if req_n and len(req_n) >= 6:
+        return req_n
+    return f"{key_n}::{req_n}"
+
 def _sanitize_rows_for_section(
     pkg: ProcurementPackage,
     rows: list[dict[str, Any]],
@@ -14,7 +35,7 @@ def _sanitize_rows_for_section(
     expected_category: ClauseCategory | None = None,
 ) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     forbidden = _package_forbidden_terms(pkg.item_name)
 
     for row in rows:
@@ -33,15 +54,14 @@ def _sanitize_rows_for_section(
         if expected_category is not None and inferred_cat != expected_category:
             continue
 
-        dedupe_key = re.sub(r"[（(]\d+[）)]$", "", key).strip()
-        dedupe_req = re.sub(r"\s+", " ", req).strip()
-        marker = (dedupe_key, dedupe_req)
-        if marker in seen:
+        sig = _row_signature(key, req)
+        if sig in seen:
             continue
-        seen.add(marker)
+        seen.add(sig)
 
         row = dict(row)
-        row["key"] = dedupe_key
+        row["key"] = _canonicalize_clause_text(key)
+        row["requirement"] = _canonicalize_clause_text(req)
         row["category"] = inferred_cat.value
         cleaned.append(row)
 
@@ -122,6 +142,22 @@ def _build_post_table_narratives(
 
     # 列出有实参的关键性能
     real_rows = [r for r in requirement_rows if r.get("has_real_response")]
+
+    # 自动降级为“编辑提示模式”：
+    # 只要没有真实产品身份，或真实响应行太少，就不要继续脑补正文
+    effective_internal = (draft_mode == "internal") or (not has_real_product) or (len(real_rows) < 3)
+
+    if effective_internal:
+        return "\n".join([
+            "### （五）编辑提示",
+            "",
+            f"- 待补品牌/型号/生产厂家：{p_name}",
+            "- 待补关键技术参数实参：按上表逐条填写“实际响应值”",
+            "- 待补证据页码：优先填写说明书/彩页/注册证/厂家承诺中的对应页码",
+            "- 待补配置清单：补齐随机文件、首批耗材、培训计划",
+            "- 待补售后/验收/培训承诺：以采购文件原文和厂家承诺为准，不要自动脑补时限和天数",
+            "- 待补后再展开正文说明，当前不输出交付/验收/培训的完成态描述",
+        ])
     for idx, row in enumerate(real_rows[:10], start=1):
         key = _as_text(row.get("key", ""))
         response = _as_text(row.get("response", ""))
@@ -282,6 +318,32 @@ def _build_post_table_narratives(
 
     return "\n\n".join(sections)
 
+
+
+def _default_response_placeholder(section_type: str) -> str:
+    mapping = {
+        "service": "【待填写：服务承诺】",
+        "config": "【待填写：配置响应】",
+        "acceptance": "【待填写：验收承诺】",
+        "documentation": "【待填写：资料提供承诺】",
+    }
+    return mapping.get(section_type, "【待填写】")
+
+
+def _normalize_section_response(raw_value: Any, section_type: str) -> str:
+    text = _safe_text(raw_value, "")
+    if not text:
+        return _default_response_placeholder(section_type)
+
+    generic_pending_markers = (
+        _PENDING_BIDDER_RESPONSE,
+        "【待填写：投标产品实参】",
+        "待补充（投标产品实参）",
+        "待核实（需填入投标产品实参）",
+    )
+    if any(marker in text for marker in generic_pending_markers):
+        return _default_response_placeholder(section_type)
+    return text
 
 def _generate_rich_draft_sections(
     tender: TenderDocument,
@@ -665,7 +727,7 @@ def _gen_technical(
                 for idx, row in enumerate(svc_rows, start=1):
                     key = _markdown_cell(row.get("key", ""))
                     req = _markdown_cell(row.get("requirement", row.get("value", "")))
-                    resp = _markdown_cell(row.get("response", "【待填写：响应承诺】"))
+                    resp = _markdown_cell(_normalize_section_response(row.get("response"), "service"))
                     raw_evidence = (
                         row.get("bidder_evidence")
                         or row.get("evidence_quote")
@@ -689,7 +751,7 @@ def _gen_technical(
                 for idx, row in enumerate(config_rows_list, start=1):
                     key = _markdown_cell(row.get("key", ""))
                     req = _markdown_cell(row.get("requirement", row.get("value", "")))
-                    resp = _markdown_cell(row.get("response", "【待填写：配置响应】"))
+                    resp = _markdown_cell(_normalize_section_response(row.get("response"), "config"))
                     raw_evidence = (
                         row.get("bidder_evidence")
                         or row.get("evidence_quote")
@@ -713,7 +775,7 @@ def _gen_technical(
                 for idx, row in enumerate(acceptance_rows, start=1):
                     key = _markdown_cell(row.get("key", ""))
                     req = _markdown_cell(row.get("requirement", row.get("value", "")))
-                    resp = _markdown_cell(row.get("response", "【待填写：验收承诺】"))
+                    resp = _markdown_cell(_normalize_section_response(row.get("response"), "acceptance"))
                     raw_evidence = (
                         row.get("bidder_evidence")
                         or row.get("evidence_quote")
@@ -739,7 +801,7 @@ def _gen_technical(
                 for idx, row in enumerate(doc_rows, start=1):
                     key = _markdown_cell(row.get("key", ""))
                     req = _markdown_cell(row.get("requirement", row.get("value", "")))
-                    resp = _markdown_cell(row.get("response", "【待填写：资料提供承诺】"))
+                    resp = _markdown_cell(_normalize_section_response(row.get("response"), "documentation"))
                     raw_evidence = (
                         row.get("bidder_evidence")
                         or row.get("evidence_quote")
@@ -813,6 +875,28 @@ def _gen_technical(
     return BidDocumentSection(section_title="第三章 商务及技术部分", content=content.strip())
 
 
+def _build_appendix_service_placeholder(tender: TenderDocument) -> str:
+    warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
+    payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
+
+    return "\n".join([
+        "## 二、技术服务和售后服务的内容及措施",
+        "### （一）待补清单",
+        f"- 质保期：{warranty}",
+        "- 安装调试：按采购文件和第三章《服务/验收响应表》填写。",
+        "- 响应时限：按采购文件和厂家售后承诺填写，避免与第三章响应表冲突。",
+        "- 培训安排：按采购文件要求和培训计划填写。",
+        "- 备件/备用机/软件升级：按采购文件要求和厂家承诺填写。",
+        f"- 商务执行：付款方式{payment}。",
+        "",
+        "### （二）待附材料",
+        "- 售后服务方案",
+        "- 厂家服务承诺",
+        "- 培训计划",
+        "- 安装/维护/保养手册",
+    ])
+
+
 def _gen_appendix(
     llm: ChatOpenAI,
     tender: TenderDocument,
@@ -867,21 +951,7 @@ def _gen_appendix(
 
 {_build_detail_quote_table(tender, tender_raw, packages=packages)}
 
-## 二、技术服务和售后服务的内容及措施
-### （一）技术服务
-1. 安装调试服务：设备到货后安排专业工程师现场安装、调试并协助完成验收；
-2. 培训服务：提供操作培训、日常维护培训和故障初判培训，确保使用科室独立开展工作；
-3. 技术咨询服务：提供7×24小时电话/线上技术支持，必要时提供现场技术支持；
-4. 质量保障服务：供货产品均为全新合格产品，随机文件齐全，来源可追溯；
-5. 交付配合服务：根据采购人计划安排发运、卸货、安装和交接，保障项目按期落地。
-
-### （二）售后服务
-1. 质保期承诺：{warranty}；
-2. 响应时限：接到通知后4小时内响应，24小时内提供现场处置或明确解决方案；
-3. 维护保养：每年至少2次预防性巡检维护，形成维护记录；
-4. 配件保障：提供常用备件保障及更换服务，确保设备持续稳定运行；
-5. 质保期外服务：继续提供长期技术支持，收费标准公开透明；
-{_format_payment_execution_line(payment)}
+{_build_appendix_service_placeholder(tender)}
 
 投标人名称：{_COMPANY}  
 授权代表：{_AUTHORIZED_REP}  

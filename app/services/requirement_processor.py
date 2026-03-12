@@ -696,21 +696,99 @@ def _classify_requirement_category(key: str, value: str) -> str:
     return "通用"
 
 
-def _classify_clause_category(key: str, value: str) -> ClauseCategory:
-    """将条款细分为 ClauseCategory — 基于关键词命中计数，取最高分类别。
+def _strip_clause_prefix(text: str) -> str:
+    t = _safe_text(text, "")
+    t = re.sub(r"^[\s★▲■●◆]+", "", t)
+    t = re.sub(r"^(实质性条款|重要条款|一般条款)[:：]\s*", "", t)
+    t = re.sub(r"^\d+(?:\.\d+)*[:：]?\s*", "", t)
+    return t.strip()
 
-    修复：原先采用 first-match 逻辑，容易因关键词重叠导致误分类
-    （如"设备配置及质保"同时命中 service 和 config，first-match 总是返回 service）。
-    改为对所有类别打分，取命中次数最多的类别。
+
+def _classify_clause_category(key: str, value: str) -> ClauseCategory:
     """
-    text = f"{key} {value}"
+    条款分类：先走硬路由，再走关键词打分。
+    目标：
+    1. 避免“服务条款里含软件/系统”被误判为 technical
+    2. 避免“配置条款”进入技术偏离表
+    3. 避免“实质性条款/重要条款”与原始技术条款重复入表
+    """
+    raw_key = _safe_text(key, "")
+    raw_val = _safe_text(value, "")
+    key_n = _strip_clause_prefix(raw_key)
+    val_n = _strip_clause_prefix(raw_val)
+    text = f"{key_n} {val_n}"
+
+    # 0) 重要/实质性条款标记：单独归类，后续不进技术主表
+    if re.match(r"^\s*(实质性条款|重要条款|一般条款)", raw_key):
+        return ClauseCategory.compliance_note
+
+    # 1) 配置类硬路由
+    if any(tok in key_n for tok in (
+        "主要配置功能", "配置要求", "配置清单", "装箱配置", "易损件及耗材",
+        "零配件清单", "随机附件", "标准配置", "选配", "标配",
+    )):
+        return ClauseCategory.config_requirement
+
+    # 2) 验收类硬路由
+    if any(tok in key_n for tok in (
+        "验收要求", "验收标准", "到货验收", "安装调试验收", "试运行验收",
+        "终验", "初验", "验收方式",
+    )):
+        return ClauseCategory.acceptance_requirement
+
+    # 3) 服务类硬路由
+    if any(tok in key_n for tok in (
+        "售后服务", "售后服务及要求", "系统维护", "维修响应", "通用服务要求",
+        "保修期", "培训服务", "服务要求",
+    )):
+        return ClauseCategory.service_requirement
+
+    # 4) 文档/资料类硬路由
+    if any(tok in text for tok in (
+        "说明书", "标签", "合格证", "装箱单", "技术资料", "中文技术资料",
+        "用户手册", "安装手册", "维护手册", "操作手册",
+        "注册证", "备案凭证", "授权文件", "随机文件",
+    )):
+        return ClauseCategory.documentation_requirement
+
+    # 5) 次级硬规则：明显服务词
+    if any(tok in text for tok in (
+        "维修", "维保", "保修", "巡检", "培训", "响应时间", "上门服务",
+        "技术支持", "备用机", "备件供应", "免费升级服务",
+    )):
+        return ClauseCategory.service_requirement
+
+    # 6) 次级硬规则：明显验收词
+    if any(tok in text for tok in (
+        "验收", "试运行", "调试完成后", "验收报告", "首次计量检测",
+    )):
+        return ClauseCategory.acceptance_requirement
+
+    # 7) 关键词打分兜底；同分时，优先非 technical
+    text = f"{key_n} {val_n}"
     best_category = ClauseCategory.technical_requirement
     best_score = 0
+    priority = {
+        ClauseCategory.acceptance_requirement: 6,
+        ClauseCategory.service_requirement: 5,
+        ClauseCategory.config_requirement: 4,
+        ClauseCategory.documentation_requirement: 3,
+        ClauseCategory.technical_requirement: 2,
+        ClauseCategory.commercial_requirement: 1,
+        ClauseCategory.compliance_note: 0,
+        ClauseCategory.attachment_requirement: 0,
+        ClauseCategory.noise: 0,
+    }
+
     for category, keywords in _CLAUSE_CATEGORY_RULES:
         score = sum(1 for kw in keywords if kw in text)
         if score > best_score:
             best_score = score
             best_category = category
+        elif score == best_score and score > 0:
+            if priority.get(category, 0) > priority.get(best_category, 0):
+                best_category = category
+
     return best_category
 
 

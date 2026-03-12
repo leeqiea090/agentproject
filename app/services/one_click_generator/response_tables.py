@@ -404,6 +404,36 @@ def _row_is_usable_for_package(
 
     return True
 
+def _resolve_structured_response(
+    *,
+    req_key: str,
+    req_val: str,
+    match: dict[str, Any] | None,
+    product: Any = None,
+    product_profile: dict[str, Any] | None = None,
+) -> str:
+    """
+    结构化表格场景下的响应值兜底顺序：
+    1. evidence_result 直接命中的 response_value
+    2. product_profile 中的精确/近似映射
+    3. 旧有 _build_response_value(...) 的能力兜底
+    4. 最后才退化为统一待核实占位符
+    """
+    response = _safe_text((match or {}).get("response_value"), "")
+    if response:
+        return response
+
+    response = _lookup_profile_response_value(product_profile, req_key)
+    if response:
+        return response
+
+    response = _build_response_value(req_val, req_key=req_key, product=product)
+    if response and response != _PENDING_BIDDER_RESPONSE:
+        return response
+
+    return _PENDING_BIDDER_RESPONSE
+
+
 def _build_requirement_rows(
     pkg: ProcurementPackage,
     tender_raw: str,
@@ -431,11 +461,13 @@ def _build_requirement_rows(
             requirement_id = _safe_text(requirement.get("requirement_id"), "")
             match = match_by_id.get(requirement_id) or match_by_param.get(req_key)
 
-            response = _safe_text(match.get("response_value") if match else "", "")
-            if not response:
-                response = _lookup_profile_response_value(product_profile, req_key)
-            if not response:
-                response = _PENDING_BIDDER_RESPONSE
+            response = _resolve_structured_response(
+                req_key=req_key,
+                req_val=req_val,
+                match=match,
+                product=product,
+                product_profile=product_profile,
+            )
 
             bidder_source, bidder_quote, bidder_page = _format_structured_bidder_evidence(match, req_key, response)
             # 先拿 binding，再回退到 match / requirement，避免旧的 source_text 抢占更干净的 excerpt
@@ -568,6 +600,26 @@ def _build_requirement_rows(
 
     return rows, len(requirements)
 
+def _recommended_evidence_label(req_key: str) -> str:
+    key = _as_text(req_key)
+
+    if any(k in key for k in ("注册", "备案", "说明书", "标签", "合格证", "追溯", "电子签名", "审计追踪")):
+        return "【待补证：注册证/说明书/标签/厂家承诺】"
+
+    if any(k in key for k in ("培训", "维修", "售后", "响应", "质保", "保修", "备用机", "升级服务")):
+        return "【待补证：售后方案/培训方案/厂家服务承诺】"
+
+    return "【待补证：说明书/彩页对应页码】"
+
+
+def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
+    text = _safe_text(raw_value, "")
+    bad_values = {
+        "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充",
+    }
+    if text in bad_values or "待填写" in text:
+        return "无偏离" if has_real else "待确认"
+    return text
 
 def _build_deviation_table(
     tender: TenderDocument,
@@ -628,12 +680,12 @@ def _build_deviation_table(
         if has_real and bidder_ev:
             source_text = bidder_source or _safe_text(row.get("evidence_source"), "投标方资料")
             evidence_text = f"{_markdown_cell(source_text)}；{_markdown_cell(bidder_ev)}"
-            deviation = _safe_text(row.get("deviation_status"), "无偏离")
+            deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
             remark = "已匹配产品参数"
         else:
-            evidence_text = "【待补证：投标方证据】"
-            deviation = _safe_text(row.get("deviation_status"), "待核实")
-            remark = "待补投标方证据后再判定"
+            evidence_text = _recommended_evidence_label(str(row.get("key", "")))
+            deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
+            remark = "待补证后人工复核"
 
         if bidder_page is not None:
             page_ref = str(bidder_page)
@@ -648,7 +700,7 @@ def _build_deviation_table(
 
     if total_requirements > len(requirement_rows):
         lines.append(
-            f"| — | 其余技术参数 | {p_model or '[待填写]'} | {_PENDING_BIDDER_RESPONSE} | 待核实 | 证据映射表继续列示 | — | 待补投标方证据 |"
+            f"| — | 其余技术参数 | {p_model or '[待填写]'} | {_PENDING_BIDDER_RESPONSE} | 待核实 | 【待补证：投标方证据】 | — | 其余条款待补实参及证据 |"
         )
 
     return "\n".join(lines)

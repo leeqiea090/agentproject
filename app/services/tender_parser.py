@@ -530,21 +530,21 @@ class TenderParser:
                 # 回贴验证：必须能在当前包 scope 中找到
                 pos, matched = _find_requirement_pair_position(scope_text, key, val)
                 if pos < 0:
-                    # 放宽一档：至少 key 要在当前包 scope 中出现
                     key_pos = scope_text.find(key)
                     if key_pos < 0:
                         continue
 
-                    # 只检查 key 附近的局部上下文，不能扫整个 scope_text
                     left = max(0, key_pos - 40)
-                    right = min(len(scope_text), key_pos + len(key) + 80)
+                    right = min(len(scope_text), key_pos + len(key) + 120)
                     local_excerpt = scope_text[left:right]
 
                     bad_scope_hints = ("投标报价", "报价书", "预算", "履约保证金", "付款方式", "交货期")
                     if any(tok in local_excerpt for tok in bad_scope_hints):
                         continue
 
-                cleaned[key] = val
+                    val_tokens = [t for t in _extract_match_tokens(val) if len(t) >= 2]
+                    if val_tokens and not any(t in local_excerpt for t in val_tokens[:4]):
+                        continue
 
             return cleaned
         except:
