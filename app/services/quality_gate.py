@@ -117,6 +117,15 @@ _TEMPLATE_POLLUTION_INFIX_KEYWORDS = (
     "trace:",
 )
 
+def _detect_procurement_mode_from_text(full_text: str | None, tender=None) -> str:
+    text = (full_text or "") + " " + str(getattr(tender, "project_number", "") or "")
+    if "[TP]" in text or "竞争性谈判文件" in text or "采购方式 竞争性谈判" in text:
+        return "tp"
+    if "[CS]" in text or "竞争性磋商文件" in text or "采购方式 竞争性磋商" in text:
+        return "cs"
+    return "tp"
+
+
 # ── 回归指标质量阈值 ──
 _REGRESSION_THRESHOLDS = {
     "single_package_focus_score": 0.8,       # 单包聚焦度应 ≥ 0.8
@@ -370,8 +379,8 @@ def compute_validation_gate(
             if (getattr(s, "section_title", "") or "").strip() or (getattr(s, "content", "") or "").strip()
         )
 
-    missing_new = _check_required_new_structure(full_text)
-    found_old = _check_forbidden_old_structure(full_text)
+    missing_new = _check_required_new_structure(full_text, tender=tender)
+    found_old = _check_forbidden_old_structure(full_text, tender=tender)
     project_meta_issues = _collect_project_meta_issues(full_text, tender, target_package_ids)
 
     if missing_new:
@@ -916,31 +925,64 @@ def _is_truncated_field(text: str) -> bool:
     return False
 
 
-def _check_required_new_structure(full_text: str | None) -> list[str]:
+def _check_required_new_structure(full_text: str | None, tender=None) -> list[str]:
     text = full_text or ""
-    required = [
-        "一、响应文件封面格式",
-        "二、报价书",
-        "三、报价一览表",
-        "四、资格承诺函",
-        "五、技术偏离及详细配置明细表",
-        "六、技术服务和售后服务的内容及措施",
-        "七、报价书附件",
-    ]
+    mode = _detect_procurement_mode_from_text(text, tender=tender)
+
+    if mode == "tp":
+        required = [
+            "一、响应文件封面格式",
+            "二、报价书",
+            "三、报价一览表",
+            "四、资格承诺函",
+            "五、技术偏离及详细配置明细表",
+            "六、技术服务和售后服务的内容及措施",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、投标无效情形汇总及自检表",
+        ]
+    else:
+        required = [
+            "一、响应文件封面格式",
+            "二、首轮报价表",
+            "三、分项报价表",
+            "四、技术偏离及详细配置明细表",
+            "五、技术服务和售后服务的内容及措施",
+            "六、法定代表人/单位负责人授权书",
+        ]
+
     return [x for x in required if x not in text]
 
-def _check_forbidden_old_structure(full_text: str | None) -> list[str]:
+def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[str]:
     text = full_text or ""
-    forbidden = [
-        "第一章 资格性证明文件",
-        "第二章 符合性承诺",
-        "第三章 商务及技术部分",
-        "第四章 报价书附件",
-        "附件索引与补件清单",
-        "第三章附：包",
-        "（二-A）详细配置明细表",
-        "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 备注 |",
-    ]
+    mode = _detect_procurement_mode_from_text(text, tender=tender)
+
+    if mode == "tp":
+        forbidden = [
+            "一、封面格式",
+            "二、首轮报价表",
+            "三、分项报价表",
+            "五、详细配置明细",
+            "六、技术偏离表",
+            "七、报价书附件",
+            "六、法定代表人/单位负责人授权书",
+            "竞争性磋商文件",
+        ]
+    else:
+        forbidden = [
+            "一、封面格式",
+            "二、报价书",
+            "三、报价一览表",
+            "四、资格承诺函",
+            "五、详细配置明细",
+            "六、技术偏离表",
+            "七、报价书附件",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、投标无效情形汇总及自检表",
+            "竞争性谈判文件",
+        ]
+
     return [x for x in forbidden if x in text]
 
 def compute_regression_metrics(

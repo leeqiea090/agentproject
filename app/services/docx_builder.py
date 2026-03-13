@@ -424,17 +424,63 @@ def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -
         row.cells[0].paragraphs[0].runs[0].font.bold = True
 
 
-def _assert_new_structure_only(sections) -> None:
+def _assert_new_structure_only(sections, tender=None) -> None:
     titles = [getattr(s, "section_title", "") or "" for s in (sections or [])]
-    forbidden = {
-        "第一章 资格性证明文件",
-        "第二章 符合性承诺",
-        "第三章 商务及技术部分",
-        "第四章 报价书附件",
-    }
-    hit = [t for t in titles if t in forbidden]
+    text = "\n".join(titles) + " " + str(getattr(tender, "project_number", "") or "")
+
+    is_tp = "[TP]" in text or "竞争性谈判" in text
+    is_cs = "[CS]" in text or "竞争性磋商" in text
+
+    if is_tp:
+        required = {
+            "一、响应文件封面格式",
+            "二、报价书",
+            "三、报价一览表",
+            "四、资格承诺函",
+            "五、技术偏离及详细配置明细表",
+            "六、技术服务和售后服务的内容及措施",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、投标无效情形汇总及自检表",
+        }
+        forbidden = {
+            "一、封面格式",
+            "二、首轮报价表",
+            "三、分项报价表",
+            "五、详细配置明细",
+            "六、技术偏离表",
+            "七、报价书附件",
+            "六、法定代表人/单位负责人授权书",
+        }
+    else:
+        required = {
+            "一、响应文件封面格式",
+            "二、首轮报价表",
+            "三、分项报价表",
+            "四、技术偏离及详细配置明细表",
+            "五、技术服务和售后服务的内容及措施",
+            "六、法定代表人/单位负责人授权书",
+        }
+        forbidden = {
+            "一、封面格式",
+            "二、报价书",
+            "三、报价一览表",
+            "四、资格承诺函",
+            "五、详细配置明细",
+            "六、技术偏离表",
+            "七、报价书附件",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、投标无效情形汇总及自检表",
+        }
+
+    missing = [x for x in required if x not in titles]
+    hit = [x for x in titles if x in forbidden]
+
+    if missing:
+        raise RuntimeError(f"检测到当前采购方式对应必需章节缺失: {'；'.join(missing)}")
     if hit:
-        raise RuntimeError(f"检测到旧结构章节，停止导出: {'；'.join(hit)}")
+        raise RuntimeError(f"检测到当前采购方式不应出现的章节: {'；'.join(hit)}")
 
 def build_bid_docx(
     sections: list[BidDocumentSection],
@@ -454,13 +500,13 @@ def build_bid_docx(
     Returns:
         输出文件路径
     """
-    _assert_new_structure_only(sections)
+    _assert_new_structure_only(sections, tender=tender)
     doc = Document()
     _set_document_style(doc)
     _enable_update_fields_on_open(doc)
 
     # 封面
-    _add_cover(doc, tender, company)
+    #_add_cover(doc, tender, company)
     doc.add_page_break()
 
     # 逐章节渲染（跳过自动生成的封面/目录章节，避免重复）
