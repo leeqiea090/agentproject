@@ -152,7 +152,11 @@ def _collect_project_meta_issues(
     tender: TenderDocument | None,
     target_package_ids: list[str] | None = None,
 ) -> list[str]:
-    """检查项目名称/编号/包件数量是否稳定落正文。"""
+    """
+    只检查项目名称、项目编号、包件名称是否落正文。
+    当前黑龙江谈判文件首页“谈判内容”中的数量与各包技术明细中的设备总台数可能不一致，
+    数量不再作为硬拦截项，避免误报。
+    """
     if tender is None or not full_text.strip():
         return []
 
@@ -170,14 +174,8 @@ def _collect_project_meta_issues(
         item_lines = [line for line in lines if item_name in line]
         if not item_lines:
             issues.append(f"包{pkg.package_id} 条目未落正文")
-            continue
-        quantity = str(pkg.quantity)
-        quantity_hit = any(quantity in line for line in item_lines)
-        if not quantity_hit:
-            issues.append(f"包{pkg.package_id} 数量异常")
 
     return issues
-
 
 def _compute_project_meta_consistency_score(
     full_text: str,
@@ -192,19 +190,17 @@ def _compute_project_meta_consistency_score(
         checks.append(tender.project_name in full_text)
     if tender.project_number:
         checks.append(tender.project_number in full_text)
+
     for pkg in _target_packages(tender, target_package_ids):
         item_name = (pkg.item_name or "").strip()
         if not item_name:
             continue
         item_lines = [line.strip() for line in full_text.splitlines() if item_name in line]
         checks.append(bool(item_lines))
-        if item_lines:
-            checks.append(any(str(pkg.quantity) in line for line in item_lines))
 
     if not checks:
         return 1.0
     return sum(1 for ok in checks if ok) / len(checks)
-
 
 def _req_value_text(req: NormalizedRequirement) -> str:
     raw = (req.raw_text or "").strip()
@@ -362,24 +358,30 @@ def compute_validation_gate(
     tender: TenderDocument | None = None,
     full_text: str | None = None,
 ) -> ValidationGate:
-    """计算硬校验门的 4 个条件。"""
+    """计算硬校验门。"""
     normalized_reqs = normalized_reqs or {}
     evidence_bindings = evidence_bindings or {}
     target_package_ids = target_package_ids or []
 
     if full_text is None:
-        full_text = "\n".join((getattr(s, "content", "") or "") for s in (sections or []))
+        full_text = "\n\n".join(
+            f"{(getattr(s, 'section_title', '') or '').strip()}\n{(getattr(s, 'content', '') or '').strip()}".strip()
+            for s in (sections or [])
+            if (getattr(s, "section_title", "") or "").strip() or (getattr(s, "content", "") or "").strip()
+        )
 
     missing_new = _check_required_new_structure(full_text)
     found_old = _check_forbidden_old_structure(full_text)
+    project_meta_issues = _collect_project_meta_issues(full_text, tender, target_package_ids)
 
     if missing_new:
-        project_meta_anomaly_detected = True
         logger.warning("新结构缺失: %s", "；".join(missing_new))
-
     if found_old:
-        project_meta_anomaly_detected = True
         logger.warning("检测到旧结构残留: %s", "；".join(found_old))
+    if project_meta_issues:
+        logger.warning("项目元信息异常：%s", "；".join(project_meta_issues[:5]))
+
+    project_meta_anomaly_detected = bool(missing_new or found_old or project_meta_issues)
 
     dup_detail = _collect_duplicate_requirement_keys(normalized_reqs)
     if dup_detail:
@@ -389,7 +391,6 @@ def compute_validation_gate(
     if forbidden_detail:
         logger.warning("渲染后术语污染明细: %s", forbidden_detail)
 
-    # 1) 占位符计数
     placeholder_count = 0
     for pattern in _PLACEHOLDER_PATTERNS:
         placeholder_count += len(re.findall(pattern, full_text))
@@ -919,18 +920,14 @@ def _check_required_new_structure(full_text: str | None) -> list[str]:
     text = full_text or ""
     required = [
         "一、响应文件封面格式",
-        "二、首轮报价表",
-        "三、分项报价表",
-        "四、技术偏离及详细配置明细表",
-        "五、技术服务和售后服务的内容及措施",
-        "六、法定代表人/单位负责人授权书",
-        "附：资格性审查响应对照表",
-        "附：符合性审查响应对照表",
-        "附：详细评审响应对照表",
-        "附：投标无效情形汇总及自检表",
+        "二、报价书",
+        "三、报价一览表",
+        "四、资格承诺函",
+        "五、技术偏离及详细配置明细表",
+        "六、技术服务和售后服务的内容及措施",
+        "七、报价书附件",
     ]
     return [x for x in required if x not in text]
-
 
 def _check_forbidden_old_structure(full_text: str | None) -> list[str]:
     text = full_text or ""
@@ -959,7 +956,11 @@ def compute_regression_metrics(
     normalized_reqs = normalized_reqs or {}
     evidence_bindings = evidence_bindings or {}
     target_package_ids = target_package_ids or []
-    full_text = "\n".join((getattr(s, "content", "") or "") for s in sections)
+    full_text = "\n\n".join(
+        f"{(getattr(s, 'section_title', '') or '').strip()}\n{(getattr(s, 'content', '') or '').strip()}".strip()
+        for s in (sections or [])
+        if (getattr(s, "section_title", "") or "").strip() or (getattr(s, "content", "") or "").strip()
+    )
 
     # 1) single_package_focus_score
     if target_package_ids and len(target_package_ids) == 1:
@@ -1133,6 +1134,7 @@ def compute_regression_metrics(
     warnings: list[str] = []
     t = _REGRESSION_THRESHOLDS
     enforce_material_warnings = workflow_stage == "evidence_ready"
+    enforce_content_warnings = workflow_stage in ("product_only", "evidence_ready")
     if focus_score < t["single_package_focus_score"] and len(target_package_ids) == 1:
         warnings.append(f"单包聚焦度不足: {focus_score:.2f} < {t['single_package_focus_score']}")
     if contamination_rate > t["package_contamination_rate"]:
@@ -1143,9 +1145,9 @@ def compute_regression_metrics(
         warnings.append(f"证据覆盖率不足: {evidence_cov:.2f} < {t['bid_evidence_coverage']}")
     if enforce_material_warnings and leakage > t["placeholder_leakage"]:
         warnings.append(f"占位符泄漏过多: {leakage:.2f} > {t['placeholder_leakage']}")
-    if config_score < t["config_detail_score"]:
+    if enforce_content_warnings and config_score < t["config_detail_score"]:
         warnings.append(f"配置详细度不足: {config_score:.2f} < {t['config_detail_score']}")
-    if fact_density < t["fact_density_per_page"]:
+    if enforce_content_warnings and fact_density < t["fact_density_per_page"]:
         warnings.append(f"每页事实密度不足: {fact_density:.1f} < {t['fact_density_per_page']}")
     if snippet_cleanliness < t["snippet_cleanliness_score"]:
         warnings.append(f"原文片段清洁度不足: {snippet_cleanliness:.2f} < {t['snippet_cleanliness_score']}")

@@ -471,6 +471,7 @@ def generate_bid_sections(
         evidence_bindings=all_bid_bindings,
         target_package_ids=target_package_ids,
         tender=tender,
+        workflow_stage=material_stage,
     )
     logger.info(
         "回归指标: focus=%.2f, contamination=%.2f, mixing=%.2f, evidence=%.2f, "
