@@ -644,8 +644,31 @@ def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
         "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充",
     }
     if text in bad_values or "待填写" in text:
-        return "无偏离" if has_real else "【待填写：无偏离/正偏离/负偏离】"
+        return "无偏离" if has_real else "待核对"
     return text
+
+
+def _display_bidder_response(raw_value: Any) -> str:
+    text = _safe_text(raw_value, "")
+    if not text:
+        return "待按产品说明书/厂家参数表逐条回填"
+
+    pending_markers = (
+        _PENDING_BIDDER_RESPONSE,
+        "【待填写：投标产品实参】",
+        "待补充（投标产品实参）",
+        "待核实（需填入投标产品实参）",
+    )
+    if any(marker in text for marker in pending_markers):
+        return "待按产品说明书/厂家参数表逐条回填"
+
+    return text
+
+def _display_model_cell(model_text: str, row_index: int) -> str:
+    model_text = _safe_text(model_text, "")
+    if model_text:
+        return model_text if row_index == 1 else "同投标型号"
+    return "待补型号（本包统一填写一次）" if row_index == 1 else "同上"
 
 def _build_deviation_table(
     tender: TenderDocument,
@@ -654,17 +677,13 @@ def _build_deviation_table(
     total_requirements: int,
     product: Any = None,
 ) -> str:
-    """构建 8 列技术偏离表（升级版）。
-
-    只接收 technical_requirement 类别的行，非技术行会被过滤并记录日志。
-    """
-    # 过滤：技术偏离表只接受技术参数类行
-    # 过滤：技术偏离表只接受“纯技术参数”条目。
-    # 即使 category 为空，只要文本里明显是服务/验收/商务/执行标准，也强制剔除。
+    """构建 8 列技术偏离表（更适合人工统一回填）。"""
     _NONTECH_HINTS = (
-        "售后", "维修", "维保", "保修", "培训", "响应时间", "备用机",
-        "验收", "试运行", "安装调试", "到货验收", "验收标准", "计量检测",
-        "执行标准", "包装标准", "商务", "付款", "交货期", "违约",
+        "售后", "质保", "维修", "保修", "培训", "响应时间", "上门服务", "备用机",
+        "验收", "试运行", "到货验收", "安装调试", "验收方式", "验收标准",
+        "付款", "交货期", "投标文件格式", "正本与副本", "签字确认",
+        "说明书", "合格证", "装箱单", "保修卡", "随机文件",
+        "执行标准", "包装标准",
     )
 
     filtered_rows = []
@@ -680,7 +699,6 @@ def _build_deviation_table(
             logger.debug("技术偏离表剔除非技术行: key=%s category=%s", row.get("key", "?"), cat)
             continue
 
-        # category 为空时，增加一层文本兜底过滤
         if any(tok in text for tok in _NONTECH_HINTS):
             logger.debug("技术偏离表剔除疑似非技术行: key=%s text=%s", row.get("key", "?"), text[:80])
             continue
@@ -689,27 +707,27 @@ def _build_deviation_table(
 
     requirement_rows = filtered_rows
 
-    # 产品身份信息
     p_model = ""
     p_mfr = ""
     if product is not None:
         p_model = _as_text(getattr(product, "model", "")) or _as_text(getattr(product, "product_name", ""))
         p_mfr = _as_text(getattr(product, "manufacturer", ""))
 
+    header_model = f"{p_mfr} {p_model}".strip()
+
     lines = [
         "### （一）技术偏离及详细配置明细表",
         f"项目名称：{tender.project_name}",
         f"项目编号：{tender.project_number}",
-        f"投标型号：{p_mfr} {p_model}" if p_model else "",
+        f"本包统一投标型号：{header_model}" if header_model else "本包统一投标型号：待补型号（本包统一填写一次）",
         "",
         "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 备注 |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    lines = [line for line in lines if line or line == ""]
 
     if not requirement_rows:
         lines.append(
-            f"| {pkg.package_id}.1 | 详见招标文件采购需求 | {p_model or '[待填写]'} | {_PENDING_BIDDER_RESPONSE} | 【待填写：无偏离/正偏离/负偏离】 | 【待补证：说明书/彩页/厂家参数表】 | 【待填写：页码】 | — |"
+            f"| {pkg.package_id}.1 | 详见招标文件采购需求 | 待补型号（本包统一填写一次） | 待按产品说明书/厂家参数表逐条回填 | 待核对 | 【待补证：说明书/彩页/厂家参数表】 | 待补页码 | 本包其余条款可按同一型号继续回填 |"
         )
 
     for idx, row in enumerate(requirement_rows, start=1):
@@ -719,28 +737,29 @@ def _build_deviation_table(
         bidder_ev = _safe_text(row.get("bidder_evidence"), "")
         bidder_source = _safe_text(row.get("bidder_evidence_source"), "")
         bidder_page = row.get("bidder_evidence_page")
-        model_cell = _markdown_cell(p_model) if p_model else "[待填写]"
-        response_cell = _markdown_cell(str(row['response']))
+
+        model_cell = _markdown_cell(_display_model_cell(p_model, idx))
+        response_cell = _markdown_cell(_display_bidder_response(row.get("response")))
 
         if has_real and bidder_ev:
             source_text = bidder_source or _safe_text(row.get("evidence_source"), "投标方资料")
             evidence_text = f"{_markdown_cell(source_text)}；{_markdown_cell(bidder_ev)}"
             deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
-            remark = "_"
         else:
             evidence_text = _recommended_evidence_label(
                 str(row.get("key", "")),
                 str(row.get("requirement", "")),
             )
             deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
-            remark = "_"
 
         if bidder_page is not None:
             page_ref = str(bidder_page)
         elif row.get("source_page") is not None:
             page_ref = str(row.get("source_page"))
         else:
-            page_ref = "【待填写：页码】"
+            page_ref = "待补页码"
+
+        remark = "首行填写型号，其余行默认同上" if idx == 1 else "_"
 
         lines.append(
             f"| {clause_no} | {req} | {model_cell} | {response_cell} | {deviation} | {evidence_text} | {page_ref} | {remark} |"
@@ -750,7 +769,7 @@ def _build_deviation_table(
         lines.append("")
         lines.append(
             f"> 说明：当前仅结构化展示 {len(requirement_rows)} / {total_requirements} 条技术要求；"
-            "未结构化条款请回看原采购文件原文逐条补齐，不再使用“其余技术参数”笼统占位。"
+            "未结构化条款请回看原采购文件原文逐条补齐。"
         )
 
     return "\n".join(lines)

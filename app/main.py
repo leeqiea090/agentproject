@@ -10,30 +10,17 @@ from app.config import get_settings
 from app.routers.chat import router as agent_router
 from app.routers.kb import router as kb_router
 from app.routers.tender import router as tender_router
+import uvicorn
 
 settings = get_settings()
 
 app = FastAPI(
     title="招投标 AI Agent 服务",
     version=settings.app_version,
-    description="基于 LangGraph + FastAPI + 本地向量知识库的多智能体服务",
+    description="",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
-    openapi_tags=[
-        {
-            "name": "知识库",
-            "description": "",
-        },
-        {
-            "name": "智能体",
-            "description": "",
-        },
-        {
-            "name": "招投标系统",
-            "description": "",
-        },
-    ],
 )
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -59,7 +46,6 @@ def api_status():
 
 
 if __name__ == "__main__":
-    import uvicorn
 
     if settings.app_host == "0.0.0.0":
         print(f"Local access URL: http://127.0.0.1:{settings.app_port}")

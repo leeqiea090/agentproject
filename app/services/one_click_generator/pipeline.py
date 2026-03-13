@@ -64,6 +64,25 @@ from app.services.requirement_processor import (
 
 logger = logging.getLogger(__name__)
 
+def _has_structural_failures(gate) -> bool:
+    """仍然属于结构性失败的问题。"""
+    return (
+        gate.package_contamination_detected
+        or gate.table_category_mixing
+        or gate.snippet_truncation_count > gate.snippet_truncation_threshold
+        or gate.anchor_pollution_rate > gate.anchor_pollution_threshold
+        or gate.nested_placeholder_detected
+    )
+
+
+def _downgrade_to_pending_draft(sections):
+    """把当前产物尽量整理成可人工补改的待补充底稿，而不是直接抛错。"""
+    downgraded = _apply_template_pollution_guard(sections)
+    downgraded = normalize_pending_draft_sections(downgraded)
+    downgraded = _apply_template_pollution_guard(downgraded)
+    return downgraded
+
+
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
         if name.startswith("__"):
@@ -281,26 +300,22 @@ def generate_bid_sections(
             break
 
         if heal_pass >= _MAX_HEAL_PASSES:
-            # ── 结构型错误直接 fail，不继续美化成待补稿 ──
-            structural_fail = (
-                gate.package_contamination_detected
-                or gate.table_category_mixing
-                or gate.snippet_truncation_count > gate.snippet_truncation_threshold
-                or gate.anchor_pollution_rate > gate.anchor_pollution_threshold
-                or gate.nested_placeholder_detected
-            )
-            if structural_fail:
-                raise ValueError(
-                    f"structural draft corruption: contamination={gate.package_contamination_detected}, "
-                    f"mixing={gate.table_category_mixing}, "
-                    f"truncation={gate.snippet_truncation_count}, "
-                    f"anchor_pollution={gate.anchor_pollution_rate:.2f}, "
-                    f"nested_placeholders={gate.nested_placeholder_detected}"
+            if _has_structural_failures(gate):
+                logger.warning(
+                    "达到最大自愈轮次但仍有结构问题，降级输出待补充底稿："
+                    "contamination=%s, mixing=%s, truncation=%d, "
+                    "anchor_pollution=%.2f, nested_placeholders=%s",
+                    gate.package_contamination_detected,
+                    gate.table_category_mixing,
+                    gate.snippet_truncation_count,
+                    gate.anchor_pollution_rate,
+                    gate.nested_placeholder_detected,
                 )
+                sections = _downgrade_to_pending_draft(sections)
+                break
 
-            if require_validation_pass:
-                raise ValueError("validation gate failed")
-            sections = normalize_pending_draft_sections(sections)
+            # 非结构型问题（如证据不足、占位较多）也统一降级，不再抛 500
+            sections = _downgrade_to_pending_draft(sections)
             break
 
         # ── 自愈动作 ──
@@ -329,17 +344,18 @@ def generate_bid_sections(
         after_snapshot = tuple((s.section_title, s.content) for s in sections)
         heal_pass += 1
         if after_snapshot == before_snapshot:
-            structural_fail = (
-                    gate.package_contamination_detected
-                    or gate.table_category_mixing
-                    or gate.snippet_truncation_count > gate.snippet_truncation_threshold
-                    or gate.anchor_pollution_rate > gate.anchor_pollution_threshold
-                    or gate.nested_placeholder_detected
-            )
-            if structural_fail:
-                raise ValueError("no heal progress and structural corruption remains")
+            if _has_structural_failures(gate):
+                logger.warning(
+                    "自愈 pass %d 无进展但仍有结构问题，降级输出待补充底稿。问题: %s",
+                    heal_pass,
+                    "；".join(reasons) or "无",
+                )
+                sections = _downgrade_to_pending_draft(sections)
+                break
+
             if not gate.passes_external_gate():
-                sections = normalize_pending_draft_sections(sections)
+                sections = _downgrade_to_pending_draft(sections)
+
             logger.info(
                 "自愈 pass %d 无新增修复动作，%s。问题: %s",
                 heal_pass,
@@ -347,6 +363,25 @@ def generate_bid_sections(
                 "；".join(reasons) or "无",
             )
             break
+
+    # ── 重新计算最终 gate，确保与最终 sections 一致 ──
+    gate = compute_validation_gate(
+        sections=sections,
+        normalized_reqs=all_normalized,
+        evidence_bindings=all_bid_bindings,
+        target_package_ids=target_package_ids,
+        tender=tender,
+    )
+    final_reasons = gate.failure_reasons()
+    logger.info(
+        "最终硬校验: mixing=%s, contamination=%s, placeholders=%d, "
+        "evidence=%.1f%%, reasons=%s",
+        gate.table_category_mixing,
+        gate.package_contamination_detected,
+        gate.placeholder_count,
+        gate.bid_evidence_coverage * 100,
+        final_reasons or "无",
+    )
 
     # ── Step 5: 稿件等级判定 & 双输出 ──
     draft_level = _determine_draft_level(gate, doc_mode)

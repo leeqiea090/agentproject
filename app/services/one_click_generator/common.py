@@ -329,31 +329,20 @@ def _package_scope(
     return "、".join(f"包{pkg.package_id}" for pkg in pkgs)
 
 def _infer_package_quantity(pkg: ProcurementPackage, tender_raw: str) -> int:
-    package_scope = _extract_package_scope_text(pkg, tender_raw)
-    search_texts = [package_scope, tender_raw]
-    patterns = (
-        r"设备总台数\s*[:：;；]?\s*(\d+)\s*台",
-        r"采购数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)?",
-        r"数量\s*[:：;；]?\s*(\d+)\s*(?:台|套|个|把|件|组|副|本)",
-    )
+    """
+    数量一律以 TenderParser 已经写入的 pkg.quantity 为准。
+    one_click_generator 阶段不再二次从原文猜数量，避免被技术参数里的
+    “3针 / 2次 / 12色 / 40管”等数字误伤，导致不同版本生成结果抖动。
+    """
+    try:
+        qty = int(pkg.quantity)
+    except (TypeError, ValueError):
+        qty = 0
 
-    for text in search_texts:
-        if not text.strip():
-            continue
-        for raw_line in text.splitlines():
-            normalized = _normalize_requirement_line(raw_line)
-            if not normalized:
-                continue
-            for pattern in patterns:
-                match = re.search(pattern, normalized)
-                if not match:
-                    continue
-                quantity = int(match.group(1))
-                if quantity > 0:
-                    return quantity
+    if qty > 0:
+        return qty
 
-    return max(1, pkg.quantity)
-
+    return 1
 
 def _package_detail_lines(
     tender: TenderDocument,

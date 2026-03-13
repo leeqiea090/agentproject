@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_TECH_ROWS_PER_PACKAGE = 80
 _PACKAGE_SCOPE_BEFORE_LINES = 8
-_PACKAGE_SCOPE_AFTER_LINES = 80
+_PACKAGE_SCOPE_AFTER_LINES = 45
 
 _HARD_REQUIREMENT_MARKERS = ("≥", "≤", ">=", "<=", "不低于", "不少于", "不高于", "不大于", "至少")
 _TECH_SECTION_HINTS = ("技术参数", "技术要求", "采购需求", "性能要求", "配置要求", "参数要求", "技术指标")
@@ -1246,7 +1246,10 @@ def _extract_package_scope_text(
 
         while end < len(lines) and end - idx < _PACKAGE_SCOPE_AFTER_LINES:
             following = _normalize_requirement_line(lines[end])
-
+            # 强制遇到下一个“合同包X”标题就停止，避免跨包串入
+            if following and re.search(r"合同包\s*\d+", following):
+                if not any(marker in following for marker in package_markers):
+                    break
             if following and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", following) and not any(
                 marker in following for marker in package_markers
             ):

@@ -64,12 +64,31 @@ def _collapse_repeated_nontech_block(
     lines: list[str],
     memo: dict[str, dict[str, str]],
 ) -> str:
-    """
-    内部可编辑底稿模式：
-    不折叠重复分表；每个包都输出完整表格。
-    这样人工审核时可以直接在当前包内修改，不需要来回找上一包。
-    """
-    return "\n".join(lines) if lines else ""
+    if not lines:
+        return ""
+
+    title = lines[0]
+    body = lines[1:]
+
+    normalized_body: list[str] = []
+    for line in body:
+        line_n = re.sub(r"包\s*\d+", "包X", line)
+        line_n = re.sub(r"【待填写：[^】]+】", "【待填写】", line_n)
+        line_n = re.sub(r"【待补证：[^】]+】", "【待补证】", line_n)
+        line_n = re.sub(r"\s+", " ", line_n).strip()
+        normalized_body.append(line_n)
+
+    signature = "\n".join(normalized_body)
+    bucket = memo.setdefault(block_type, {})
+    first_pkg = bucket.get(signature)
+    if first_pkg is None:
+        bucket[signature] = pkg_id
+        return "\n".join(lines)
+
+    return "\n".join([
+        title,
+        f"> 本表与包{first_pkg}内容一致。人工修改时优先维护包{first_pkg}，如本包存在差异，再单独展开本包表格。",
+    ])
 
 def _canonicalize_clause_text(text: str) -> str:
     t = _safe_text(text, "")
@@ -387,27 +406,102 @@ def _build_post_table_narratives(
 
 def _default_response_placeholder(section_type: str) -> str:
     mapping = {
-        "service": "【待填写：服务承诺】",
-        "config": "【待填写：配置响应】",
-        "acceptance": "【待填写：验收承诺】",
-        "documentation": "【待填写：资料提供承诺】",
+        "service": "承诺按采购文件及厂家服务方案执行，提供送货、安装调试、培训、维保及售后响应服务。",
+        "config": "承诺所投配置满足招标要求，随机配置及随机文件与投标型号保持一致。",
+        "acceptance": "承诺按采购文件及采购人要求配合完成到货、安装调试、试运行和资料移交验收。",
+        "documentation": "承诺随货或随投标文件提供与投标型号一致的说明书、合格证、注册证/备案凭证、授权文件等资料。",
     }
-    return mapping.get(section_type, "【待填写】")
+    return mapping.get(section_type, "承诺按采购文件要求执行。")
+
+def _default_acceptance_method(text: str) -> str:
+    t = _safe_text(text, "")
+    if any(k in t for k in ("到货", "装箱", "外观", "数量")):
+        return "到货验收"
+    if any(k in t for k in ("安装", "调试", "通电", "开机")):
+        return "安装调试验收"
+    if any(k in t for k in ("试运行", "性能", "验证")):
+        return "试运行/性能验收"
+    if any(k in t for k in ("资料", "说明书", "合格证", "注册证", "培训记录")):
+        return "资料验收"
+    return "按采购文件及采购人要求验收"
 
 
-def _normalize_section_response(raw_value: Any, section_type: str) -> str:
+def _default_document_supply_method(text: str) -> str:
+    t = _safe_text(text, "")
+    if any(k in t for k in ("随机文件", "说明书", "保修卡", "装箱单")):
+        return "随货/另附/电子版"
+    if any(k in t for k in ("注册证", "备案凭证", "授权文件", "许可文件")):
+        return "随附/投标文件附后"
+    if any(k in t for k in ("培训", "验收", "安装调试记录")):
+        return "交付时提供"
+    return "按采购文件要求提供"
+
+def _smart_default_response(section_type: str, key: str, req: str) -> str:
+    text = f"{_safe_text(key, '')} {_safe_text(req, '')}"
+
+    if section_type == "service":
+        if any(k in text for k in ("响应", "到场", "电话", "小时")):
+            return "承诺设服务热线并按采购文件要求在约定时限内响应、到场并处理故障。"
+        if any(k in text for k in ("配件库", "备件", "零配件")):
+            return "承诺具备备件供应和配件保障能力，确保设备维修与更换需求。"
+        if any(k in text for k in ("保养", "维护")):
+            return "承诺按采购文件要求提供定期维护保养，并指导使用人员进行日常维护。"
+        if any(k in text for k in ("安装", "调试", "培训", "卸货")):
+            return "承诺负责送货、卸货、安装调试及人员培训，直至设备可正常使用。"
+        if any(k in text for k in ("项目清单", "注册证")):
+            return "承诺提供可开展项目清单及相应注册证/备案资料。"
+        return "承诺按采购文件及厂家服务方案执行，提供送货、安装调试、培训、维保及售后响应服务。"
+
+    if section_type == "config":
+        if any(k in text for k in ("装箱", "配置单", "随机配置")):
+            return "承诺按装箱配置单和投标型号交付完整标配/选配清单。"
+        return "承诺所投配置满足招标要求，随机配置及随机文件与投标型号保持一致。"
+
+    if section_type == "acceptance":
+        if any(k in text for k in ("到货", "装箱", "外观", "数量")):
+            return "承诺配合采购人完成到货验收，并按装箱单核对品牌、型号、数量、外观及随机资料。"
+        if any(k in text for k in ("安装", "调试", "通电", "开机")):
+            return "承诺完成安装调试、通电开机及基础功能验证，并配合形成安装调试记录。"
+        if any(k in text for k in ("试运行", "性能", "验证")):
+            return "承诺按采购文件及采购人要求配合完成试运行或性能验证。"
+        if any(k in text for k in ("资料", "说明书", "注册证", "培训记录")):
+            return "承诺在验收阶段完整移交随机文件、合规文件及培训记录。"
+        return "承诺按采购文件及采购人要求配合完成到货、安装调试、试运行和资料移交验收。"
+
+    if section_type == "documentation":
+        if any(k in text for k in ("随机文件", "说明书", "保修卡", "装箱单")):
+            return "承诺随机文件齐套并与投标型号一致。"
+        if any(k in text for k in ("注册证", "备案凭证", "授权文件", "许可文件")):
+            return "承诺提供与投标型号一致的注册证/备案凭证、许可文件及授权文件。"
+        if any(k in text for k in ("培训", "验收", "安装调试记录")):
+            return "承诺在交付及验收时同步移交培训、安装调试及验收资料。"
+        return "承诺随货或随投标文件提供与投标型号一致的说明书、合格证、注册证/备案凭证、授权文件等资料。"
+
+    return "承诺按采购文件要求执行。"
+
+
+def _normalize_section_response(
+    raw_value: Any,
+    section_type: str,
+    key: str = "",
+    req: str = "",
+) -> str:
     text = _safe_text(raw_value, "")
     if not text:
-        return _default_response_placeholder(section_type)
+        return _smart_default_response(section_type, key, req)
 
     generic_pending_markers = (
         _PENDING_BIDDER_RESPONSE,
         "【待填写：投标产品实参】",
         "待补充（投标产品实参）",
         "待核实（需填入投标产品实参）",
+        "【待填写：服务承诺】",
+        "【待填写：配置响应】",
+        "【待填写：响应承诺】",
     )
     if any(marker in text for marker in generic_pending_markers):
-        return _default_response_placeholder(section_type)
+        return _smart_default_response(section_type, key, req)
+
     return text
 
 def _default_evidence_placeholder(section_type: str) -> str:
@@ -862,7 +956,14 @@ def _gen_technical(
                 for idx, row in enumerate(config_rows_list, start=1):
                     key = _markdown_cell(row.get("key", ""))
                     req = _markdown_cell(row.get("requirement", row.get("value", "")))
-                    resp = _markdown_cell(_normalize_section_response(row.get("response"), "config"))
+                    resp = _markdown_cell(
+                        _normalize_section_response(
+                            row.get("response"),
+                            "config",
+                            row.get("key", ""),
+                            row.get("requirement", row.get("value", "")),
+                        )
+                    )
                     evidence = _markdown_cell(_normalize_section_evidence(row, "config"))
                     cfg_table_lines.append(f"| {idx} | {key}：{req} | {resp} | {evidence} |")
                 service_sections.append(
@@ -875,6 +976,7 @@ def _gen_technical(
                 )
 
             # ── 验收要求分表 ──
+            # ── 验收要求分表 ──
             acc_table_lines = [
                 f"### 包{pkg.package_id} 验收要求响应表",
                 "| 序号 | 验收要求 | 响应承诺 | 验收方式 | 证据材料 |",
@@ -883,23 +985,32 @@ def _gen_technical(
 
             if acceptance_rows:
                 for idx, row in enumerate(acceptance_rows, start=1):
-                    key = _markdown_cell(row.get("key", ""))
-                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
+                    key_raw = _safe_text(row.get("key"), "")
+                    req_raw = _safe_text(row.get("requirement", row.get("value", "")), "")
+                    key = _markdown_cell(key_raw)
+                    req = _markdown_cell(req_raw)
+                    req_text = f"{key_raw} {req_raw}".strip()
+
                     resp = _markdown_cell(
-                        _normalize_section_response(row.get("response"), "acceptance")
+                        _normalize_section_response(
+                            row.get("response"),
+                            "acceptance",
+                            key_raw,
+                            req_raw,
+                        )
                     )
                     evidence = _markdown_cell(
                         _normalize_section_evidence(row, "acceptance")
                     )
                     acc_table_lines.append(
-                        f"| {idx} | {key}：{req} | {resp} | 【待填写：验收方式】 | {evidence} |"
+                        f"| {idx} | {key}：{req} | {resp} | {_default_acceptance_method(req_text)} | {evidence} |"
                     )
             else:
                 acc_table_lines.extend([
-                    "| 1 | 到货验收：核对品牌、型号、数量、外观及装箱清单 | 【待填写：响应承诺】 | 【待填写：到货验收】 | 【待补证：装箱单/到货验收单】 |",
-                    "| 2 | 安装调试验收：完成安装、通电开机、基础功能验证 | 【待填写：响应承诺】 | 【待填写：安装调试验收】 | 【待补证：安装调试记录/厂家服务单】 |",
-                    "| 3 | 试运行或性能验收：按采购文件或院方要求完成性能验证 | 【待填写：响应承诺】 | 【待填写：试运行/性能验收】 | 【待补证：试运行记录/性能验证记录】 |",
-                    "| 4 | 资料移交验收：说明书、合格证、注册证/备案凭证、培训记录等资料齐套 | 【待填写：响应承诺】 | 【待填写：资料验收】 | 【待补证：随机资料清单/培训签到表】 |",
+                    "| 1 | 到货验收：核对品牌、型号、数量、外观及装箱清单 | 承诺配合采购人完成到货验收，并按装箱单逐项核对品牌、型号、数量、外观及随机资料。 | 到货验收 | 【待补证：装箱单/到货验收单】 |",
+                    "| 2 | 安装调试验收：完成安装、通电开机、基础功能验证 | 承诺完成安装调试、通电开机及基础功能验证，并配合采购人形成安装调试记录。 | 安装调试验收 | 【待补证：安装调试记录/厂家服务单】 |",
+                    "| 3 | 试运行或性能验收：按采购文件或院方要求完成性能验证 | 承诺按采购文件及采购人要求配合完成试运行或性能验证。 | 试运行/性能验收 | 【待补证：试运行记录/性能验证记录】 |",
+                    "| 4 | 资料移交验收：说明书、合格证、注册证/备案凭证、培训记录等资料齐套 | 承诺在验收阶段完整移交随机文件、合规文件及培训记录。 | 资料验收 | 【待补证：随机资料清单/培训签到表】 |",
                 ])
 
             service_sections.append(
@@ -912,12 +1023,6 @@ def _gen_technical(
             )
 
             # ── 资料/文档要求分表 ──
-            doc_table_lines = [
-                f"### 包{pkg.package_id} 资料/文档要求响应表",
-                "| 序号 | 资料要求 | 响应承诺 | 提供方式 | 证据材料 |",
-                "|---:|---|---|---|---|",
-            ]
-
             # ── 资料/文档要求分表 ──
             doc_table_lines = [
                 f"### 包{pkg.package_id} 资料/文档要求响应表",
@@ -927,22 +1032,31 @@ def _gen_technical(
 
             if doc_rows:
                 for idx, row in enumerate(doc_rows, start=1):
-                    key = _markdown_cell(row.get("key", ""))
-                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
+                    key_raw = _safe_text(row.get("key"), "")
+                    req_raw = _safe_text(row.get("requirement", row.get("value", "")), "")
+                    key = _markdown_cell(key_raw)
+                    req = _markdown_cell(req_raw)
+                    req_text = f"{key_raw} {req_raw}".strip()
+
                     resp = _markdown_cell(
-                        _normalize_section_response(row.get("response"), "documentation")
+                        _normalize_section_response(
+                            row.get("response"),
+                            "documentation",
+                            key_raw,
+                            req_raw,
+                        )
                     )
                     evidence = _markdown_cell(
                         _normalize_section_evidence(row, "documentation")
                     )
                     doc_table_lines.append(
-                        f"| {idx} | {key}：{req} | {resp} | 【待填写：提供方式】 | {evidence} |"
+                        f"| {idx} | {key}：{req} | {resp} | {_default_document_supply_method(req_text)} | {evidence} |"
                     )
             else:
                 doc_table_lines.extend([
-                    "| 1 | 随机文件：说明书、合格证、保修卡、装箱单等资料齐套 | 【待填写：响应承诺】 | 【待填写：随货/另附/电子版】 | 【待补证：随机文件清单】 |",
-                    "| 2 | 合规文件：注册证/备案凭证、生产/经营许可文件、授权文件等与投标型号一致 | 【待填写：响应承诺】 | 【待填写：随附/投标文件附后】 | 【待补证：注册证/备案凭证/授权文件】 |",
-                    "| 3 | 培训与验收资料：培训签到表、安装调试记录、验收单等资料可完整移交 | 【待填写：响应承诺】 | 【待填写：交付时提供】 | 【待补证：培训记录/安装调试记录/验收单模板】 |",
+                    "| 1 | 随机文件：说明书、合格证、保修卡、装箱单等资料齐套 | 承诺随机文件齐套并与投标型号一致。 | 随货/另附/电子版 | 【待补证：随机文件清单】 |",
+                    "| 2 | 合规文件：注册证/备案凭证、生产/经营许可文件、授权文件等与投标型号一致 | 承诺提供与投标型号一致的注册证/备案凭证、许可文件及授权文件。 | 随附/投标文件附后 | 【待补证：注册证/备案凭证/授权文件】 |",
+                    "| 3 | 培训与验收资料：培训签到表、安装调试记录、验收单等资料可完整移交 | 承诺在交付及验收时同步移交培训、安装调试及验收资料。 | 交付时提供 | 【待补证：培训记录/安装调试记录/验收单模板】 |",
                 ])
 
             service_sections.append(
@@ -1015,28 +1129,18 @@ def _build_appendix_service_placeholder(
 ) -> str:
     warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
     payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
-    pkgs = packages if packages is not None else tender.packages
 
     lines = [
         "## 二、技术服务和售后服务的内容及措施",
-        "### （一）逐包补齐清单",
-        "| 包号 | 待补主题 | 回填位置 | 建议附件 |",
-        "|---|---|---|---|",
-    ]
-
-    for pkg in pkgs:
-        lines.append(
-            f"| 包{pkg.package_id} | 售后响应时限、保养频次、培训安排、验收方式 | "
-            "第三章《四、售后服务/配置/验收/资料要求响应》中对应包分表 | "
-            "售后服务方案 / 厂家服务承诺 / 培训计划 / 安装调试记录模板 |"
-        )
-
-    lines.extend([
+        "### （一）补充资料索引",
+        "| 主题 | 建议补充资料 | 回填位置 |",
+        "|---|---|---|",
+        "| 售后响应时限、保养频次、培训安排、验收方式 | 售后服务方案 / 厂家服务承诺 / 培训计划 / 安装调试记录模板 | 第三章《四、售后服务/配置/验收/资料要求响应》 |",
         "",
         "### （二）商务总述",
         f"- 质保期：{warranty}",
         f"- 付款方式：{payment}",
-    ])
+    ]
     return "\n".join(lines)
 
 
@@ -1126,6 +1230,8 @@ def _gen_appendix(
 
     content = f"""## 一、产品主要技术参数明细表及报价表
 ### （一）产品主要技术参数
+
+> 处理顺序：先补“投标型号 / 实际响应值 / 证据材料 / 页码”，再补附件索引；第四章只保留真正缺口，不再重复泛化提醒。
 {"\n\n".join(parameter_tables)}
 
 ### （二）报价明细表

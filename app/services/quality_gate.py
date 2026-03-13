@@ -23,6 +23,57 @@ from app.services.requirement_processor import (
     _package_forbidden_terms,
 )
 
+def _looks_like_nontechnical_row_in_tech_table(req_cell: str) -> bool:
+    """
+    技术偏离表中的“非技术条款”检测：
+    - 只拦服务/验收/资料/格式类
+    - 放行设备安全性能类技术项（如安全性检测器、安全门锁、剂量率、报警装置）
+    """
+    text = (req_cell or "").strip()
+    if not text:
+        return False
+
+    tech_whitelist = (
+        "安全性检测器",
+        "安全门锁系统",
+        "紧急停止",
+        "辐射指示",
+        "故障报警装置",
+        "剂量率",
+        "X射线球管",
+        "真空度监测",
+        "离子泵",
+        "连续辐照",
+        "水冷却系统",
+    )
+    if any(tok in text for tok in tech_whitelist):
+        return False
+
+    service_hints = (
+        "售后", "质保", "维修", "保修", "培训",
+        "响应时间", "上门服务", "技术支持", "巡检",
+        "备品备件", "升级服务", "使用培训", "工程师培训",
+    )
+    acceptance_hints = (
+        "验收", "试运行", "安装调试", "到货验收",
+        "验收报告", "验收方式", "验收标准",
+    )
+    documentation_hints = (
+        "说明书", "合格证", "操作手册", "使用手册",
+        "保修卡", "装箱单", "随机文件", "技术文件（合格证",
+    )
+    compliance_hints = (
+        "投标文件格式", "响应文件格式", "正本与副本", "装订成册",
+        "签字确认", "页码要求",
+    )
+
+    return any(
+        tok in text
+        for tok in (*service_hints, *acceptance_hints, *documentation_hints, *compliance_hints)
+    )
+
+
+
 logger = logging.getLogger(__name__)
 
 _BAD_NAME_SUFFIXES = ("（", "(", "为", "可", "单机", "至少", "最低", "最高")
@@ -403,11 +454,7 @@ def compute_validation_gate(
                     # 跳过表头/分隔行
                     if req_cell.startswith("---") or req_cell in ("招标要求", "参数项", "条款编号"):
                         continue
-                    if any(k in req_cell for k in ("售后", "质保", "维修", "保修", "培训",
-                                                     "安装调试", "交付与培训", "说明书", "合格证",
-                                                     "技术文件（合格证", "投标文件格式", "正本与副本",
-                                                     "配置清单", "配备", "标配", "选配", "装箱",
-                                                     "附件", "配件", "随机配件")):
+                    if _looks_like_nontechnical_row_in_tech_table(req_cell):
                         table_mixing = True
                         logger.warning("表格分类混装检测：技术表中发现非技术条款行: %s", req_cell[:60])
 
@@ -929,11 +976,12 @@ def compute_regression_metrics(
                 in_tech = False
             if in_tech and s.startswith("#"):
                 in_tech = False
-            if in_tech and s.startswith("|") and not s.startswith("|---") and not s.startswith("| 序号") and not s.startswith("| 条款编号"):
+            if in_tech and s.startswith("|") and not s.startswith("|---") and not s.startswith(
+                    "| 序号") and not s.startswith("| 条款编号"):
                 total_tech_table_rows += 1
                 cells = [c.strip() for c in s.split("|") if c.strip()]
                 req_cell = cells[1] if len(cells) > 1 else ""
-                if any(k in req_cell for k in (*_SVC_KW, *_DOC_KW, *_CMP_KW)):
+                if _looks_like_nontechnical_row_in_tech_table(req_cell):
                     mixed_rows_in_tech += 1
     mixing_rate = mixed_rows_in_tech / total_tech_table_rows if total_tech_table_rows > 0 else 0.0
 

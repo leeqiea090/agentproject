@@ -221,19 +221,15 @@ def _extract_configuration_items(
     # Config pollution cleaning — remove non-config items that leaked through boundary detection
     cleaned = _clean_config_items(deduped, pkg.package_id)
 
-    # ── 6大类别兜底：确保每个类别至少有一个占位行 ──
-    _REQUIRED_CONFIG_CATEGORIES = {
-        "核心模块": (f"{pkg.item_name}主机", "台", "1", "核心模块；[TODO:待补型号规格]"),
-        "标准附件": ("随机附件及工具", "套", "1", "标准附件；[TODO:待补附件清单]"),
-        "配套软件": ("操作/分析软件", "套", "1", "配套软件；[TODO:待补软件名称及版本]"),
-        "随机文件": ("技术文件（合格证/说明书/保修卡）", "套", "1", "随机文件；[TODO:待补文件清单]"),
-        "安装/培训资料": ("安装调试及培训服务", "项", "1", "安装/培训资料；[TODO:待补培训计划]"),
-        "初始耗材": ("初始运行耗材", "套", "1", "初始耗材；[TODO:待补耗材清单]"),
-    }
-    present_categories = {_classify_config_item(item[0]) for item in cleaned}
-    for category, default_item in _REQUIRED_CONFIG_CATEGORIES.items():
-        if category not in present_categories:
-            cleaned.append(default_item)
+    # 不再强行补“标准附件 / 配套软件 / 随机文件 / 安装培训 / 初始耗材”等 6 类通用占位项。
+    # 只在完全提取不到任何配置时，保留一条最小骨架，方便人工从“主机”开始补。
+    if not cleaned:
+        cleaned.append((
+            f"{pkg.item_name}主机",
+            "台",
+            "1",
+            "核心模块；与第三章投标型号一致，如有子模块/附件差异再补充",
+        ))
 
     return cleaned
 
@@ -416,9 +412,7 @@ def _build_configuration_table(
         quantity = _infer_package_quantity(pkg, tender_raw)
         lines.extend(
             [
-                f"| 1 | {pkg.item_name}主机 | 台 | {quantity} | 是 | 核心设备 | 核心设备 |",
-                "| 2 | 随机附件及工具 | 套 | 1 | 是 | 设备运维保障 | 按招标文件配置要求 |",
-                "| 3 | 技术文件（合格证/说明书等） | 套 | 1 | 是 | 操作指导与合规文件 | 交货时随货提供 |",
+                f"| 1 | {pkg.item_name}主机 | 台 | {quantity} | 是 | 核心设备 | 核心模块；与第三章投标型号一致，如有子模块/附件差异再补充 |",
             ]
         )
         return "\n".join(lines)
@@ -524,6 +518,21 @@ def _build_main_parameter_table(
     evidence_result: dict[str, Any] | None = None,
     product_profile: dict[str, Any] | None = None,
 ) -> str:
+    def _guess_source_hint(text: str) -> str:
+        t = _safe_text(text, "")
+        if any(k in t for k in ("注册证", "备案凭证", "说明书", "标签", "授权文件")):
+            return "注册证/备案凭证/说明书/标签/授权文件"
+        if any(k in t for k in ("LIS", "分析软件", "功能截图", "双向传输")):
+            return "软件说明书/功能截图/厂家说明"
+        if any(k in t for k in ("室间质评", "能力验证", "检测报告", "质控品", "临检中心")):
+            return "室间质评报告/能力验证报告/检测报告"
+        return "产品说明书/彩页/厂家参数表"
+
+    def _has_real_evidence(row: dict[str, Any]) -> bool:
+        return bool(_safe_text(row.get("bidder_evidence"), "")) or bool(
+            _safe_text(row.get("bidder_evidence_source"), "")
+        ) or bool(_safe_text(row.get("evidence_ref"), ""))
+
     requirement_rows, _ = _build_requirement_rows(
         pkg,
         tender_raw,
@@ -535,8 +544,23 @@ def _build_main_parameter_table(
 
     technical_rows: list[dict[str, Any]] = []
     for row in requirement_rows:
+        row_pkg = _safe_text(row.get("package_id"), pkg.package_id)
+        if row_pkg and str(row_pkg) != str(pkg.package_id):
+            continue
+
         key = _safe_text(row.get("key"), "")
         req = _safe_text(row.get("requirement"), "")
+
+        bad_scaffold_hints = (
+            "如有多个",
+            "配置请另行加行",
+            "我院设备的技术参数与性能要求的基本格式",
+            "此栏填“国际”或“国内”",
+            "此栏填“国际”或",
+        )
+        row_text = f"{key} {req}"
+        if any(tok in row_text for tok in bad_scaffold_hints):
+            continue
 
         inferred = _classify_clause_category(key, req)
         if inferred != ClauseCategory.technical_requirement:
@@ -564,20 +588,46 @@ def _build_main_parameter_table(
 
     real_response_count = sum(1 for r in technical_rows if r.get("has_real_response"))
     total_rows = len(technical_rows)
+    coverage = real_response_count / max(total_rows, 1)
 
-    # 实参覆盖率太低时，不再重复展开“未完成的大参数表”
-    if total_rows == 0 or real_response_count / max(total_rows, 1) < 0.3:
-        return "\n".join([
+    if total_rows == 0 or coverage < 0.6:
+        lines = [
             f"### 包{pkg.package_id}：{pkg.item_name}",
-            "| 待补项 | 回填位置 | 建议来源 | 处理动作 |",
-            "|---|---|---|---|",
-            "| 实际响应值 | 第三章对应包《技术偏离及详细配置明细表》 | 产品说明书/彩页/厂家参数表 | 逐条回填“实际响应值” |",
-            "| 证据材料 | 第三章对应包《技术偏离及详细配置明细表》 | 说明书/注册证/功能截图/厂家承诺 | 逐条回填“证据材料” |",
-            "| 页码 | 第三章对应包《技术偏离及详细配置明细表》 | 已整理PDF或彩页页码 | 逐条回填“页码” |",
-            "| 产品彩页 | 第四章《产品彩页》 | 厂家彩页/PDF | 上传附件并按包归档 |",
-            "| 注册证/备案凭证 | 第一章《相关证件》或第四章附件 | 国家药监局注册/备案信息、注册证扫描件 | 核对型号后上传 |",
-            "| 检测/质评数据 | 第四章《检测/质评数据节选》 | 室间质评报告/检测报告 | 上传附件并标明对应项目 |",
-        ])
+            "| 序号 | 待补条款 | 招标要求 | 建议证据来源 | 回填位置 |",
+            "|---:|---|---|---|---|",
+        ]
+
+        unresolved_rows = technical_rows or requirement_rows
+        idx = 1
+        for row in unresolved_rows:
+            key = _safe_text(
+                row.get("key") or row.get("requirement_name"),
+                "核心参数",
+            )
+            req = _safe_text(
+                row.get("requirement") or row.get("value") or row.get("requirement_value"),
+                "详见招标文件",
+            )
+            has_resp = bool(row.get("has_real_response"))
+            has_ev = _has_real_evidence(row)
+
+            if has_resp and has_ev:
+                continue
+
+            lines.append(
+                f"| {idx} | {_markdown_cell(key)} | {_markdown_cell(req)} | "
+                f"{_guess_source_hint(key + ' ' + req)} | 第三章对应包《技术偏离及详细配置明细表》 |"
+            )
+            idx += 1
+            if idx > 20:
+                break
+
+        if idx == 1:
+            lines.append(
+                "| 1 | 核心参数 | 已形成结构化框架 | 产品说明书/彩页/厂家参数表 | 第三章对应包《技术偏离及详细配置明细表》 |"
+            )
+
+        return "\n".join(lines)
 
     lines = [
         f"### 包{pkg.package_id}：{pkg.item_name}",
@@ -586,13 +636,21 @@ def _build_main_parameter_table(
     ]
 
     for idx, row in enumerate(technical_rows, start=1):
+        response_text = _safe_text(row.get("response"), "")
+        if (
+            not response_text
+            or "待填写" in response_text
+            or "待核实" in response_text
+        ):
+            response_text = "待按产品说明书/厂家参数表逐条回填"
+
         note = _normalize_main_param_note(
             row.get("deviation_status"),
             bool(row.get("has_real_response")),
         )
         lines.append(
             f"| {idx} | {_markdown_cell(str(row['key']))} | {_markdown_cell(str(row['requirement']))} | "
-            f"{_markdown_cell(str(row['response']))} | {note} |"
+            f"{_markdown_cell(response_text)} | {note} |"
         )
 
     return "\n".join(lines)

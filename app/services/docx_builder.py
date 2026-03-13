@@ -147,20 +147,70 @@ def _extract_outline_items(content: str) -> list[str]:
     return items[:20]
 
 
+def _enable_update_fields_on_open(doc: Document) -> None:
+    """要求 Word 打开文档时尝试更新域（含目录）。"""
+    settings = doc.settings.element
+    update_fields = settings.find(qn("w:updateFields"))
+    if update_fields is None:
+        update_fields = OxmlElement("w:updateFields")
+        settings.append(update_fields)
+    update_fields.set(qn("w:val"), "true")
+
+
+def _insert_toc_field(paragraph, levels: str = "1-3") -> None:
+    """
+    在段落中插入 Word 目录域：
+    { TOC \\o "1-3" \\h \\z \\u }
+
+    \\o "1-3" = 收录 1~3 级标题
+    \\h       = 目录项带超链接，可点击跳转
+    \\z       = Web 布局中隐藏页码
+    \\u       = 使用段落大纲级别
+    """
+    # begin
+    run = paragraph.add_run()
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    fld_begin.set(qn("w:dirty"), "true")
+    run._r.append(fld_begin)
+
+    # instrText
+    run = paragraph.add_run()
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = f'TOC \\o "{levels}" \\h \\z \\u'
+    run._r.append(instr)
+
+    # separate
+    run = paragraph.add_run()
+    fld_sep = OxmlElement("w:fldChar")
+    fld_sep.set(qn("w:fldCharType"), "separate")
+    run._r.append(fld_sep)
+
+    # 占位显示文本（真正目录会在 Word 更新域后出现）
+    hint_run = paragraph.add_run("目录将在打开文档后自动更新；如未更新，请在 Word 中右键目录并选择“更新域”，或按 F9。")
+    hint_run.font.size = Pt(10.5)
+    hint_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    # end
+    run = paragraph.add_run()
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+    run._r.append(fld_end)
+
+
 def _add_toc(doc: Document, sections: Iterable[BidDocumentSection]) -> None:
-    """添加简化目录页"""
+    """添加可点击跳转的 Word 自动目录。"""
     _add_heading(doc, "目录", 1)
-    for section in sections:
-        line = doc.add_paragraph()
-        run = line.add_run(section.section_title)
-        run.font.size = Pt(12)
-        run.font.bold = True
 
-        for item in _extract_outline_items(section.content):
-            sub = doc.add_paragraph(item, style="List Bullet")
-            for r in sub.runs:
-                r.font.size = Pt(10.5)
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(6)
+    _insert_toc_field(p, levels="1-3")
 
+    tip = doc.add_paragraph()
+    tip_run = tip.add_run("提示：目录项生成后可直接点击跳转到对应章节。")
+    tip_run.font.size = Pt(9.5)
+    tip_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
 def _render_markdown_table(doc: Document, lines: list[str]) -> None:
     """将 Markdown 表格渲染为 Word 表格"""
@@ -355,6 +405,7 @@ def build_bid_docx(
     """
     doc = Document()
     _set_document_style(doc)
+    _enable_update_fields_on_open(doc)
 
     # 封面
     _add_cover(doc, tender, company)
