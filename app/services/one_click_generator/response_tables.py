@@ -671,105 +671,83 @@ def _display_model_cell(model_text: str, row_index: int) -> str:
     return "【待填写：投标型号】" if row_index == 1 else "同上"
 
 def _build_deviation_table(
-    tender: TenderDocument,
-    pkg: ProcurementPackage,
-    requirement_rows: list[dict[str, Any]],
-    total_requirements: int,
-    product: Any = None,
+    tender,
+    pkg,
+    requirement_rows,
+    total_requirements,
+    product=None,
 ) -> str:
-    """构建 8 列技术偏离表（更适合人工统一回填）。"""
-    _NONTECH_HINTS = (
-        "售后", "质保", "维修", "保修", "培训", "响应时间", "上门服务", "备用机",
-        "验收", "试运行", "到货验收", "安装调试", "验收方式", "验收标准",
-        "付款", "交货期", "投标文件格式", "正本与副本", "签字确认",
-        "说明书", "合格证", "装箱单", "保修卡", "随机文件",
-        "执行标准", "包装标准",
-    )
+    def _safe(v):
+        return "" if v is None else str(v).strip()
 
-    filtered_rows = []
-    for row in requirement_rows:
-        cat = _safe_text(row.get("category"), "")
-        text = f"{_safe_text(row.get('key'), '')} {_safe_text(row.get('requirement'), '')}"
+    def _md(v):
+        return _safe(v).replace("|", "/")
 
-        if cat == "technical_requirement":
-            filtered_rows.append(row)
-            continue
-
-        if cat and cat != "technical_requirement":
-            logger.debug("技术偏离表剔除非技术行: key=%s category=%s", row.get("key", "?"), cat)
-            continue
-
-        if any(tok in text for tok in _NONTECH_HINTS):
-            logger.debug("技术偏离表剔除疑似非技术行: key=%s text=%s", row.get("key", "?"), text[:80])
-            continue
-
-        filtered_rows.append(row)
-
-    requirement_rows = filtered_rows
+    def _normalize_dev(raw_value, has_real=False):
+        text = _safe(raw_value)
+        if not text or "待填写" in text:
+            return "【待填写：无偏离/正偏离/负偏离】" if not has_real else "无偏离"
+        return text
 
     p_model = ""
     p_mfr = ""
     if product is not None:
-        p_model = _as_text(getattr(product, "model", "")) or _as_text(getattr(product, "product_name", ""))
-        p_mfr = _as_text(getattr(product, "manufacturer", ""))
+        p_model = _safe(getattr(product, "model", "")) or _safe(getattr(product, "product_name", ""))
+        p_mfr = _safe(getattr(product, "manufacturer", ""))
 
-    header_model = f"{p_mfr} {p_model}".strip()
+    model_identity = " / ".join([x for x in [p_mfr, p_model] if x])
 
     lines = [
-        "### （一）技术偏离及详细配置明细表",
+        "### 四、技术偏离及详细配置明细表",
         f"项目名称：{tender.project_name}",
         f"项目编号：{tender.project_number}",
-        f"本包统一投标型号：{header_model}" if header_model else "本包统一投标型号：【待填写：投标型号】",
-        "",
-        "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 备注 |",
-        "|---|---|---|---|---|---|---|---|",
+        f"（第{pkg.package_id}包）",
+        "| 序号 | 服务名称 | 磋商文件的服务需求 | 响应文件响应情况 | 偏离情况 |",
+        "|---:|---|---|---|---|",
     ]
 
     if not requirement_rows:
         lines.append(
-            f"| {pkg.package_id}.1 | 详见招标文件采购需求 | 【待填写：投标型号】 | 【待填写：实际响应值】 | 【待选择：无偏离/有偏离】 | 【待补证：说明书/彩页/厂家参数表】 | 【待填写：页码】 | 首行填写型号，其余行同上 |"
+            "| 1 | 【待填写：服务名称】 | 详见招标文件采购需求 | 【待填写：品牌/型号/规格/配置及逐条响应】 | 【待填写：无偏离/正偏离/负偏离】 |"
         )
+        lines.extend([
+            "",
+            "供应商全称：【待填写：投标人名称】",
+            "日期：【待填写：日期】",
+        ])
+        return "\n".join(lines)
 
     for idx, row in enumerate(requirement_rows, start=1):
-        clause_no = f"{pkg.package_id}.{idx}"
-        req = f"{_markdown_cell(str(row['key']))}：{_markdown_cell(str(row['requirement']))}"
-        has_real = row.get("has_real_response", False)
-        bidder_ev = _safe_text(row.get("bidder_evidence"), "")
-        bidder_source = _safe_text(row.get("bidder_evidence_source"), "")
-        bidder_page = row.get("bidder_evidence_page")
+        service_name = _md(row.get("key") or f"条款{idx}")
+        tender_requirement = _md(row.get("requirement") or row.get("value") or "")
 
-        model_cell = _markdown_cell(_display_model_cell(p_model, idx))
-        response_cell = _markdown_cell(_display_bidder_response(row.get("response")))
-
-        if has_real and bidder_ev:
-            source_text = bidder_source or _safe_text(row.get("evidence_source"), "投标方资料")
-            evidence_text = f"{_markdown_cell(source_text)}；{_markdown_cell(bidder_ev)}"
-            deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
+        raw_response = _safe(row.get("response"))
+        if not raw_response or "待填写" in raw_response:
+            if model_identity:
+                bid_response = f"品牌/型号：{_md(model_identity)}；【待填写：对应参数实测值/配置情况】"
+            else:
+                bid_response = "【待填写：品牌/型号/规格/配置及逐条响应】"
         else:
-            evidence_text = _recommended_evidence_label(
-                str(row.get("key", "")),
-                str(row.get("requirement", "")),
-            )
-            deviation = _normalize_deviation_status(row.get("deviation_status"), has_real=has_real)
+            if model_identity and model_identity not in raw_response:
+                bid_response = f"品牌/型号：{_md(model_identity)}；{_md(raw_response)}"
+            else:
+                bid_response = _md(raw_response)
 
-        if bidder_page is not None:
-            page_ref = str(bidder_page)
-        elif row.get("source_page") is not None:
-            page_ref = str(row.get("source_page"))
-        else:
-            page_ref = "【待填写：页码】"
-
-        remark = "首行填写型号，其余行同上" if idx == 1 else ""
+        deviation = _normalize_dev(row.get("deviation_status"), has_real=bool(raw_response))
 
         lines.append(
-            f"| {clause_no} | {req} | {model_cell} | {response_cell} | {deviation} | {evidence_text} | {page_ref} | {remark} |"
+            f"| {idx} | {service_name} | {tender_requirement} | {bid_response} | {deviation} |"
         )
 
     if total_requirements > len(requirement_rows):
         lines.append("")
         lines.append(
-            f"> 说明：当前仅结构化展示 {len(requirement_rows)} / {total_requirements} 条技术要求；"
-            "未结构化条款请回看原采购文件原文逐条补齐。"
+            f"> 说明：当前已结构化生成 {len(requirement_rows)} / {total_requirements} 条，剩余条款必须继续按招标文件原文逐条补齐。"
         )
 
+    lines.extend([
+        "",
+        "供应商全称：【待填写：投标人名称】",
+        "日期：【待填写：年 月 日】",
+    ])
     return "\n".join(lines)

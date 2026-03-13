@@ -22,7 +22,6 @@ def _message_to_text(message: Any) -> str:
                 if isinstance(text, str):
                     parts.append(text)
         return "\n".join(parts).strip()
-
     return str(content).strip()
 
 

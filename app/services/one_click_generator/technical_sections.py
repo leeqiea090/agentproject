@@ -109,6 +109,17 @@ def _sanitize_rows_for_section(
     seen: set[str] = set()
     forbidden = _package_forbidden_terms(pkg.item_name)
 
+    generic_keys = {
+        "技术参数与性能要求",
+        "技术参数",
+        "技术要求",
+        "性能要求",
+        "参数要求",
+    }
+    seq_only_pattern = re.compile(
+        r"^(?:序号|条款编号|编号)[:：]\s*\*?\d+(?:\.\d+)*$"
+    )
+
     for row in rows:
         key = _safe_text(row.get("key"), "")
         req = _safe_text(row.get("requirement"), "")
@@ -116,6 +127,17 @@ def _sanitize_rows_for_section(
 
         if not key or not req:
             continue
+
+        # 过滤“技术参数与性能要求：序号：3.1”这类纯编号行
+        if key in generic_keys and seq_only_pattern.fullmatch(req):
+            continue
+
+        # 把“要求：xxx / 技术要求：xxx”收成真正的正文
+        if key in generic_keys:
+            req = re.sub(r"^(?:要求|技术要求|性能要求|参数要求)[:：]\s*", "", req).strip()
+            if not req:
+                continue
+
         if _is_bad_requirement_name(key) or _is_bad_requirement_value(req):
             continue
         if forbidden and any(tok in text for tok in forbidden):
@@ -444,9 +466,9 @@ def _smart_default_response(section_type: str, key: str, req: str) -> str:
             return "承诺按采购文件要求提供软件或系统免费升级服务。"
         if any(k in text for k in ("备用机", "替代设备")):
             return "承诺如设备无法及时修复或维修周期过长，按采购文件要求提供备用机或替代设备保障使用。"
-        if any(k in text for k in ("配件库", "备件", "零配件", "关键零部件", "更换零件")):
-            return "承诺具备备件储备和更换保障能力，确保关键零部件供应及时。"
-        if any(k in text for k in ("保养", "维护", "巡检", "维修保养手册")):
+        if any(k in text for k in ("配件库", "备件", "零配件", "关键零部件", "更换零件", "耗材")):
+            return "承诺具备备件、耗材储备和更换保障能力，确保关键零部件供应及时。"
+        if any(k in text for k in ("保养", "维护", "巡检")):
             return "承诺按采购文件要求提供定期维护保养、巡检及使用指导，并提供相应维护资料。"
         if any(k in text for k in ("安装", "调试", "培训", "卸货", "上线")):
             return "承诺负责送货、卸货、安装调试及人员培训，直至设备可正常投入使用。"
@@ -742,411 +764,60 @@ def _build_package_detail_section(
     return content
 
 
-def _gen_technical(
-    llm: ChatOpenAI,
-    tender: TenderDocument,
-    tender_raw: str,
-    products: dict | None = None,
-    *,
-    normalized_result: dict[str, Any] | None = None,
-    evidence_result: dict[str, Any] | None = None,
-    product_profiles: dict[str, dict[str, Any]] | None = None,
-    tender_bindings: dict[str, list] | None = None,
-    bid_bindings: dict[str, list] | None = None,
-    active_packages: list[ProcurementPackage] | None = None,
-) -> BidDocumentSection:
-    """第三章：商务及技术部分 — 增强版：分类分表"""
-    packages = active_packages or tender.packages
-    _ = llm
-    products = products or {}
-    today = _today()
-    purchaser = _safe_text(tender.purchaser, "[采购人名称]")
-    package_details = _package_detail_lines(tender, tender_raw, packages=packages)
-    quote_table = _quote_overview_table(tender, tender_raw, packages=packages)
-
-    technical_sections: list[str] = []
-    service_sections: list[str] = []
-
-    # 用于跨包折叠重复的非技术分表
-    reused_nontech_blocks: dict[str, dict[str, str]] = {
-        "service": {},
-        "config": {},
-        "acceptance": {},
-        "documentation": {},
-    }
-
-    if packages:
-        for pkg in packages:
-            product = products.get(pkg.package_id)
-            product_profile = (product_profiles or {}).get(pkg.package_id)
-            # 构建 binding 索引（按 requirement_id 查找）
-            _pkg_tender_binds = {}
-            _pkg_bid_binds = {}
-            if tender_bindings and pkg.package_id in tender_bindings:
-                for tb in tender_bindings[pkg.package_id]:
-                    rid = getattr(tb, "requirement_id", None) or (tb.get("requirement_id") if isinstance(tb, dict) else None)
-                    if rid:
-                        _pkg_tender_binds[rid] = tb if isinstance(tb, dict) else tb.model_dump() if hasattr(tb, "model_dump") else {}
-
-            requirement_rows, total_requirements = _build_requirement_rows(
-                pkg,
-                tender_raw,
-                product=product,
-                normalized_result=normalized_result,
-                evidence_result=evidence_result,
-                product_profile=product_profile,
-                category_filter=None,
-                tender_bindings=_pkg_tender_binds,
-                bid_bindings=_pkg_bid_binds,
-            )
-
-            # ── 条款分类过滤：优先使用行上已标注的 category 字段 ──
-            tech_rows = []
-            svc_rows = []
-            config_rows_list = []
-            acceptance_rows = []
-            doc_rows = []
-            for row in requirement_rows:
-                key = _safe_text(row.get("key"), "")
-                req = _safe_text(row.get("requirement"), "")
-
-                # 永远先做一次基于文本的重分类
-                inferred_cat = _classify_clause_category(key, req)
-
-                raw_cat_text = _safe_text(row.get("category"), "")
-                raw_cat: ClauseCategory | None = None
-                if raw_cat_text:
-                    try:
-                        raw_cat = ClauseCategory(raw_cat_text)
-                    except ValueError:
-                        raw_cat = None
-
-                # 规则：
-                # 1) 如果 inferred 是明显非技术类，则以 inferred 为准
-                # 2) 只有 inferred == technical_requirement 时，才允许相信 raw_cat
-                if inferred_cat != ClauseCategory.technical_requirement:
-                    cat = inferred_cat
-                else:
-                    cat = raw_cat or inferred_cat
-
-                row = dict(row)
-                row["category"] = cat.value
-
-                if cat == ClauseCategory.service_requirement:
-                    svc_rows.append(row)
-                elif cat == ClauseCategory.config_requirement:
-                    config_rows_list.append(row)
-                elif cat == ClauseCategory.acceptance_requirement:
-                    acceptance_rows.append(row)
-                elif cat == ClauseCategory.documentation_requirement:
-                    doc_rows.append(row)
-                elif cat in (
-                        ClauseCategory.commercial_requirement,
-                        ClauseCategory.compliance_note,
-                        ClauseCategory.attachment_requirement,
-                        ClauseCategory.noise,
-                ):
-                    pass
-                else:
-                    tech_rows.append(row)
-
-            # ── 技术偏离表最小行数检查 ──
-            tech_rows = _sanitize_rows_for_section(
-                pkg, tech_rows, expected_category=ClauseCategory.technical_requirement
-            )
-            svc_rows = _sanitize_rows_for_section(
-                pkg, svc_rows, expected_category=ClauseCategory.service_requirement
-            )
-            config_rows_list = _sanitize_rows_for_section(
-                pkg, config_rows_list, expected_category=ClauseCategory.config_requirement
-            )
-            acceptance_rows = _sanitize_rows_for_section(
-                pkg, acceptance_rows, expected_category=ClauseCategory.acceptance_requirement
-            )
-            doc_rows = _sanitize_rows_for_section(
-                pkg, doc_rows, expected_category=ClauseCategory.documentation_requirement
-            )
-            base_min_rows = _DETAIL_TARGETS.get("deviation_table_min_rows", 10)
-
-            # 自适应阈值：
-            # 至少要求 6 条；但如果本包清洗后就只有 8 条有效技术项，
-            # 就不再强行按 10 条报警。
-            adaptive_min_rows = min(base_min_rows, max(6, len(tech_rows)))
-
-            if len(tech_rows) < adaptive_min_rows:
-                logger.warning(
-                    "包%s 技术偏离表行数不足: %d < %d (最小要求)，建议补充技术条款",
-                    pkg.package_id, len(tech_rows), adaptive_min_rows,
-                )
-
-            mapped_count = sum(1 for row in tech_rows if bool(row.get("mapped")))
-
-            technical_sections.append(f"### 包{pkg.package_id}：{pkg.item_name}")
-
-            technical_sections.append(
-                _build_deviation_table(
-                    tender=tender,
-                    pkg=pkg,
-                    requirement_rows=tech_rows,
-                    total_requirements=len(tech_rows),
-                    product=product,
-                )
-            )
-
-            technical_sections.append(
-                _build_configuration_table(
-                    pkg,
-                    tender_raw,
-                    product=product,
-                    product_profile=product_profile,
-                    normalized_result=normalized_result,
-                )
-            )
-
-            include_internal_diagnostics = False
-
-            if include_internal_diagnostics:
-                technical_sections.append(
-                    _build_response_checklist_table(
-                        pkg=pkg,
-                        mapped_count=mapped_count,
-                        total_requirements=len(tech_rows),
-                        requirement_rows=tech_rows,
-                    )
-                )
-                technical_sections.append(
-                    _build_evidence_mapping_table(
-                        pkg=pkg,
-                        requirement_rows=tech_rows,
-                        total_requirements=len(tech_rows),
-                    )
-                )
-
-            # ── 售后服务要求分表 ──
-            # ── 售后服务要求分表 ──
-            if svc_rows:
-                svc_table_lines = [
-                    f"### 包{pkg.package_id} 售后服务要求响应表",
-                    "| 序号 | 售后服务要求 | 响应承诺 | 证据材料 |",
-                    "|---:|---|---|---|",
-                ]
-                for idx, row in enumerate(svc_rows, start=1):
-                    pretty_key = _beautify_nontech_key(
-                        "service",
-                        _safe_text(row.get("key"), ""),
-                        _safe_text(row.get("requirement", row.get("value", "")), ""),
-                    )
-                    key = _markdown_cell(pretty_key)
-                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
-                    resp = _markdown_cell(_normalize_section_response(row.get("response"), "service"))
-                    evidence = _markdown_cell(_normalize_section_evidence(row, "service"))
-                    svc_table_lines.append(f"| {idx} | {key}：{req} | {resp} | {evidence} |")
-                service_sections.append(
-                    _collapse_repeated_nontech_block(
-                        "service",
-                        str(pkg.package_id),
-                        svc_table_lines,
-                        reused_nontech_blocks,
-                    )
-                )
-
-            # ── 配置类要求分表 ──
-            if config_rows_list:
-                cfg_table_lines = [
-                    f"### 包{pkg.package_id} 配置要求响应表",
-                    "| 序号 | 配置要求 | 响应情况 | 证据材料 |",
-                    "|---:|---|---|---|",
-                ]
-                for idx, row in enumerate(config_rows_list, start=1):
-                    key = _markdown_cell(row.get("key", ""))
-                    req = _markdown_cell(row.get("requirement", row.get("value", "")))
-                    resp = _markdown_cell(
-                        _normalize_section_response(
-                            row.get("response"),
-                            "config",
-                            row.get("key", ""),
-                            row.get("requirement", row.get("value", "")),
-                        )
-                    )
-                    evidence = _markdown_cell(_normalize_section_evidence(row, "config"))
-                    cfg_table_lines.append(f"| {idx} | {key}：{req} | {resp} | {evidence} |")
-                service_sections.append(
-                    _collapse_repeated_nontech_block(
-                        "config",
-                        str(pkg.package_id),
-                        cfg_table_lines,
-                        reused_nontech_blocks,
-                    )
-                )
-
-            # ── 验收要求分表 ──
-            # ── 验收要求分表 ──
-            acc_table_lines = [
-                f"### 包{pkg.package_id} 验收要求响应表",
-                "| 序号 | 验收要求 | 响应承诺 | 验收方式 | 证据材料 |",
-                "|---:|---|---|---|---|",
-            ]
-
-            if acceptance_rows:
-                for idx, row in enumerate(acceptance_rows, start=1):
-                    key_raw = _safe_text(row.get("key"), "")
-                    req_raw = _safe_text(row.get("requirement", row.get("value", "")), "")
-                    key = _markdown_cell(key_raw)
-                    req = _markdown_cell(req_raw)
-                    req_text = f"{key_raw} {req_raw}".strip()
-
-                    resp = _markdown_cell(
-                        _normalize_section_response(
-                            row.get("response"),
-                            "acceptance",
-                            key_raw,
-                            req_raw,
-                        )
-                    )
-                    evidence = _markdown_cell(
-                        _normalize_section_evidence(row, "acceptance")
-                    )
-                    acc_table_lines.append(
-                        f"| {idx} | {key}：{req} | {resp} | {_default_acceptance_method(req_text)} | {evidence} |"
-                    )
-            else:
-                acc_table_lines.extend([
-                    "| 1 | 到货验收：核对品牌、型号、数量、外观及装箱清单 | 承诺配合采购人完成到货验收，并按装箱单逐项核对品牌、型号、数量、外观及随机资料。 | 到货验收 | 【待补证：装箱单/到货验收单】 |",
-                    "| 2 | 安装调试验收：完成安装、通电开机、基础功能验证 | 承诺完成安装调试、通电开机及基础功能验证，并配合采购人形成安装调试记录。 | 安装调试验收 | 【待补证：安装调试记录/厂家服务单】 |",
-                    "| 3 | 试运行或性能验收：按采购文件或院方要求完成性能验证 | 承诺按采购文件及采购人要求配合完成试运行或性能验证。 | 试运行/性能验收 | 【待补证：试运行记录/性能验证记录】 |",
-                    "| 4 | 资料移交验收：说明书、合格证、注册证/备案凭证、培训记录等资料齐套 | 承诺在验收阶段完整移交随机文件、合规文件及培训记录。 | 资料验收 | 【待补证：随机资料清单/培训签到表】 |",
-                ])
-
-            service_sections.append(
-                _collapse_repeated_nontech_block(
-                    "acceptance",
-                    str(pkg.package_id),
-                    acc_table_lines,
-                    reused_nontech_blocks,
-                )
-            )
-
-            # ── 资料/文档要求分表 ──
-            # ── 资料/文档要求分表 ──
-            doc_table_lines = [
-                f"### 包{pkg.package_id} 资料/文档要求响应表",
-                "| 序号 | 资料要求 | 响应承诺 | 提供方式 | 证据材料 |",
-                "|---:|---|---|---|---|",
-            ]
-
-            if doc_rows:
-                for idx, row in enumerate(doc_rows, start=1):
-                    key_raw = _safe_text(row.get("key"), "")
-                    req_raw = _safe_text(row.get("requirement", row.get("value", "")), "")
-                    key = _markdown_cell(key_raw)
-                    req = _markdown_cell(req_raw)
-                    req_text = f"{key_raw} {req_raw}".strip()
-
-                    resp = _markdown_cell(
-                        _normalize_section_response(
-                            row.get("response"),
-                            "documentation",
-                            key_raw,
-                            req_raw,
-                        )
-                    )
-                    evidence = _markdown_cell(
-                        _normalize_section_evidence(row, "documentation")
-                    )
-                    doc_table_lines.append(
-                        f"| {idx} | {key}：{req} | {resp} | {_default_document_supply_method(req_text)} | {evidence} |"
-                    )
-            else:
-                doc_table_lines.extend([
-                    "| 1 | 随机文件：说明书、合格证、保修卡、装箱单等资料齐套 | 承诺随机文件齐套并与投标型号一致。 | 随货/另附/电子版 | 【待补证：随机文件清单】 |",
-                    "| 2 | 合规文件：注册证/备案凭证、生产/经营许可文件、授权文件等与投标型号一致 | 承诺提供与投标型号一致的注册证/备案凭证、许可文件及授权文件。 | 随附/投标文件附后 | 【待补证：注册证/备案凭证/授权文件】 |",
-                    "| 3 | 培训与验收资料：培训签到表、安装调试记录、验收单等资料可完整移交 | 承诺在交付及验收时同步移交培训、安装调试及验收资料。 | 交付时提供 | 【待补证：培训记录/安装调试记录/验收单模板】 |",
-                ])
-
-            service_sections.append(
-                _collapse_repeated_nontech_block(
-                    "documentation",
-                    str(pkg.package_id),
-                    doc_table_lines,
-                    reused_nontech_blocks,
-                )
-            )
-    else:
-        technical_sections.append(
-            "\n".join(
-                [
-                    "### （一）技术偏离及详细配置明细表",
-                    "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 说明/验收备注 |",
-                    "|---|---|---|---|---|---|---|---|",
-                    "| 1.1 | 详见招标文件 | [待填写] | 详见拟投产品参数资料 | 无偏离 | 结构化解析结果 | — | 建议复核原文 |",
-                    "",
-                    "### （二-A）详细配置明细表",
-                    "| 序号 | 配置名称 | 单位 | 数量 | 是否标配 | 用途说明 | 备注 |",
-                    "|---:|---|---|---:|---|---|---|",
-                    "| 1 | 核心配置 | 项 | 1 | 是 | 核心设备 | 待按项目补充 |",
-                    "",
-                    "### （三）编辑提示",
-                    "- 当前仅生成基础技术响应框架。",
-                    "- 待补充拟投型号、关键参数实参、配置清单及投标方证据后，再输出完整技术说明。",
-                ]
-            )
-        )
-
-    # 合并服务/配置分表
-    service_block = ""
-    if service_sections:
-        service_block = "\n\n## 四、售后服务/配置/验收/资料要求响应\n\n" + "\n\n".join(service_sections)
-
-    content = f"""## 一、报价书
-{purchaser}：
-
-我方{_COMPANY}已详细研究“{tender.project_name}”（项目编号：{tender.project_number}）采购文件，愿按采购文件及合同条款要求提供合格货物及服务，并承担相应责任义务。现提交报价文件如下：
-1. 投标范围：{_package_scope(tender, packages)}
-2. 报价原则：满足招标文件实质性条款，报价包含货物、运输、安装、调试、培训、税费、售后服务等全部费用
-3. 履约承诺：严格按合同约定进度组织供货、安装、验收及售后服务
-4. 有效期承诺：投标有效期按招标文件约定执行
-
-采购包信息摘要：
-{package_details}
-
-投标人名称：{_COMPANY}  
-授权代表：{_AUTHORIZED_REP}  
-联系电话：{_PHONE}  
-日期：{today}
-
-## 二、报价一览表
-项目名称：{tender.project_name}  
-项目编号：{tender.project_number}
-
-{quote_table}
-
-## 三、技术偏离及详细配置明细表
-{"\n\n".join(technical_sections)}
-{service_block}
-"""
-    return BidDocumentSection(section_title="第三章 商务及技术部分", content=content.strip())
-
+def _gen_technical(*args, **kwargs):
+    raise RuntimeError(
+        "旧结构生成器 _gen_technical 已禁用。请改用 build_format_driven_sections()."
+    )
 
 def _build_appendix_service_placeholder(
     tender: TenderDocument,
     packages: list[ProcurementPackage] | None = None,
 ) -> str:
-    warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
-    payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
+    pkgs = packages if packages is not None else tender.packages
+    sections: list[str] = ["## 二、技术服务和售后服务的内容及措施"]
 
-    lines = [
-        "### 技术服务和售后服务的内容及措施",
-        "#### （一）补充资料索引",
-        "| 主题 | 建议补充资料 | 回填位置 |",
-        "|---|---|---|",
-        "| 售后响应时限、保养频次、培训安排、验收方式 | 售后服务方案 / 厂家服务承诺 / 培训计划 / 安装调试记录模板 | 第三章《四、售后服务/配置/验收/资料要求响应》 |",
-        "",
-        "#### （二）商务总述",
-        f"- 质保期：{warranty}",
-        f"- 付款方式：{payment}",
-    ]
-    return "\n".join(lines)
+    for pkg in pkgs:
+        delivery_time = _normalize_commitment_term(pkg.delivery_time or "按采购文件约定")
+        delivery_place = _normalize_commitment_term(pkg.delivery_place or "采购人指定地点")
+        warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period or "按采购文件约定")
 
+        sections.extend([
+            f"### 包{pkg.package_id}：{pkg.item_name}",
+            "",
+            "#### 1. 供货组织措施",
+            "我方设立本项目专项供货小组，由项目负责人统筹对接采购人、厂家、物流及安装工程师，"
+            "对备货、发运、到货、安装、调试、培训、验收全过程实行节点管理，确保责任到人、进度可控。",
+            "",
+            "#### 2. 备货与到货前核查措施",
+            "发货前逐项核对设备品牌、型号、数量、配置清单、随机资料、注册证/备案凭证、合格证明文件，"
+            "确保实际供货内容与投标响应文件及合同约定一致；对外包装、序列号、附件完整性进行出库复核。",
+            "",
+            "#### 3. 运输与交付措施",
+            f"我方承诺按照“{delivery_time}”要求完成供货，并将设备安全运送至“{delivery_place}”。"
+            "运输过程采用原厂包装或符合医疗设备运输要求的专业包装方式，防止受潮、震动、碰撞和污染。"
+            "到货后由双方共同进行外观检查、数量清点和装箱清单核对。",
+            "",
+            "#### 4. 安装调试措施",
+            "设备到货验收合格后，我方安排专业技术人员到场完成安装、通电、基础功能测试和参数校准，"
+            "并按采购文件技术要求逐项验证主要功能和配置。安装调试完成后，形成安装调试记录并交采购人确认。",
+            "",
+            "#### 5. 培训措施",
+            "我方将在设备安装调试完成后，对采购人操作人员和日常管理人员开展现场培训，"
+            "内容包括设备结构组成、操作流程、注意事项、日常维护、常见故障处理及安全管理要求。"
+            "培训结束后可提供培训签到记录或培训证明材料。",
+            "",
+            "#### 6. 验收配合措施",
+            "我方按采购文件约定配合开展到货验收、安装调试验收和功能性能验收，"
+            "提交说明书、合格证、装箱单、保修文件及其他随机资料，确保验收资料齐套、过程留痕、结论明确。",
+            "",
+            "#### 7. 售后服务措施",
+            f"质保期按采购文件要求执行，为“{warranty}”。质保期内提供技术支持、故障响应、维修维护、"
+            "配件供应及升级服务；对采购文件明确要求的响应时限、维保频次、培训及技术支持内容，"
+            "均严格按采购文件及厂家承诺执行。",
+            "",
+        ])
+
+    return "\n".join(sections).strip()
 
 def _build_product_brochure_checklist(packages: list[ProcurementPackage]) -> str:
     lines = [
@@ -1188,48 +859,7 @@ def _build_quality_report_checklist(packages: list[ProcurementPackage]) -> str:
 
 
 
-def _gen_appendix(
-    llm: ChatOpenAI,
-    tender: TenderDocument,
-    tender_raw: str,
-    products: dict | None = None,
-    *,
-    normalized_result: dict[str, Any] | None = None,
-    evidence_result: dict[str, Any] | None = None,
-    product_profiles: dict[str, dict[str, Any]] | None = None,
-    active_packages: list[ProcurementPackage] | None = None,
-) -> BidDocumentSection:
-    """
-    第四章：报价书附件（精简版）
-
-    原则：
-    1. 第三章已经承担逐条技术响应主表职责；
-    2. 第四章不再重复逐条技术参数，避免人工维护两套表；
-    3. 第四章只保留报价明细、附件索引和补件清单。
-    """
-    _ = llm
-    packages = active_packages or tender.packages
-    today = _today()
-
-    content = f"""## 一、报价明细表
-项目名称：{tender.project_name}  
-项目编号：{tender.project_number}
-
-{_build_detail_quote_table(tender, tender_raw, packages=packages)}
-
-## 二、附件索引与补件清单
-> 第三章已经逐条列示技术偏离、配置、售后、验收和资料要求。第四章不再重复逐条技术参数，避免人工来回修改两套表。
-
-{_build_appendix_service_placeholder(tender, packages=packages)}
-
-{_build_product_brochure_checklist(packages)}
-
-{_build_energy_cert_checklist(packages)}
-
-{_build_quality_report_checklist(packages)}
-
-投标人名称：{_COMPANY}  
-授权代表：{_AUTHORIZED_REP}  
-日期：{today}
-"""
-    return BidDocumentSection(section_title="第四章 报价书附件", content=content.strip())
+def _gen_appendix(*args, **kwargs):
+    raise RuntimeError(
+        "旧结构生成器 _gen_appendix 已禁用。请改用 build_format_driven_sections()."
+    )

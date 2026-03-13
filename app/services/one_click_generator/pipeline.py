@@ -33,16 +33,14 @@ from app.services.evidence_binder import (
     build_tender_source_bindings,
     enrich_bindings_from_blocks,
 )
-from app.services.one_click_generator.qualification_sections import (
-    _gen_compliance,
-    _gen_qualification,
+from app.services.one_click_generator.format_driven_sections import (
+    build_format_driven_sections,
 )
-from app.services.one_click_generator.writer_contexts import build_writer_contexts
 from app.services.one_click_generator.technical_sections import (
-    _gen_appendix,
-    _gen_technical,
     _generate_rich_draft_sections,
 )
+from app.services.one_click_generator.writer_contexts import build_writer_contexts
+
 from app.services.quality_gate import (
     _apply_template_pollution_guard,
     _heal_package_contamination,
@@ -61,6 +59,7 @@ from app.services.requirement_processor import (
     filter_requirements_by_category,
     normalize_requirements_to_objects,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +80,54 @@ def _downgrade_to_pending_draft(sections):
     downgraded = normalize_pending_draft_sections(downgraded)
     downgraded = _apply_template_pollution_guard(downgraded)
     return downgraded
+
+
+def _infer_material_stage(
+    products: dict[str, Any] | None,
+    profiles: dict[str, ProductProfile],
+) -> tuple[str, list[str]]:
+    """
+    判定当前生成所处资料阶段：
+    - tender_only: 只有招标文件，没有投标产品事实/证据
+    - product_only: 已有部分品牌型号/参数，但还没有投标侧证据文件
+    - evidence_ready: 已有投标侧证据文件，可尝试 external gate
+    """
+    products = products or {}
+
+    if not products:
+        return "tender_only", ["未提供任何投标产品资料"]
+
+    has_identity = False
+    has_specs = False
+    has_bid_evidence = False
+
+    for pkg_id, profile in profiles.items():
+        if getattr(profile, "has_complete_identity", False):
+            has_identity = True
+        if getattr(profile, "has_technical_specs", False):
+            has_specs = True
+
+        product = products.get(pkg_id)
+        if not product:
+            continue
+
+        bid_materials = getattr(product, "bid_materials", []) or []
+        evidence_refs = getattr(product, "evidence_refs", []) or []
+        specifications = getattr(product, "specifications", {}) or {}
+
+        if bid_materials or evidence_refs:
+            has_bid_evidence = True
+
+        if len(specifications) >= 3:
+            has_specs = True
+
+    if has_bid_evidence:
+        return "evidence_ready", []
+
+    if has_identity or has_specs:
+        return "product_only", ["已提取到部分品牌/型号/参数，但尚未上传投标侧证据文件"]
+
+    return "tender_only", ["仅接入招标文件，尚无可核验的投标产品事实/证据"]
 
 
 def __reexport_all(module) -> None:
@@ -120,6 +167,7 @@ def generate_bid_sections(
     8. 双输出分层（internal_draft / external_ready）
     9. 7 项回归指标
     """
+    global external_gate_enabled, material_stage
     logger.info("开始一键生成投标文件章节 - 模式: %s", mode)
     logger.debug("招标原文长度：%d 字符", len(tender_raw))
     products = products or {}
@@ -205,6 +253,13 @@ def generate_bid_sections(
         # 构建 ProductProfile
         profile = build_product_profile_for_package(pkg.package_id, product, bid_bindings)
         all_profiles[pkg.package_id] = profile
+        material_stage, material_notes = _infer_material_stage(products, all_profiles)
+        external_gate_enabled = material_stage == "evidence_ready"
+        logger.info(
+            "资料阶段: %s%s",
+            material_stage,
+            f"（{'；'.join(material_notes)}）" if material_notes else "",
+        )
 
     # ── Step 3: 包件隔离生成章节 ──
     # 为了兼容，将 ProductProfile 转为 product_profiles dict 格式
@@ -213,57 +268,36 @@ def generate_bid_sections(
         if pid not in pp_dict:
             pp_dict[pid] = prof.model_dump()
 
-    sections = [
-        _gen_qualification(llm, tender, active_packages=active_packages),
-        _gen_compliance(llm, tender),
-        _gen_technical(
-            llm,
-            tender,
-            tender_raw,
-            products=products,
-            normalized_result=normalized_result,
-            evidence_result=evidence_result,
-            product_profiles=pp_dict,
-            tender_bindings=all_tender_bindings,
-            bid_bindings=all_bid_bindings,
-            active_packages=active_packages,
-        ),
-        _gen_appendix(
-            llm,
-            tender,
-            tender_raw,
-            products=products,
-            normalized_result=normalized_result,
-            evidence_result=evidence_result,
-            product_profiles=pp_dict,
-            active_packages=active_packages,
-        ),
-    ]
+    sections = build_format_driven_sections(
+        tender=tender,
+        tender_raw=tender_raw,
+        products=products,
+        active_packages=active_packages,
+    )
 
     # Rich draft mode 或 single_package_rich_draft 需要额外的分表章节
-    if (mode == "rich_draft" or doc_mode == DocumentMode.single_package_rich_draft) and products:
-        # 构建 WriterContext（按包×分表类型），确保 package_consistency 校验被执行
-        all_writer_contexts = {}
-        for pkg in active_packages:
-            pkg_reqs = all_normalized.get(pkg.package_id, [])
-            profile = all_profiles.get(pkg.package_id)
-            wctxs = build_writer_contexts(
-                package_id=pkg.package_id,
-                requirements=pkg_reqs,
-                product_profile=profile,
-                tender_source_bindings=all_tender_bindings.get(pkg.package_id, []),
-                bid_evidence_bindings=all_bid_bindings.get(pkg.package_id, []),
-                document_mode=doc_mode,
-            )
-            all_writer_contexts[pkg.package_id] = wctxs
-
-        rich_sections = _generate_rich_draft_sections(
-            tender, products,
-            normalized_reqs=all_normalized,
-            active_packages=active_packages,
-            writer_contexts=all_writer_contexts,
-        )
-        sections.extend(rich_sections)
+    #if (mode == "rich_draft" or doc_mode == DocumentMode.single_package_rich_draft) and products:
+        # all_writer_contexts = {}
+        # for pkg in active_packages:
+        #     pkg_reqs = all_normalized.get(pkg.package_id, [])
+        #     profile = all_profiles.get(pkg.package_id)
+        #     wctxs = build_writer_contexts(
+        #         package_id=pkg.package_id,
+        #         requirements=pkg_reqs,
+        #         product_profile=profile,
+        #         tender_source_bindings=all_tender_bindings.get(pkg.package_id, []),
+        #         bid_evidence_bindings=all_bid_bindings.get(pkg.package_id, []),
+        #         document_mode=doc_mode,
+        #     )
+        #     all_writer_contexts[pkg.package_id] = wctxs
+        #
+        # rich_sections = _generate_rich_draft_sections(
+        #     tender, products,
+        #     normalized_reqs=all_normalized,
+        #     active_packages=active_packages,
+        #     writer_contexts=all_writer_contexts,
+        # )
+        # sections.extend(rich_sections)
 
     sections = _apply_template_pollution_guard(sections)
 
@@ -294,10 +328,20 @@ def generate_bid_sections(
             reasons or "无",
         )
 
-        if gate.passes_external_gate():
+        if external_gate_enabled and gate.passes_external_gate():
             if heal_pass > 0:
                 logger.info("自愈成功: 经 %d 轮修复后硬校验通过", heal_pass)
             break
+
+        if not external_gate_enabled:
+            if _has_structural_failures(gate):
+                logger.info(
+                    "当前资料阶段=%s，仅继续处理结构性问题；占位符/证据问题转为待补充底稿。",
+                    material_stage,
+                )
+            else:
+                sections = normalize_pending_draft_sections(sections)
+                break
 
         if heal_pass >= _MAX_HEAL_PASSES:
             if _has_structural_failures(gate):
@@ -384,7 +428,10 @@ def generate_bid_sections(
     )
 
     # ── Step 5: 稿件等级判定 & 双输出 ──
-    draft_level = _determine_draft_level(gate, doc_mode)
+    if external_gate_enabled:
+        draft_level = _determine_draft_level(gate, doc_mode)
+    else:
+        draft_level = DraftLevel.internal_draft
     logger.info("稿件等级: %s", draft_level.value)
 
     if draft_level == DraftLevel.internal_draft:
@@ -402,7 +449,7 @@ def generate_bid_sections(
             draft_level = DraftLevel.internal_draft
             sections = annotate_draft_level(sections, draft_level)
 
-    if not gate.passes_external_gate() and mode == "rich_draft":
+    if external_gate_enabled and not gate.passes_external_gate() and mode == "rich_draft":
         logger.warning(
             "外发稿硬校验未通过，已阻断对外输出。原因: contamination=%s, placeholders=%d, "
             "evidence=%.1f%%, mixing=%s",
@@ -410,6 +457,11 @@ def generate_bid_sections(
             gate.placeholder_count,
             gate.bid_evidence_coverage * 100,
             gate.table_category_mixing,
+        )
+    elif (not external_gate_enabled) and mode == "rich_draft":
+        logger.info(
+            "本次仅输出 internal_draft，未启动 external gate。原因: %s",
+            "；".join(material_notes) or "投标侧资料未齐",
         )
 
     # ── Step 6: 回归指标 ──

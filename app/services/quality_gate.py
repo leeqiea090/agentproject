@@ -352,6 +352,7 @@ def _collect_rendered_forbidden_hits(
 
 
 
+
 def compute_validation_gate(
     sections: list[BidDocumentSection],
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
@@ -359,11 +360,26 @@ def compute_validation_gate(
     target_package_ids: list[str] | None = None,
     mode: DocumentMode = DocumentMode.single_package,
     tender: TenderDocument | None = None,
+    full_text: str | None = None,
 ) -> ValidationGate:
     """计算硬校验门的 4 个条件。"""
     normalized_reqs = normalized_reqs or {}
     evidence_bindings = evidence_bindings or {}
     target_package_ids = target_package_ids or []
+
+    if full_text is None:
+        full_text = "\n".join((getattr(s, "content", "") or "") for s in (sections or []))
+
+    missing_new = _check_required_new_structure(full_text)
+    found_old = _check_forbidden_old_structure(full_text)
+
+    if missing_new:
+        project_meta_anomaly_detected = True
+        logger.warning("新结构缺失: %s", "；".join(missing_new))
+
+    if found_old:
+        project_meta_anomaly_detected = True
+        logger.warning("检测到旧结构残留: %s", "；".join(found_old))
 
     dup_detail = _collect_duplicate_requirement_keys(normalized_reqs)
     if dup_detail:
@@ -375,7 +391,6 @@ def compute_validation_gate(
 
     # 1) 占位符计数
     placeholder_count = 0
-    full_text = "\n".join(s.content for s in sections)
     for pattern in _PLACEHOLDER_PATTERNS:
         placeholder_count += len(re.findall(pattern, full_text))
 
@@ -384,6 +399,8 @@ def compute_validation_gate(
     project_meta_anomaly_detected = bool(project_meta_issues)
     if project_meta_anomaly_detected:
         logger.warning("项目元信息异常：%s", "；".join(project_meta_issues[:5]))
+
+
 
     # 2) 包件污染检测 — 单包和多包模式均检测
     package_contamination = False
@@ -898,6 +915,37 @@ def _is_truncated_field(text: str) -> bool:
     return False
 
 
+def _check_required_new_structure(full_text: str | None) -> list[str]:
+    text = full_text or ""
+    required = [
+        "一、响应文件封面格式",
+        "二、首轮报价表",
+        "三、分项报价表",
+        "四、技术偏离及详细配置明细表",
+        "五、技术服务和售后服务的内容及措施",
+        "六、法定代表人/单位负责人授权书",
+        "附：资格性审查响应对照表",
+        "附：符合性审查响应对照表",
+        "附：详细评审响应对照表",
+        "附：投标无效情形汇总及自检表",
+    ]
+    return [x for x in required if x not in text]
+
+
+def _check_forbidden_old_structure(full_text: str | None) -> list[str]:
+    text = full_text or ""
+    forbidden = [
+        "第一章 资格性证明文件",
+        "第二章 符合性承诺",
+        "第三章 商务及技术部分",
+        "第四章 报价书附件",
+        "附件索引与补件清单",
+        "第三章附：包",
+        "（二-A）详细配置明细表",
+        "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 备注 |",
+    ]
+    return [x for x in forbidden if x in text]
+
 def compute_regression_metrics(
     sections: list[BidDocumentSection],
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None = None,
@@ -905,12 +953,13 @@ def compute_regression_metrics(
     target_package_ids: list[str] | None = None,
     total_pages_estimate: int = 1,
     tender: TenderDocument | None = None,
+    workflow_stage: str = "evidence_ready",
 ) -> RegressionMetrics:
     """计算 7 项回归质量指标，并与阈值对比输出告警。"""
     normalized_reqs = normalized_reqs or {}
     evidence_bindings = evidence_bindings or {}
     target_package_ids = target_package_ids or []
-    full_text = "\n".join(s.content for s in sections)
+    full_text = "\n".join((getattr(s, "content", "") or "") for s in sections)
 
     # 1) single_package_focus_score
     if target_package_ids and len(target_package_ids) == 1:
@@ -925,9 +974,8 @@ def compute_regression_metrics(
         total = target_mentions + other_mentions
         focus_score = target_mentions / total if total > 0 else 1.0
     else:
-        focus_score = 0.5  # 多包模式不评估聚焦度
+        focus_score = 0.5
 
-    # 2) package_contamination_rate — 支持多包模式
     total_sections = len(sections)
     contaminated = 0
     if target_package_ids and len(target_package_ids) == 1:
@@ -957,7 +1005,6 @@ def compute_regression_metrics(
                     break
     contamination_rate = contaminated / total_sections if total_sections > 0 else 0.0
 
-    # 3) table_category_mixing_rate — 只扫描"技术偏离表"区域
     total_tech_table_rows = 0
     mixed_rows_in_tech = 0
     _TECH_HDR = re.compile(r"技术偏离")
@@ -985,13 +1032,11 @@ def compute_regression_metrics(
                     mixed_rows_in_tech += 1
     mixing_rate = mixed_rows_in_tech / total_tech_table_rows if total_tech_table_rows > 0 else 0.0
 
-    # 4) bid_evidence_coverage
     all_bindings: list[BidEvidenceBinding] = []
     for pkg_bindings in evidence_bindings.values():
         all_bindings.extend(pkg_bindings)
     evidence_cov = _compute_evidence_coverage(all_bindings)
 
-    # 5) placeholder_leakage
     placeholder_count = 0
     for pattern in _PLACEHOLDER_PATTERNS:
         placeholder_count += len(re.findall(pattern, full_text))
@@ -1013,13 +1058,11 @@ def compute_regression_metrics(
             config_with_detail += 1
     config_score = min(1.0, config_with_detail / max(config_reqs, 5))
 
-    # 7) fact_density_per_page
     # 统计非占位符的事实陈述数（含数值的行）
     fact_lines = len(re.findall(r"[\d.,]+\s*(?:nm|μm|mm|ml|L|℃|Hz|W|V|%|通道|个|台)", full_text))
     pages = max(1, total_pages_estimate)
     fact_density = fact_lines / pages
 
-    # 8) snippet_cleanliness_score — 原文片段清洁度
     # 检查 source_excerpt / evidence snippet 是否带出后续多条或串邻
     total_snippets = 0
     clean_snippets = 0
@@ -1040,7 +1083,6 @@ def compute_regression_metrics(
                 clean_snippets += 1
     snippet_cleanliness = clean_snippets / total_snippets if total_snippets > 0 else 1.0
 
-    # 9) draft_usability_score — 底稿可用性
     # 综合评估：内容密度、分表完整度、截断率、跨包污染
     usability_factors = []
     # 技术表/配置表/服务表是否都有实质内容（不仅仅是标题）
@@ -1090,15 +1132,16 @@ def compute_regression_metrics(
     # ── 阈值对比：输出质量告警 ──
     warnings: list[str] = []
     t = _REGRESSION_THRESHOLDS
+    enforce_material_warnings = workflow_stage == "evidence_ready"
     if focus_score < t["single_package_focus_score"] and len(target_package_ids) == 1:
         warnings.append(f"单包聚焦度不足: {focus_score:.2f} < {t['single_package_focus_score']}")
     if contamination_rate > t["package_contamination_rate"]:
         warnings.append(f"包件污染率过高: {contamination_rate:.2f} > {t['package_contamination_rate']}")
     if mixing_rate > t["table_category_mixing_rate"]:
         warnings.append(f"表格混装率过高: {mixing_rate:.2f} > {t['table_category_mixing_rate']}")
-    if evidence_cov < t["bid_evidence_coverage"]:
+    if enforce_material_warnings and evidence_cov < t["bid_evidence_coverage"]:
         warnings.append(f"证据覆盖率不足: {evidence_cov:.2f} < {t['bid_evidence_coverage']}")
-    if leakage > t["placeholder_leakage"]:
+    if enforce_material_warnings and leakage > t["placeholder_leakage"]:
         warnings.append(f"占位符泄漏过多: {leakage:.2f} > {t['placeholder_leakage']}")
     if config_score < t["config_detail_score"]:
         warnings.append(f"配置详细度不足: {config_score:.2f} < {t['config_detail_score']}")
@@ -1106,7 +1149,7 @@ def compute_regression_metrics(
         warnings.append(f"每页事实密度不足: {fact_density:.1f} < {t['fact_density_per_page']}")
     if snippet_cleanliness < t["snippet_cleanliness_score"]:
         warnings.append(f"原文片段清洁度不足: {snippet_cleanliness:.2f} < {t['snippet_cleanliness_score']}")
-    if draft_usability < t["draft_usability_score"]:
+    if enforce_material_warnings and draft_usability < t["draft_usability_score"]:
         warnings.append(f"底稿可用性不足: {draft_usability:.2f} < {t['draft_usability_score']}")
     if project_meta_consistency < t["project_meta_consistency_score"]:
         warnings.append(
@@ -1123,7 +1166,19 @@ def compute_regression_metrics(
     return metrics
 
 
-# ── Sanitization ──
+def _check_required_headings(full_text: str) -> list[str]:
+    required = [
+        "一、响应文件封面格式",
+        "四、技术偏离及详细配置明细表",
+        "五、技术服务和售后服务的内容及措施",
+        "六、法定代表人/单位负责人授权书",
+        "资格性审查响应对照表",
+        "符合性审查响应对照表",
+        "详细评审响应对照表",
+        "投标无效情形汇总及自检表",
+    ]
+    missing = [x for x in required if x not in full_text]
+    return missing
 
 def _sanitize_generated_content(section_title: str, content: str) -> tuple[str, list[str]]:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()

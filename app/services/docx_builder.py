@@ -10,7 +10,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.shared import Cm, Pt
 from app.schemas import BidDocumentSection, TenderDocument, CompanyProfile
 
 
@@ -32,20 +33,29 @@ def _style_table(table) -> None:
 
 
 def _add_heading(doc: Document, text: str, level: int) -> None:
-    """添加标题（1~3级）"""
+    """添加标题（1~3级），并避免标题落在页末单独成页/孤行。"""
     heading = doc.add_heading(text, level=level)
     heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
     run = heading.runs[0] if heading.runs else heading.add_run(text)
     run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
     run.font.name = "黑体"
     run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体")
     run.font.bold = True
+
     if level == 1:
         run.font.size = Pt(16)
     elif level == 2:
         run.font.size = Pt(14)
     else:
         run.font.size = Pt(12)
+
+    fmt = heading.paragraph_format
+    fmt.keep_with_next = True      # 标题和下一段绑定，避免标题单独留页尾
+    fmt.keep_together = True       # 标题自身不拆
+    fmt.widow_control = True
+    fmt.space_before = Pt(6)
+    fmt.space_after = Pt(6)
 
 
 def _add_paragraph(doc: Document, text: str, bold: bool = False) -> None:
@@ -123,6 +133,17 @@ def _clean_markdown_content(section_title: str, content: str) -> str:
 
     return "\n".join(cleaned).strip()
 
+
+def _get_fixed_table_widths(header_cells: list[str]):
+    key = tuple(header_cells)
+
+    if key == ("序号", "服务名称", "磋商文件的服务需求", "响应文件响应情况", "偏离情况"):
+        return [Cm(1.2), Cm(2.8), Cm(5.8), Cm(5.8), Cm(2.2)]
+
+    if key == ("序号", "审查项", "招标文件要求", "响应情况", "对应材料/页码"):
+        return [Cm(1.2), Cm(3.0), Cm(6.0), Cm(4.5), Cm(3.0)]
+
+    return None
 
 def _extract_outline_items(content: str) -> list[str]:
     """从章节 Markdown 中提取目录项（主要提取二级小节）"""
@@ -213,8 +234,7 @@ def _add_toc(doc: Document, sections: Iterable[BidDocumentSection]) -> None:
     tip_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
 def _render_markdown_table(doc: Document, lines: list[str]) -> None:
-    """将 Markdown 表格渲染为 Word 表格"""
-    # 过滤掉分隔行（|---|---|）
+    """将 Markdown 表格渲染为固定列数、固定列宽的 Word 表格"""
     data_rows = [l for l in lines if not re.match(r"^\|[-| :]+\|$", l.strip())]
     if not data_rows:
         return
@@ -227,24 +247,43 @@ def _render_markdown_table(doc: Document, lines: list[str]) -> None:
     if not rows_cells:
         return
 
-    col_count = max(len(r) for r in rows_cells)
-    table = doc.add_table(rows=len(rows_cells), cols=col_count)
+    # 关键：以表头列数为准，不再取 max(len(row))
+    header_cells = rows_cells[0]
+    col_count = len(header_cells)
+
+    normalized_rows = [header_cells]
+    for row in rows_cells[1:]:
+        if len(row) < col_count:
+            row = row + [""] * (col_count - len(row))
+        elif len(row) > col_count:
+            row = row[:col_count - 1] + [" | ".join(row[col_count - 1:])]
+        normalized_rows.append(row)
+
+    table = doc.add_table(rows=len(normalized_rows), cols=col_count)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
     _style_table(table)
 
-    for i, row_data in enumerate(rows_cells):
+    widths = _get_fixed_table_widths(header_cells)
+
+    for i, row_data in enumerate(normalized_rows):
         for j, cell_text in enumerate(row_data):
-            if j >= col_count:
-                break
             cell = table.cell(i, j)
-            clean_cell_text = cell_text.replace("**", "")
-            cell.text = clean_cell_text
-            run = cell.paragraphs[0].runs[0] if cell.paragraphs[0].runs else cell.paragraphs[0].add_run(clean_cell_text)
+            clean_text = cell_text.replace("**", "")
+            cell.text = clean_text
+
+            p = cell.paragraphs[0]
+            run = p.runs[0] if p.runs else p.add_run(clean_text)
             run.font.size = Pt(10)
+
             if i == 0:
                 run.font.bold = True
                 _set_cell_bg(cell, "D9E1F2")
 
-    doc.add_paragraph()  # 表格后空行
+            if widths and j < len(widths):
+                cell.width = widths[j]
+
+    doc.add_paragraph()
 
 
 def _parse_and_render_markdown(doc: Document, content: str) -> None:
@@ -385,6 +424,18 @@ def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -
         row.cells[0].paragraphs[0].runs[0].font.bold = True
 
 
+def _assert_new_structure_only(sections) -> None:
+    titles = [getattr(s, "section_title", "") or "" for s in (sections or [])]
+    forbidden = {
+        "第一章 资格性证明文件",
+        "第二章 符合性承诺",
+        "第三章 商务及技术部分",
+        "第四章 报价书附件",
+    }
+    hit = [t for t in titles if t in forbidden]
+    if hit:
+        raise RuntimeError(f"检测到旧结构章节，停止导出: {'；'.join(hit)}")
+
 def build_bid_docx(
     sections: list[BidDocumentSection],
     tender: TenderDocument,
@@ -403,6 +454,7 @@ def build_bid_docx(
     Returns:
         输出文件路径
     """
+    _assert_new_structure_only(sections)
     doc = Document()
     _set_document_style(doc)
     _enable_update_fields_on_open(doc)
@@ -425,7 +477,7 @@ def build_bid_docx(
 
         # 章节标题
         _add_heading(doc, section.section_title, 1)
-        doc.add_paragraph()
+        # doc.add_paragraph()
 
         # 章节内容（Markdown → Word）
         _parse_and_render_markdown(doc, clean_content)
@@ -442,3 +494,5 @@ def build_bid_docx(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
     return output_path
+
+
