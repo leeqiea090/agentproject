@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import app.routers.tender.common as _common
 import importlib
+import uuid
 
 from app.services.quality_gate import render_editable_draft_sections
 
@@ -287,31 +288,10 @@ async def generate_bid_document(request: BidGenerateRequest):
         products[package_id] = product_storage[product_id]
 
     try:
-        # 创建生成器
         llm = _router_api().get_chat_model()
-        generator = _router_api().create_bid_generator(llm)
         workflow_agent = TenderWorkflowAgent(llm)
         raw_text = str(tender_info.get("raw_text", "") or "")
 
-        # 初始化状态
-        initial_state: BidGenerationState = {
-            "tender_doc": tender_doc,
-            "company_profile": company_profile,
-            "products": products,
-            "request": request,
-            "sections": [],
-            "current_section": "",
-            "errors": [],
-            "bid_id": "",
-            "status": "generating",
-            "product_profiles": {},
-        }
-
-        # 执行生成
-        final_state = generator.generate(initial_state)
-
-        bid_id = final_state["bid_id"]
-        generated_sections = final_state["sections"]
         analysis_result = _default_step1_result(tender_doc)
         clause_result = workflow_agent.step3_classify_clauses(
             tender=tender_doc,
@@ -341,6 +321,18 @@ async def generate_bid_document(request: BidGenerateRequest):
             normalized_result=normalization_result,
             product_fact_result=product_fact_result,
         )
+        pipeline_result = generate_bid_sections(
+            tender_doc,
+            raw_text,
+            llm,
+            products=products,
+            normalized_result=normalization_result,
+            evidence_result=evidence_result,
+            selected_packages=request.selected_packages,
+        )
+
+        bid_id = str(uuid.uuid4())
+        generated_sections = pipeline_result.sections
         materialized_sections, materialize_report = _materialize_sections(
             sections=generated_sections,
             tender=tender_doc,
@@ -372,22 +364,10 @@ async def generate_bid_document(request: BidGenerateRequest):
             download_url=f"/api/tender/bid/download/{bid_id}?format=docx",
         )
 
-        # 调用管道获取校验门和回归指标
-        try:
-            pipeline_result = generate_bid_sections(
-                tender_doc, raw_text, llm,
-                products=products,
-                selected_packages=request.selected_packages,
-            )
-            validation_gate = pipeline_result.validation_gate
-            regression_metrics = pipeline_result.regression_metrics
-            draft_level_str = pipeline_result.draft_level.value
-            doc_mode_str = pipeline_result.document_mode.value
-        except Exception:
-            validation_gate = None
-            regression_metrics = None
-            draft_level_str = ""
-            doc_mode_str = ""
+        validation_gate = pipeline_result.validation_gate
+        regression_metrics = pipeline_result.regression_metrics
+        draft_level_str = pipeline_result.draft_level.value
+        doc_mode_str = pipeline_result.document_mode.value
 
         # 6d: 外发门阻断
         if validation_gate is not None and not validation_gate.passes_external_gate():

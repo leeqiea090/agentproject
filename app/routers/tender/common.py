@@ -28,7 +28,6 @@ from app.schemas import (
     # ErrorResponse
 )
 from app.services.tender_parser import create_tender_parser
-from app.services.bid_generator import create_bid_generator, BidGenerationState
 from app.services.one_click_generator import generate_bid_sections
 from app.services.docx_builder import build_bid_docx
 from app.services.retriever import ingest_text_to_kb

@@ -68,26 +68,22 @@ def _build_qualification_license_block(tender: TenderDocument) -> str:
 
 def _build_enterprise_declaration_block(tender: TenderDocument, today: str) -> str:
     _ = tender
-    return f"""## 八、企业类型声明函（单选保留一项）
-办理说明：请仅保留与企业实际情况一致的一项，其余整段删除；不要只勾选不删除。
+    return f"""## 八、企业类型声明/证明材料
+| 选项 | 是否适用 | 处理方式 | 需附材料 |
+|---|---|---|---|
+| 中小企业 | 【待填写：是/否】 | 如适用，直接替换为采购文件附带的《中小企业声明函》原格式 | 中小企业声明函 |
+| 监狱企业 | 【待填写：是/否】 | 如适用，仅保留本项并附证明文件 | 监狱企业证明文件 |
+| 残疾人福利性单位 | 【待填写：是/否】 | 如适用，仅保留本项并附声明函/证明材料 | 残疾人福利性单位声明函 |
+| 非中小企业 | 【待填写：是/否】 | 如不享受相关政策，仅保留本项简短声明 | 非中小企业声明 |
 
-### 选项A：中小企业声明函（货物/服务）
-本公司郑重声明：本次投标所提供货物/服务由符合《中小企业划型标准规定》的企业制造/承接。
-【待填写：按采购文件附表填写企业名称、从业人数、营业收入、资产总额等信息】
-
-### 选项B：监狱企业证明材料
-如本单位属于监狱企业，提交由省级以上监狱管理局、戒毒管理局（含新疆生产建设兵团）出具的证明文件。
-
-### 选项C：残疾人福利性单位声明函
-如本单位属于残疾人福利性单位，提交残疾人福利性单位声明函及相关证明材料。
-
-### 选项D：非中小企业声明
-本公司郑重声明：本次投标所提供货物/服务不属于中小企业政策优惠适用范围，并对声明真实性负责。
+> 说明：
+> 1. 正式稿只能保留一类企业属性，不要把多类声明同时保留。
+> 2. 如采购文件附有固定格式/附表，优先直接使用采购文件原格式，不要自行改写。
+> 3. 人工审核时，先判定企业属性，再替换或删除本块。
 
 企业名称（盖章）：{_COMPANY}  
 法定代表人或授权代表：{_AUTHORIZED_REP}  
 日期：{today}"""
-
 
 def _build_social_insurance_checklist() -> str:
     return "\n".join([
@@ -100,6 +96,17 @@ def _build_social_insurance_checklist() -> str:
         "| 失业保险缴纳证明 | 最近1-3个月，以采购文件为准 | 04_失业保险缴纳证明.pdf | 主体应与投标人名称一致 |",
     ])
 
+def _build_supplier_commitment_followup(tender: TenderDocument) -> str:
+    title = _supplier_commitment_title(tender)
+    return "\n".join([
+        "### 资格材料路径说明",
+        "| 路径 | 适用情形 | 本稿处理方式 |",
+        "|---|---|---|",
+        f"| A. 承诺函路径 | 采购文件允许使用《{title}》或同类资格条件承诺函 | 默认优先保留本路径；正式稿中不再默认同时附财务/纳税/社保证明清单 |",
+        "| B. 证明材料路径 | 采购文件明确要求提供证明材料，或供应商不适用/不采用承诺函 | 另行补充财务、纳税、社保等证明材料，并删除A路径说明 |",
+        "",
+        "> 说明：不要把“承诺函路径”和“证明材料路径”同时作为默认必附项写进正式底稿；由人工根据采购文件最终选择其一。",
+    ])
 
 def _build_public_record_checklist() -> str:
     return "\n".join([
@@ -145,8 +152,8 @@ def _build_detail_quote_table(
 
     pkgs = packages if packages is not None else tender.packages
     if not pkgs:
-        lines.append("| 1 | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] |")
-        lines.append("|  | **合计报价** |  |  |  |  |  | **[待填写]** |")
+        lines.append("| 1 | 【待填写：货物名称】 | 【待填写：规格型号】 | 【待填写：生产厂家】 | 【待填写：品牌】 | 【待填写：单价】 | 【待填写：数量】 | 【待填写：总价】 |")
+        lines.append("|  | **合计报价** |  |  |  |  |  | **【待填写：合计报价】** |")
         return "\n".join(lines)
 
     total_budget = 0.0
@@ -154,12 +161,11 @@ def _build_detail_quote_table(
         total_budget += pkg.budget
         quantity = _infer_package_quantity(pkg, tender_raw)
         lines.append(
-            f"| {idx} | {pkg.item_name} | [品牌型号] | [生产厂家] | [品牌] | [待填写] | "
-            f"{quantity} | [待填写] |"
+            f"| {idx} | {pkg.item_name} | 【待填写：品牌型号】 | 【待填写：生产厂家】 | 【待填写：品牌】 | 【待填写：单价】 | {quantity} | 【待填写：总价】 |"
         )
 
     lines.append(f"|  | **预算合计（参考）** |  |  |  |  |  | **{_fmt_money(total_budget)}** |")
-    lines.append("|  | **投标总报价** |  |  |  |  |  | **[待填写]** |")
+    lines.append("|  | **投标总报价** |  |  |  |  |  | **【待填写：投标总报价】** |")
     table = "\n".join(lines)
     table += "\n\n> 填写规则：每行“总价(元)” = “单价(元)” × “数量”；底部“投标总报价”应与第三章《报价一览表》保持一致。"
     return table
@@ -208,7 +214,7 @@ def _gen_qualification(
 承诺人（供应商盖章）：{_COMPANY}  
 日期：{today}
 
-{_build_social_insurance_checklist()}
+{_build_supplier_commitment_followup(tender)}
 
 ## 三、承诺通过合法渠道可查证无行贿犯罪记录
 {purchaser}：
@@ -327,8 +333,8 @@ def _gen_compliance(llm: ChatOpenAI, tender: TenderDocument) -> BidDocumentSecti
 
 ## 七、投标人关联单位说明
 我方承诺如实披露与本单位存在下列关系的单位：
-1. 与投标人单位负责人为同一人的其他单位：[待填写]
-2. 与投标人存在直接控股、管理关系的其他单位：[待填写]
+1. 与投标人单位负责人为同一人的其他单位：【待填写：如无请填“无”】
+2. 与投标人存在直接控股、管理关系的其他单位：【待填写：如无请填“无”】
 
 投标人名称：{_COMPANY}  
 日期：{today}

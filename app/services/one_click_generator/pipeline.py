@@ -5,10 +5,10 @@ from typing import Any
 
 import app.services.one_click_generator.common as _common
 import app.services.one_click_generator.sections as _sections
+import app.services.one_click_generator.writer_contexts as _writer_contexts
 import app.services.evidence_binder as _evidence_binder
 import app.services.quality_gate as _quality_gate
 import app.services.requirement_processor as _requirement_processor
-import app.services.bid_generator as _bid_generator
 from langchain_openai import ChatOpenAI
 
 from app.schemas import (
@@ -22,7 +22,6 @@ from app.schemas import (
     TenderDocument,
     TenderSourceBinding,
 )
-from app.services.bid_generator import build_writer_contexts
 from app.services.chunking import split_to_blocks
 from app.services.evidence_binder import (
     _compute_evidence_coverage,
@@ -38,6 +37,7 @@ from app.services.one_click_generator.qualification_sections import (
     _gen_compliance,
     _gen_qualification,
 )
+from app.services.one_click_generator.writer_contexts import build_writer_contexts
 from app.services.one_click_generator.technical_sections import (
     _gen_appendix,
     _gen_technical,
@@ -89,7 +89,7 @@ def __reexport_all(module) -> None:
             continue
         globals()[name] = value
 
-for _module in (_common, _sections, _evidence_binder, _quality_gate, _requirement_processor, _bid_generator,):
+for _module in (_common, _sections, _writer_contexts, _evidence_binder, _quality_gate, _requirement_processor,):
     __reexport_all(_module)
 
 del _module

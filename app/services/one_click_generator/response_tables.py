@@ -641,17 +641,17 @@ def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
 def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
     text = _safe_text(raw_value, "")
     bad_values = {
-        "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充",
+        "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充", "待核对",
     }
     if text in bad_values or "待填写" in text:
-        return "无偏离" if has_real else "待核对"
+        return "无偏离" if has_real else "【待选择：无偏离/有偏离】"
     return text
 
 
 def _display_bidder_response(raw_value: Any) -> str:
     text = _safe_text(raw_value, "")
     if not text:
-        return "待按产品说明书/厂家参数表逐条回填"
+        return "【待填写：实际响应值】"
 
     pending_markers = (
         _PENDING_BIDDER_RESPONSE,
@@ -660,15 +660,15 @@ def _display_bidder_response(raw_value: Any) -> str:
         "待核实（需填入投标产品实参）",
     )
     if any(marker in text for marker in pending_markers):
-        return "待按产品说明书/厂家参数表逐条回填"
+        return "【待填写：实际响应值】"
 
     return text
 
 def _display_model_cell(model_text: str, row_index: int) -> str:
     model_text = _safe_text(model_text, "")
     if model_text:
-        return model_text if row_index == 1 else "同投标型号"
-    return "待补型号（本包统一填写一次）" if row_index == 1 else "同上"
+        return model_text if row_index == 1 else "同上"
+    return "【待填写：投标型号】" if row_index == 1 else "同上"
 
 def _build_deviation_table(
     tender: TenderDocument,
@@ -719,7 +719,7 @@ def _build_deviation_table(
         "### （一）技术偏离及详细配置明细表",
         f"项目名称：{tender.project_name}",
         f"项目编号：{tender.project_number}",
-        f"本包统一投标型号：{header_model}" if header_model else "本包统一投标型号：待补型号（本包统一填写一次）",
+        f"本包统一投标型号：{header_model}" if header_model else "本包统一投标型号：【待填写：投标型号】",
         "",
         "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 备注 |",
         "|---|---|---|---|---|---|---|---|",
@@ -727,7 +727,7 @@ def _build_deviation_table(
 
     if not requirement_rows:
         lines.append(
-            f"| {pkg.package_id}.1 | 详见招标文件采购需求 | 待补型号（本包统一填写一次） | 待按产品说明书/厂家参数表逐条回填 | 待核对 | 【待补证：说明书/彩页/厂家参数表】 | 待补页码 | 本包其余条款可按同一型号继续回填 |"
+            f"| {pkg.package_id}.1 | 详见招标文件采购需求 | 【待填写：投标型号】 | 【待填写：实际响应值】 | 【待选择：无偏离/有偏离】 | 【待补证：说明书/彩页/厂家参数表】 | 【待填写：页码】 | 首行填写型号，其余行同上 |"
         )
 
     for idx, row in enumerate(requirement_rows, start=1):
@@ -757,9 +757,9 @@ def _build_deviation_table(
         elif row.get("source_page") is not None:
             page_ref = str(row.get("source_page"))
         else:
-            page_ref = "待补页码"
+            page_ref = "【待填写：页码】"
 
-        remark = "首行填写型号，其余行默认同上" if idx == 1 else "_"
+        remark = "首行填写型号，其余行同上" if idx == 1 else ""
 
         lines.append(
             f"| {clause_no} | {req} | {model_cell} | {response_cell} | {deviation} | {evidence_text} | {page_ref} | {remark} |"

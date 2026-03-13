@@ -202,6 +202,12 @@ _DEVICE_FORBIDDEN_BY_HINT: dict[str, tuple[str, ...]] = {
         "柯勒照明",
         "无限远校正光学系统",
     ),
+    "辐照": (
+        "头夹", "颅骨固定架", "万向球轴连接器", "底座", "成人头托", "成人可重复使用头钉", "儿童可重复使用头钉",
+    ),
+    "头架": (
+        "辐照杯", "X射线球管", "冷水机", "区域监控探头", "个人计量报警仪", "条形码扫码器", "血液辐照仪主机", "辐照仪软件系统",
+    ),
 }
 
 _BAD_NAME_SUFFIXES = ("（", "(", "为", "可", "单机", "至少", "最低", "最高")
@@ -329,11 +335,11 @@ def _normalize_requirement_line(line: str) -> str:
     normalized = line.replace("\t", " ").replace("\r", " ").strip()
     normalized = re.sub(r"\s+", " ", normalized)
     normalized = re.sub(r"^[★▲■●]\s*", "", normalized)
-    normalized = re.sub(r"^\d+(?:\.\d+){0,5}\s*", "", normalized)
+    normalized = re.sub(r"^\d+(?:\.\d+){0,5}\s+", "", normalized)
     normalized = re.sub(r"^[（(]?\d+[）)]\s*", "", normalized)
-    normalized = re.sub(r"^\d+(?=[A-Za-z\u4e00-\u9fa5])", "", normalized)
     normalized = re.sub(r"^[（(]?[一二三四五六七八九十\d]+[）).、]\s*", "", normalized)
     normalized = re.sub(r"^(?:[-*•]|第\d+[项条]?)\s*", "", normalized)
+
     return normalized.strip(" ;；")
 
 
@@ -372,7 +378,6 @@ def _extract_requirement_pair(fragment: str) -> tuple[str, str] | None:
     if match:
         key = match.group("key").strip()
         key = re.sub(r"^[★▲■●]\s*", "", key)
-        key = re.sub(r"^\d+(?=[A-Za-z\u4e00-\u9fa5])", "", key)
         val = match.group("val").strip(" ；;。")
         if (
             key
@@ -392,7 +397,6 @@ def _extract_requirement_pair(fragment: str) -> tuple[str, str] | None:
     if comp_match:
         key = comp_match.group("key").strip()
         key = re.sub(r"^[★▲■●]\s*", "", key)
-        key = re.sub(r"^\d+(?=[A-Za-z\u4e00-\u9fa5])", "", key)
         val = comp_match.group("val").strip(" ；;。")
         if (
             key in _TECH_KEY_EXCLUDES
@@ -713,7 +717,8 @@ def _strip_clause_prefix(text: str) -> str:
     t = _safe_text(text, "")
     t = re.sub(r"^[\s★▲■●◆]+", "", t)
     t = re.sub(r"^(实质性条款|重要条款|一般条款)[:：]\s*", "", t)
-    t = re.sub(r"^\d+(?:\.\d+)*[:：]?\s*", "", t)
+    t = re.sub(r"^(?:\d+(?:\.\d+)*[.)、]|[（(]?\d+[）)])\s*", "", t)
+
     return t.strip()
 
 

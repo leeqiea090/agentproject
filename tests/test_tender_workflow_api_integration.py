@@ -2,12 +2,24 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.schemas import BidDocumentSection, CompanyLicense, CompanyProfile, ProductSpecification, ProcurementPackage, TenderDocument
+from app.schemas import (
+    BidDocumentSection,
+    CompanyLicense,
+    CompanyProfile,
+    DocumentMode,
+    DraftLevel,
+    ProductSpecification,
+    ProcurementPackage,
+    RegressionMetrics,
+    TenderDocument,
+    ValidationGate,
+)
 from app.routers import tender as tender_api
 
 
@@ -57,6 +69,24 @@ def _fake_llm_call(llm, system_prompt: str, user_prompt: str) -> str:  # noqa: A
             '"major_issues":[],"recommendations":["执行人工终审后提交。"],"conclusion":"自动审核完成。"}'
         )
     raise AssertionError(system_prompt)
+
+
+def _fake_pipeline_result(
+    sections: list[BidDocumentSection],
+    *,
+    blocked: bool = False,
+) -> SimpleNamespace:
+    gate = ValidationGate()
+    if blocked:
+        gate = ValidationGate(placeholder_count=99)
+
+    return SimpleNamespace(
+        sections=sections,
+        validation_gate=gate,
+        regression_metrics=RegressionMetrics(),
+        draft_level=DraftLevel.internal_draft,
+        document_mode=DocumentMode.single_package_deep_draft,
+    )
 
 
 def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
@@ -234,44 +264,39 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
     tender_api.company_storage["company-2"] = company
     tender_api.product_storage["product-2"] = product
 
-    class _FakeGenerator:
-        def generate(self, state):  # noqa: ANN001
-            return {
-                "bid_id": "bid-legacy-1",
-                "sections": [
-                    BidDocumentSection(
-                        section_title="第一章 资格性证明文件",
-                        content=(
-                            "投标人名称：[投标方公司名称]\n"
-                            "### （一）基本养老保险缴纳证明\n"
-                            "（此处留空，待上传证明材料）\n"
-                        ),
-                        attachments=[],
-                    ),
-                    BidDocumentSection(
-                        section_title="第三章 商务及技术部分",
-                        content=(
-                            "### （一）技术偏离及详细配置明细表（第1包）\n"
-                            "| 序号 | 招标技术参数要求 | 投标产品响应参数 | 偏离情况 | 响应依据/证据映射 |\n"
-                            "|---:|---|---|---|---|\n"
-                            "| 1 | 激光器：≥3 | ≥3 | 无偏离 | 招标原文片段 |\n"
-                        ),
-                        attachments=[],
-                    ),
-                    BidDocumentSection(
-                        section_title="第四章 报价书附件",
-                        content=(
-                            "## 一、产品主要技术参数明细表及报价表\n"
-                            "| 序号 | 货物名称 | 规格型号 | 生产厂家 | 品牌 | 单价(元) | 数量 | 总价(元) |\n"
-                            "|---:|---|---|---|---|---:|---|---:|\n"
-                            "| 1 | 进口流式细胞分析仪 | [品牌型号] | [生产厂家] | [品牌] | [待填写] | 1 | [待填写] |\n"
-                            "## 三、产品彩页\n"
-                            "（此处留空，待上传产品彩页）\n"
-                        ),
-                        attachments=[],
-                    ),
-                ],
-            }
+    fake_sections = [
+        BidDocumentSection(
+            section_title="第一章 资格性证明文件",
+            content=(
+                "投标人名称：[投标方公司名称]\n"
+                "### （一）基本养老保险缴纳证明\n"
+                "（此处留空，待上传证明材料）\n"
+            ),
+            attachments=[],
+        ),
+        BidDocumentSection(
+            section_title="第三章 商务及技术部分",
+            content=(
+                "### （一）技术偏离及详细配置明细表（第1包）\n"
+                "| 序号 | 招标技术参数要求 | 投标产品响应参数 | 偏离情况 | 响应依据/证据映射 |\n"
+                "|---:|---|---|---|---|\n"
+                "| 1 | 激光器：≥3 | ≥3 | 无偏离 | 招标原文片段 |\n"
+            ),
+            attachments=[],
+        ),
+        BidDocumentSection(
+            section_title="第四章 报价书附件",
+            content=(
+                "## 一、产品主要技术参数明细表及报价表\n"
+                "| 序号 | 货物名称 | 规格型号 | 生产厂家 | 品牌 | 单价(元) | 数量 | 总价(元) |\n"
+                "|---:|---|---|---|---|---:|---|---:|\n"
+                "| 1 | 进口流式细胞分析仪 | [品牌型号] | [生产厂家] | [品牌] | [待填写] | 1 | [待填写] |\n"
+                "## 三、产品彩页\n"
+                "（此处留空，待上传产品彩页）\n"
+            ),
+            attachments=[],
+        ),
+    ]
 
     def _fake_build_bid_docx(sections, tender_doc, company, output_file):  # noqa: ANN001
         output_file.write_bytes(b"fake-docx")
@@ -279,9 +304,11 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
     client = TestClient(app)
     with (
         patch.object(tender_api, "get_chat_model", return_value=object()),
-        patch.object(tender_api, "create_bid_generator", return_value=_FakeGenerator()),
+        patch(
+            "app.routers.tender.crud.generate_bid_sections",
+            return_value=_fake_pipeline_result(fake_sections),
+        ),
         patch("app.routers.tender.crud.build_bid_docx", side_effect=_fake_build_bid_docx),
-        patch("app.routers.tender.crud.generate_bid_sections", side_effect=RuntimeError("skip metrics")),
         patch(
             "app.routers.tender.crud._sanitize_for_external_delivery",
             side_effect=lambda sections, hard_validation_result, evidence_result: (sections, {"status": "通过"}),
@@ -302,10 +329,13 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
 
     assert response.status_code == 200, response.text
     payload = response.json()
+    bid_id = payload["bid_id"]
     combined = "\n".join(section["content"] for section in payload["sections"])
     assert "materialize_report" in payload
     assert "consistency_report" in payload
     assert "outbound_report" in payload
+    assert payload["validation_gate"] is not None
+    assert payload["regression_metrics"] is not None
     assert "changed_sections" in payload["materialize_report"]
     assert "unresolved_sections" in payload["materialize_report"]
     assert "overall_status" in payload["consistency_report"]
@@ -320,7 +350,7 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
     assert "第一章 资格性证明文件" in payload["materialize_report"]["changed_sections"]
     assert payload["outbound_report"]["status"] in {"通过", "需人工终审", "阻断外发"}
 
-    stored = tender_api.bid_storage["bid-legacy-1"]
+    stored = tender_api.bid_storage[bid_id]
     assert "materialize_report" in stored
     assert "consistency_report" in stored
     assert "outbound_report" in stored
@@ -330,7 +360,7 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
     assert "国械注进20260002" in stored_combined
     assert Path(payload["file_path"]).exists()
 
-    detail_response = client.get("/api/tender/bid/bid-legacy-1")
+    detail_response = client.get(f"/api/tender/bid/{bid_id}")
     assert detail_response.status_code == 200, detail_response.text
     detail_payload = detail_response.json()
     assert detail_payload["materialize_report"]["changed_sections"] == payload["materialize_report"]["changed_sections"]
@@ -374,27 +404,25 @@ def test_bid_generate_api_does_not_expose_external_draft_when_blocked() -> None:
     tender_api.company_storage["company-blocked"] = company
     tender_api.product_storage["product-blocked"] = product
 
-    class _BlockedGenerator:
-        def generate(self, state):  # noqa: ANN001
-            return {
-                "bid_id": "bid-blocked-1",
-                "sections": [
-                    BidDocumentSection(
-                        section_title="第一章 资格性证明文件",
-                        content=(
-                            "你是投标文件专家。\n"
-                            "投标人名称：[投标方公司名称]\n"
-                            "[待填写]\n"
-                        ),
-                        attachments=[],
-                    )
-                ],
-            }
+    blocked_sections = [
+        BidDocumentSection(
+            section_title="第一章 资格性证明文件",
+            content=(
+                "你是投标文件专家。\n"
+                "投标人名称：[投标方公司名称]\n"
+                "[待填写]\n"
+            ),
+            attachments=[],
+        )
+    ]
 
     client = TestClient(app)
     with (
         patch.object(tender_api, "get_chat_model", return_value=object()),
-        patch.object(tender_api, "create_bid_generator", return_value=_BlockedGenerator()),
+        patch(
+            "app.routers.tender.crud.generate_bid_sections",
+            return_value=_fake_pipeline_result(blocked_sections, blocked=True),
+        ),
     ):
         response = client.post(
             "/api/tender/bid/generate",
@@ -411,6 +439,7 @@ def test_bid_generate_api_does_not_expose_external_draft_when_blocked() -> None:
 
     assert response.status_code == 200, response.text
     payload = response.json()
+    bid_id = payload["bid_id"]
     assert payload["outbound_report"]["status"] == "阻断外发"
     assert payload["outbound_report"]["generated"] is False
     assert payload["outbound_report"]["section_titles"] == []
@@ -419,7 +448,7 @@ def test_bid_generate_api_does_not_expose_external_draft_when_blocked() -> None:
     assert "待补充" in combined
     assert "你是投标文件专家" not in combined
 
-    stored = tender_api.bid_storage["bid-blocked-1"]
+    stored = tender_api.bid_storage[bid_id]
     assert stored["outbound_report"]["status"] == "阻断外发"
     assert stored["outbound_report"]["section_titles"] == []
     stored_combined = "\n".join(section["content"] for section in stored["sections"])

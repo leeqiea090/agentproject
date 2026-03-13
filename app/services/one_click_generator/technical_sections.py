@@ -64,38 +64,27 @@ def _collapse_repeated_nontech_block(
     lines: list[str],
     memo: dict[str, dict[str, str]],
 ) -> str:
-    if not lines:
-        return ""
+    """
+    可编辑底稿模式下，不再折叠跨包重复的非技术分表。
 
-    title = lines[0]
-    body = lines[1:]
+    原因：
+    1. 折叠虽然能缩短篇幅，但会迫使人工在不同包之间来回跳转；
+    2. 包2/3/4/5/6 即使内容相同，正式稿阶段通常也希望每包有完整独立表格；
+    3. 对“人工审核可快速修订”来说，完整展开优先于篇幅压缩。
+    """
+    return "\n".join(lines) if lines else ""
 
-    normalized_body: list[str] = []
-    for line in body:
-        line_n = re.sub(r"包\s*\d+", "包X", line)
-        line_n = re.sub(r"【待填写：[^】]+】", "【待填写】", line_n)
-        line_n = re.sub(r"【待补证：[^】]+】", "【待补证】", line_n)
-        line_n = re.sub(r"\s+", " ", line_n).strip()
-        normalized_body.append(line_n)
-
-    signature = "\n".join(normalized_body)
-    bucket = memo.setdefault(block_type, {})
-    first_pkg = bucket.get(signature)
-    if first_pkg is None:
-        bucket[signature] = pkg_id
-        return "\n".join(lines)
-
-    return "\n".join([
-        title,
-        f"> 本表与包{first_pkg}内容一致。人工修改时优先维护包{first_pkg}，如本包存在差异，再单独展开本包表格。",
-    ])
-
-def _canonicalize_clause_text(text: str) -> str:
+def _canonicalize_clause_text(text: str, *, for_signature: bool = False) -> str:
     t = _safe_text(text, "")
     t = re.sub(r"^(实质性条款|重要条款|一般条款)[:：]\s*", "", t)
     t = t.replace("★", "").replace("▲", "").replace("■", "")
-    t = re.sub(r"^\d+(?:\.\d+)*[:：]?\s*", "", t)
-    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    if for_signature:
+        # 这里只用于“去重签名”，只删除“明确像编号”的前缀
+        # 不要误删 405nm / 32bit / 0.5~50μm 这类真实参数值
+        t = re.sub(r"^(?:\d+(?:\.\d+)*[.)、:：]\s*|[（(]\d+[）)]\s*|第[一二三四五六七八九十\d]+[项条]\s*)", "", t)
+
     return t.strip()
 
 
@@ -104,8 +93,8 @@ def _row_signature(key: str, req: str) -> str:
     去重签名优先使用 requirement 文本。
     这样“检测性能：当SIT...<0.05%”和“重要条款：当SIT...<0.05%”会被视为同一条。
     """
-    key_n = _canonicalize_clause_text(key)
-    req_n = _canonicalize_clause_text(req)
+    key_n = _canonicalize_clause_text(key, for_signature=True)
+    req_n = _canonicalize_clause_text(req, for_signature=True)
     if req_n and len(req_n) >= 6:
         return req_n
     return f"{key_n}::{req_n}"
@@ -438,46 +427,61 @@ def _default_document_supply_method(text: str) -> str:
 
 def _smart_default_response(section_type: str, key: str, req: str) -> str:
     text = f"{_safe_text(key, '')} {_safe_text(req, '')}"
+    text = text.replace("：", " ").replace(":", " ")
 
     if section_type == "service":
-        if any(k in text for k in ("响应", "到场", "电话", "小时")):
-            return "承诺设服务热线并按采购文件要求在约定时限内响应、到场并处理故障。"
-        if any(k in text for k in ("配件库", "备件", "零配件")):
-            return "承诺具备备件供应和配件保障能力，确保设备维修与更换需求。"
-        if any(k in text for k in ("保养", "维护")):
-            return "承诺按采购文件要求提供定期维护保养，并指导使用人员进行日常维护。"
-        if any(k in text for k in ("安装", "调试", "培训", "卸货")):
-            return "承诺负责送货、卸货、安装调试及人员培训，直至设备可正常使用。"
-        if any(k in text for k in ("项目清单", "注册证")):
-            return "承诺提供可开展项目清单及相应注册证/备案资料。"
+        if "质保期" in text:
+            return "承诺质保期满足采购文件要求，自验收合格之日起计算。"
+        if any(k in text for k in ("响应", "到场", "电话", "小时", "分钟")):
+            return "承诺设售后服务热线，按采购文件要求在约定时限内响应、到场并完成故障处理。"
+        if any(k in text for k in ("维修密码", "密码支持")):
+            return "承诺按采购文件要求提供维修密码或必要权限支持，不设置不合理限制。"
+        if any(k in text for k in ("维修资料", "维护资料", "技术资料", "维修手册")):
+            return "承诺提供维修所需技术资料、维护手册及故障排查资料。"
+        if any(k in text for k in ("维修工具", "专用工具")):
+            return "承诺提供维修所需专用工具或等效支持，保障维保实施。"
+        if any(k in text for k in ("升级", "免费升级")):
+            return "承诺按采购文件要求提供软件或系统免费升级服务。"
+        if any(k in text for k in ("备用机", "替代设备")):
+            return "承诺如设备无法及时修复或维修周期过长，按采购文件要求提供备用机或替代设备保障使用。"
+        if any(k in text for k in ("配件库", "备件", "零配件", "关键零部件", "更换零件")):
+            return "承诺具备备件储备和更换保障能力，确保关键零部件供应及时。"
+        if any(k in text for k in ("保养", "维护", "巡检", "维修保养手册")):
+            return "承诺按采购文件要求提供定期维护保养、巡检及使用指导，并提供相应维护资料。"
+        if any(k in text for k in ("安装", "调试", "培训", "卸货", "上线")):
+            return "承诺负责送货、卸货、安装调试及人员培训，直至设备可正常投入使用。"
+        if any(k in text for k in ("联系人", "联系方式", "维修站", "售后服务机构")):
+            return "承诺提供售后服务联系人、联系方式及服务机构信息，保障服务可及时触达。"
+        if any(k in text for k in ("项目清单", "注册证", "备案", "试剂列表")):
+            return "承诺提供可开展项目清单及对应注册证、备案凭证等合规资料。"
         return "承诺按采购文件及厂家服务方案执行，提供送货、安装调试、培训、维保及售后响应服务。"
 
     if section_type == "config":
         if any(k in text for k in ("装箱", "配置单", "随机配置")):
-            return "承诺按装箱配置单和投标型号交付完整标配/选配清单。"
+            return "承诺按装箱配置单和投标型号交付完整标配、选配清单。"
         return "承诺所投配置满足招标要求，随机配置及随机文件与投标型号保持一致。"
 
     if section_type == "acceptance":
         if any(k in text for k in ("到货", "装箱", "外观", "数量")):
-            return "承诺配合采购人完成到货验收，并按装箱单核对品牌、型号、数量、外观及随机资料。"
+            return "承诺配合采购人完成到货验收，并按装箱单逐项核对品牌、型号、数量、外观及随机资料。"
         if any(k in text for k in ("安装", "调试", "通电", "开机")):
             return "承诺完成安装调试、通电开机及基础功能验证，并配合形成安装调试记录。"
         if any(k in text for k in ("试运行", "性能", "验证")):
             return "承诺按采购文件及采购人要求配合完成试运行或性能验证。"
-        if any(k in text for k in ("资料", "说明书", "注册证", "培训记录")):
-            return "承诺在验收阶段完整移交随机文件、合规文件及培训记录。"
+        if any(k in text for k in ("资料", "说明书", "合格证", "注册证", "培训记录")):
+            return "承诺按采购文件要求同步移交验收所需资料，并配合完成资料核验。"
         return "承诺按采购文件及采购人要求配合完成到货、安装调试、试运行和资料移交验收。"
 
     if section_type == "documentation":
         if any(k in text for k in ("随机文件", "说明书", "保修卡", "装箱单")):
-            return "承诺随机文件齐套并与投标型号一致。"
+            return "承诺随货或按采购文件要求提供与投标型号一致的说明书、合格证、保修卡、装箱单等随机文件。"
         if any(k in text for k in ("注册证", "备案凭证", "授权文件", "许可文件")):
-            return "承诺提供与投标型号一致的注册证/备案凭证、许可文件及授权文件。"
+            return "承诺提供与投标型号一致的注册证、备案凭证、许可文件及授权文件。"
         if any(k in text for k in ("培训", "验收", "安装调试记录")):
-            return "承诺在交付及验收时同步移交培训、安装调试及验收资料。"
+            return "承诺在交付及验收阶段同步移交培训、安装调试及验收资料。"
         return "承诺随货或随投标文件提供与投标型号一致的说明书、合格证、注册证/备案凭证、授权文件等资料。"
 
-    return "承诺按采购文件要求执行。"
+    return _default_response_placeholder(section_type)
 
 
 def _normalize_section_response(
@@ -1131,13 +1135,13 @@ def _build_appendix_service_placeholder(
     payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
 
     lines = [
-        "## 二、技术服务和售后服务的内容及措施",
-        "### （一）补充资料索引",
+        "### 技术服务和售后服务的内容及措施",
+        "#### （一）补充资料索引",
         "| 主题 | 建议补充资料 | 回填位置 |",
         "|---|---|---|",
         "| 售后响应时限、保养频次、培训安排、验收方式 | 售后服务方案 / 厂家服务承诺 / 培训计划 / 安装调试记录模板 | 第三章《四、售后服务/配置/验收/资料要求响应》 |",
         "",
-        "### （二）商务总述",
+        "#### （二）商务总述",
         f"- 质保期：{warranty}",
         f"- 付款方式：{payment}",
     ]
@@ -1195,61 +1199,37 @@ def _gen_appendix(
     product_profiles: dict[str, dict[str, Any]] | None = None,
     active_packages: list[ProcurementPackage] | None = None,
 ) -> BidDocumentSection:
-    """第四章：报价书附件（技术参数明细 + 售后服务方案）"""
+    """
+    第四章：报价书附件（精简版）
+
+    原则：
+    1. 第三章已经承担逐条技术响应主表职责；
+    2. 第四章不再重复逐条技术参数，避免人工维护两套表；
+    3. 第四章只保留报价明细、附件索引和补件清单。
+    """
     _ = llm
     packages = active_packages or tender.packages
-    products = products or {}
     today = _today()
-    warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period)
-    payment = _normalize_commitment_term(tender.commercial_terms.payment_method)
 
-    parameter_tables: list[str] = []
-    if packages:
-        for pkg in packages:
-            parameter_tables.append(
-                _build_main_parameter_table(
-                    pkg,
-                    tender_raw,
-                    product=products.get(pkg.package_id),
-                    normalized_result=normalized_result,
-                    evidence_result=evidence_result,
-                    product_profile=(product_profiles or {}).get(pkg.package_id),
-                )
-            )
-    else:
-        parameter_tables.append(
-            "\n".join(
-                [
-                    "### 包信息",
-                    "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
-                    "|---:|---|---|---|---|",
-                    "| 1 | 核心参数 | 详见招标文件 | 详见拟投产品参数资料 | 无偏离 |",
-                ]
-            )
-        )
-
-    content = f"""## 一、产品主要技术参数明细表及报价表
-### （一）产品主要技术参数
-
-> 处理顺序：先补“投标型号 / 实际响应值 / 证据材料 / 页码”，再补附件索引；第四章只保留真正缺口，不再重复泛化提醒。
-{"\n\n".join(parameter_tables)}
-
-### （二）报价明细表
+    content = f"""## 一、报价明细表
 项目名称：{tender.project_name}  
 项目编号：{tender.project_number}
 
 {_build_detail_quote_table(tender, tender_raw, packages=packages)}
 
-{_build_appendix_service_placeholder(tender, packages=packages)}
+## 二、附件索引与补件清单
+> 第三章已经逐条列示技术偏离、配置、售后、验收和资料要求。第四章不再重复逐条技术参数，避免人工来回修改两套表。
 
-投标人名称：{_COMPANY}  
-授权代表：{_AUTHORIZED_REP}  
-日期：{today}
+{_build_appendix_service_placeholder(tender, packages=packages)}
 
 {_build_product_brochure_checklist(packages)}
 
 {_build_energy_cert_checklist(packages)}
 
 {_build_quality_report_checklist(packages)}
+
+投标人名称：{_COMPANY}  
+授权代表：{_AUTHORIZED_REP}  
+日期：{today}
 """
     return BidDocumentSection(section_title="第四章 报价书附件", content=content.strip())

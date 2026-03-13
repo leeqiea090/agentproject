@@ -219,7 +219,7 @@ def _extract_configuration_items(
         deduped_token_sets.append(item_tokens)
 
     # Config pollution cleaning — remove non-config items that leaked through boundary detection
-    cleaned = _clean_config_items(deduped, pkg.package_id)
+    cleaned = _clean_config_items(deduped, pkg.package_id, pkg.item_name)
 
     # 不再强行补“标准附件 / 配套软件 / 随机文件 / 安装培训 / 初始耗材”等 6 类通用占位项。
     # 只在完全提取不到任何配置时，保留一条最小骨架，方便人工从“主机”开始补。
@@ -237,17 +237,10 @@ def _extract_configuration_items(
 def _clean_config_items(
     raw_config_items: list[tuple[str, str, str, str]],
     package_id: str = "",
+    package_item_name: str = "",
 ) -> list[tuple[str, str, str, str]]:
-    """Config Cleaner: 统一的配置项清理规则。
+    """Config Cleaner: 统一的配置项清理规则。"""
 
-    清理规则:
-    1. 过滤表头噪音 (序号、配置名称等表头文字)
-    2. 过滤模板说明行 (如"按招标文件要求"、"详见附件")
-    3. 过滤重复项 (基于 Jaccard 相似度二次去重)
-    4. 过滤跨包污染项 (包含其他包号)
-    5. 过滤非配置内容 (评分标准、商务条款等)
-    6. 过滤纯数字/纯符号/过短项
-    """
     _CONFIG_POLLUTION_TOKENS = (
         "评分标准", "评分办法", "商务条款", "合同条款", "投标人须知",
         "质保期", "售后服务", "付款方式", "验收标准", "违约责任",
@@ -259,7 +252,7 @@ def _clean_config_items(
     _TABLE_HEADER_TOKENS = (
         "序号", "配置名称", "名称", "数量", "单位", "备注", "说明", "规格",
         "品牌", "型号", "产地", "价格", "小计", "合计", "货物名称",
-        "配置项", "分类", "用途", "功能描述",
+        "配置项", "分类", "用途", "功能描述", "配置",
     )
 
     _TEMPLATE_STATEMENT_PATTERNS = (
@@ -268,40 +261,59 @@ def _clean_config_items(
         "按招标文件配置要求", "详见技术要求", "按采购需求",
     )
 
+    _SCAFFOLD_NOISE_TOKENS = (
+        "如有多个",
+        "配置请另行加行",
+        "请另行加行",
+        "可按实际增减",
+        "模板",
+        "示例",
+    )
+
     cleaned: list[tuple[str, str, str, str]] = []
     seen_token_sets: list[set[str]] = []
+    forbidden_terms = _package_forbidden_terms(package_item_name) if package_item_name else set()
 
     for item in raw_config_items:
         name, unit, qty, remark = item
+        name = (name or "").strip()
 
-        # 规则1: 过滤表头
-        if name.strip() in _TABLE_HEADER_TOKENS:
+        # 规则1: 过滤表头/空名/纯模板名
+        if not name or name in _TABLE_HEADER_TOKENS:
             continue
 
         # 规则2: 过滤模板说明行
         if any(pattern in name for pattern in _TEMPLATE_STATEMENT_PATTERNS):
             continue
 
-        # 规则3: 过滤污染内容
+        # 规则3: 过滤支架说明语/脚手架噪音
+        if any(token in name for token in _SCAFFOLD_NOISE_TOKENS):
+            continue
+
+        # 规则4: 过滤污染内容
         if any(token in name for token in _CONFIG_POLLUTION_TOKENS):
             continue
 
-        # 规则4: 过滤跨包污染 (包含"包X"但不是当前包)
+        # 规则5: 过滤设备串包污染
+        if forbidden_terms and any(token in name for token in forbidden_terms):
+            continue
+
+        # 规则6: 过滤跨包污染（显式写了其他包号）
         if package_id:
             other_package_pattern = r"包\s*(\d+)"
             matches = re.findall(other_package_pattern, name)
             if matches and all(match != package_id for match in matches):
                 continue
 
-        # 规则5: 最小长度检查
+        # 规则7: 最小长度检查
         if len(name) < 2:
             continue
 
-        # 规则6: 纯数字或纯符号
+        # 规则8: 纯数字或纯符号
         if re.fullmatch(r"[\d\s\-_]+", name) or re.fullmatch(r"[^\u4e00-\u9fa5\w]+", name):
             continue
 
-        # 规则7: 二次 Jaccard 去重（防止上游遗漏）
+        # 规则9: 二次 Jaccard 去重
         item_tokens = {t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", name.strip()) if len(t) >= 2}
         is_dup = False
         for existing_tokens in seen_token_sets:
@@ -315,7 +327,7 @@ def _clean_config_items(
         if is_dup:
             continue
 
-        cleaned.append(item)
+        cleaned.append((name, unit, qty, remark))
         seen_token_sets.append(item_tokens)
 
     return cleaned

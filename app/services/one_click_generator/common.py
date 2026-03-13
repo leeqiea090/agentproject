@@ -386,16 +386,16 @@ def _quote_overview_table(
             quantity = _infer_package_quantity(pkg, tender_raw)
             rows.append(
                 f"| {idx}（{pkg.package_id}） | {pkg.item_name} | {quantity} | "
-                f"{_fmt_money(pkg.budget)} | [待填写] | {_safe_text(pkg.delivery_time, '按招标文件约定')} |"
+                f"{_fmt_money(pkg.budget)} | 【待填写：包{pkg.package_id}投标报价】 | {_safe_text(pkg.delivery_time, '按招标文件约定')} |"
             )
         rows.append(
             f"|  | **预算合计（参考）** |  | **{_fmt_money(total_budget)}** |  |  |"
         )
         rows.append(
-            "|  | **投标总报价** |  |  | **[待填写]** |  |"
+            "|  | **投标总报价** |  |  | **【待填写：投标总报价】** |  |"
         )
     else:
-        rows.append("| 1 | [待填写] | [待填写] | [待填写] | [待填写] | [待填写] |")
+        rows.append("| 1 | 【待填写：货物名称】 | 【待填写：数量】 | 【待填写：预算金额】 | 【待填写：投标报价】 | 【待填写：交货期】 |")
 
     table = "\n".join(headers + rows)
     table += "\n\n> 填写规则：每包“投标报价(元)”应与第四章《报价明细表》中对应包总价一致；“投标总报价”应等于各包投标报价合计。"
