@@ -143,17 +143,30 @@ def _get_fixed_table_widths(header_cells: list[str]):
     if key == ("序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"):
         return [Cm(1.0), Cm(2.2), Cm(6.0), Cm(4.8), Cm(1.8), Cm(2.0)]
 
+    if key == ("序号", "审查内容", "合格条件", "投标文件所在页码"):
+        return [Cm(1.0), Cm(3.2), Cm(8.2), Cm(3.2)]
+
+    if key == ("序号", "内容", "评分因素分项", "评审标准", "投标文件对应页码"):
+        return [Cm(1.0), Cm(2.2), Cm(3.0), Cm(8.0), Cm(2.8)]
+
     if key == ("序号", "评审项", "采购文件评分要求", "响应文件对应内容", "自评说明", "证明材料/页码"):
         return [Cm(1.0), Cm(2.2), Cm(5.4), Cm(4.4), Cm(3.2), Cm(2.2)]
 
     if key == ("序号", "无效情形", "自检结果", "备注"):
         return [Cm(1.0), Cm(10.5), Cm(2.4), Cm(3.0)]
 
+    if key == ("序号", "无效投标情形", "自检结果", "备注"):
+        return [Cm(1.0), Cm(10.5), Cm(2.4), Cm(3.0)]
+
+    if key == ("序号", "货物名称", "品牌型号、产地", "数量/单位", "报价(元)", "招标文件的参数和要求", "响应文件参数", "偏离情况"):
+        return [Cm(1.0), Cm(2.2), Cm(3.0), Cm(1.7), Cm(2.0), Cm(4.5), Cm(4.5), Cm(1.6)]
+
     # 兼容旧模板
     if key == ("序号", "审查项", "招标文件要求", "响应情况", "对应材料/页码"):
         return [Cm(1.2), Cm(3.0), Cm(6.0), Cm(4.5), Cm(3.0)]
 
     return None
+
 
 def _extract_outline_items(content: str) -> list[str]:
     """从章节 Markdown 中提取目录项（主要提取二级小节）"""
@@ -271,10 +284,11 @@ def _render_markdown_table(doc: Document, lines: list[str]) -> None:
 
     table = doc.add_table(rows=len(normalized_rows), cols=col_count)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = False
-    _style_table(table)
 
     widths = _get_fixed_table_widths(header_cells)
+    table.autofit = widths is None
+    _style_table(table)
+
 
     for i, row_data in enumerate(normalized_rows):
         for j, cell_text in enumerate(row_data):
@@ -508,14 +522,17 @@ def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
     if any(_is_bad_zb_section_title(x) for x in exact_titles):
         return False
 
-    required_keywords = (
-        "投标函",
-        "开标一览表",
-        "投标分项报价表",
-        "法定代表人授权书",
-        "技术要求响应及偏离表",
+    required_groups = (
+        ("投标函",),
+        ("开标一览表",),
+        ("投标分项报价表", "分项报价表"),
+        ("法定代表人授权书", "授权书"),
+        ("采购需求响应及偏离表", "技术要求响应及偏离表"),
     )
-    return all(any(k in x for x in exact_titles) for k in required_keywords)
+    return all(
+        any(any(k in title for k in group) for title in exact_titles)
+        for group in required_groups
+    )
 
 def _required_titles_for_tender(tender=None) -> list[str]:
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]

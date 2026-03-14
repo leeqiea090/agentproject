@@ -3,10 +3,13 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pypdf
+from langchain_core.messages import AIMessage
+from langchain_core.prompt_values import PromptValue
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
@@ -26,9 +29,19 @@ from app.services.requirement_processor import (
 )
 try:
     from docx import Document as _DocxDocument
+    from docx.document import Document as _DocxDocumentType
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table as _DocxTable
+    from docx.text.paragraph import Paragraph as _DocxParagraph
     _DOCX_AVAILABLE = True
 except ImportError:
     _DOCX_AVAILABLE = False
+    _DocxDocumentType = None
+    CT_Tbl = None
+    CT_P = None
+    _DocxTable = None
+    _DocxParagraph = None
 
 logger = logging.getLogger(__name__)
 _FALLBACK_PARSE_CHAR_LIMITS = (24000, 16000, 10000)
@@ -239,6 +252,175 @@ def _extract_heading_block(text: str, heading_keywords: list[str], stop_keywords
     match = pattern.search(text or "")
     return match.group(1).strip() if match else ""
 
+
+def _extract_zb_format_block(text: str) -> str:
+    """
+    公开招标项目：优先精确截取“第六章 投标文件格式/响应文件格式”正文块。
+    不能再简单取最后一个“投标文件格式”字样，否则很容易命中
+    “投标文件格式特殊要求”“符合投标文件内容及格式要求”等普通条款。
+    """
+    text = text or ""
+    if not text:
+        return ""
+
+    chapter_patterns = [
+        re.compile(r"(?:^|\n)\s*第六章\s*投标文件格式", re.M),
+        re.compile(r"(?:^|\n)\s*第六章\s*响应文件格式", re.M),
+    ]
+
+    start = None
+    for pat in chapter_patterns:
+        m = pat.search(text)
+        if m:
+            start = m.start()
+            break
+
+    # 次优回退：找包含“第六章”且后续近邻出现“投标文件格式/响应文件格式”的位置
+    if start is None:
+        for m in re.finditer(r"(?:^|\n)\s*第[一二三四五六七八九十]+章", text):
+            snippet = text[m.start(): m.start() + 120]
+            if "投标文件格式" in snippet or "响应文件格式" in snippet:
+                start = m.start()
+                break
+
+    if start is None:
+        return ""
+
+    tail = text[start:]
+
+    # 终止于下一章 / 附件 / 附录，避免把后续全部吃进去
+    stop_patterns = [
+        re.compile(r"(?:^|\n)\s*第七章\b", re.M),
+        re.compile(r"(?:^|\n)\s*附件\b", re.M),
+        re.compile(r"(?:^|\n)\s*附录\b", re.M),
+    ]
+
+    stop_pos = None
+    for pat in stop_patterns:
+        m = pat.search(tail)
+        if m:
+            if stop_pos is None or m.start() < stop_pos:
+                stop_pos = m.start()
+
+    return tail[:stop_pos].strip() if stop_pos is not None else tail.strip()
+
+_ZB_FORMAT_TITLE_PATTERNS = (
+    # 例：格式 1.投标函（格式） / 格式 3投标分项报价表（格式）
+    re.compile(r"^格式\s*\d+(?:-\d+)?(?:\.\d+)?(?:[.．、]?\s*.*)?$"),
+    # 例：7.7.1 中小企业声明函 / 7.12制造商授权书
+    re.compile(r"^\d+(?:\.\d+)+\s*.+$"),
+    # 例：格式2-1（单独一行）
+    re.compile(r"^格式\s*\d+(?:-\d+)+$"),
+    re.compile(r"^售后服务承诺书$"),
+    re.compile(r"^招标代理服务费承诺$"),
+    re.compile(r"^[一二三四五六七八九十]+、\s*招标代理服务费承诺$"),
+)
+
+def _normalize_zb_format_title(line: str) -> str:
+    raw = (line or "").strip()
+    if not raw:
+        return ""
+
+    compact = re.sub(r"\s+", "", raw).replace("．", ".")
+    compact = compact.replace("（", "(").replace("）", ")")
+
+    for pat in _ZB_FORMAT_TITLE_PATTERNS:
+        if pat.match(compact):
+            return compact
+
+    return ""
+
+def _zb_order_no_from_title(title: str, fallback_idx: int) -> str:
+    title = title or ""
+    m = re.search(r"格式\s*(\d+(?:-\d+)?(?:\.\d+)?)", title)
+    if m:
+        return m.group(1)
+    m = re.search(r"^(\d+\.\d+)", title)
+    if m:
+        return m.group(1)
+    m = re.search(r"^([一二三四五六七八九十]+)、", title)
+    if m:
+        return m.group(1)
+    return str(fallback_idx)
+
+
+def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSectionTemplate]:
+    """
+    从公开招标文件第六章中抽取原始“格式模板”。
+    支持：
+    - 格式 1.投标函（格式）
+    - 格式2-1  + 下一行标题
+    - 7.7.1 中小企业声明函
+    - 7.7.2 残疾人福利性单位声明函
+    - 7.7.3 节能/环保材料
+    - 7.11 类似项目业绩表
+    - 7.12 制造商授权书
+    """
+    block = _extract_zb_format_block(tender_text)
+    if not block:
+        return []
+
+    lines = [line.rstrip() for line in block.splitlines()]
+    title_hits: list[tuple[int, str]] = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        title = _normalize_zb_format_title(line)
+
+        # 兼容“格式2-1”单独占一行、下一行才是标题
+        if title and re.fullmatch(r"格式\s*\d+(?:-\d+)+", title):
+            next_title = ""
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if nxt:
+                    next_title = nxt
+                    break
+                j += 1
+            if next_title:
+                merged = f"{title} {next_title}"
+                title_hits.append((i, merged))
+                i += 1
+                continue
+
+        if title:
+            title_hits.append((i, title))
+
+        i += 1
+
+    # 公开招标第六章如果抽不到足够模板，就返回空，交由后续回退逻辑处理
+    if len(title_hits) < 5:
+        return []
+
+    templates: list[ResponseSectionTemplate] = []
+    for idx, (start_idx, title) in enumerate(title_hits):
+        end_idx = title_hits[idx + 1][0] if idx + 1 < len(title_hits) else len(lines)
+        raw_block = "\n".join(lines[start_idx:end_idx]).strip()
+        templates.append(
+            ResponseSectionTemplate(
+                order_no=_zb_order_no_from_title(title, idx + 1),
+                title=title,
+                required=True,
+                raw_block=raw_block,
+            )
+        )
+
+    return templates
+
+def _iter_docx_blocks(doc: _DocxDocumentType):
+    """
+    按 Word 正文真实顺序遍历段落/表格。
+    这是关键，否则会把所有段落先取完、再把所有表格追加到最后，导致第六章模板块被打散。
+    """
+    if not _DOCX_AVAILABLE:
+        return
+    for child in doc.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            yield _DocxParagraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield _DocxTable(child, doc)
+
 def _default_section_titles(procurement_type: str) -> list[str]:
     mode = (procurement_type or "").strip()
 
@@ -388,7 +570,8 @@ class TenderParser:
         response_text = self._response_text(response.content)
         return self._extract_json_dict(response_text)
 
-    def _ensure_parse_tokens(self, llm: ChatOpenAI) -> ChatOpenAI:
+    def _ensure_parse_tokens(self, llm: ChatOpenAI) -> Runnable[
+                                                           PromptValue | str | Sequence[Any], AIMessage] | ChatOpenAI:
         """如果当前 max_tokens 过小，返回一个放宽限制的副本。"""
         current = getattr(llm, "max_tokens", None) or 0
         if 0 < current < self._MIN_PARSE_MAX_TOKENS:
@@ -567,8 +750,11 @@ class TenderParser:
         mode = (procurement_type or "").strip()
         is_zb = "公开招标" in mode or ("招标" in mode and "谈判" not in mode and "磋商" not in mode)
 
-        # 公开招标：先固定走标准 12 章节，避免把目录/公告误识别成投标文件格式章节
+        # 公开招标：优先提取第六章原始格式标题；失败时再回退默认骨架
         if is_zb:
+            templates = _extract_zb_response_section_templates(tender_text)
+            if templates:
+                return [tpl.title for tpl in templates]
             return DEFAULT_ZB_SECTION_TITLES.copy()
 
         block = _extract_heading_block(
@@ -590,21 +776,24 @@ class TenderParser:
         mode = (procurement_type or "").strip()
         is_zb = "公开招标" in mode or ("招标" in mode and "谈判" not in mode and "磋商" not in mode)
 
-        # 公开招标先走稳定骨架，避免误把目录/招标公告中的“项目基本情况”当成正文模板
+        # 公开招标：优先抽第六章原格式；失败时才回退默认 12 章节
         if is_zb:
-            templates = []
+            templates = _extract_zb_response_section_templates(tender_text)
+            if templates:
+                return templates
+
+            fallback = []
             for t in DEFAULT_ZB_SECTION_TITLES:
                 m = re.match(r"^([一二三四五六七八九十]+)、", t)
-                order_no = m.group(1) if m else ""
-                templates.append(
+                fallback.append(
                     ResponseSectionTemplate(
-                        order_no=order_no,
+                        order_no=m.group(1) if m else "",
                         title=t,
                         required=True,
                         raw_block="",
                     )
                 )
-            return templates
+            return fallback
 
         block = _extract_heading_block(
             tender_text,
@@ -647,25 +836,95 @@ class TenderParser:
         return templates
 
     def _extract_review_tables(self, tender_text: str, procurement_type: str) -> dict[str, TenderTableTemplate | None]:
-        qualification_block = _extract_heading_block(
+        def _extract_precise_block(text: str, anchor_patterns: list[str], stop_patterns: list[str]) -> str:
+            text = text or ""
+            if not text:
+                return ""
+
+            start = None
+            for pat in anchor_patterns:
+                m = re.search(pat, text, re.S | re.M)
+                if m:
+                    start = m.start()
+                    break
+
+            if start is None:
+                return ""
+
+            tail = text[start:]
+            stop_pos = None
+            for pat in stop_patterns:
+                m = re.search(pat, tail, re.S | re.M)
+                if m and m.start() > 0:
+                    if stop_pos is None or m.start() < stop_pos:
+                        stop_pos = m.start()
+
+            return tail[:stop_pos].strip() if stop_pos is not None else tail.strip()
+
+        qualification_block = _extract_precise_block(
             tender_text,
-            ["资格性审查表", "资格审查表", "资格性审查", "资格审查"],
-            ["符合性审查", "详细评审", "评分标准", "投标无效", "响应无效", "响应文件格式"],
+            [
+                r"评审方法前附表[（(]一[）)]\s*资格性检查",
+                r"资格性检查",
+                r"资格审查表",
+                r"资格性审查表",
+            ],
+            [
+                r"评审方法前附表[（(]二[）)]\s*符合性检查",
+                r"符合性检查",
+                r"符合性审查",
+                r"评分办法索引",
+                r"评分标准",
+            ],
         )
-        compliance_block = _extract_heading_block(
+
+        compliance_block = _extract_precise_block(
             tender_text,
-            ["符合性审查表", "符合性审查"],
-            ["详细评审", "评分标准", "投标无效", "响应无效", "响应文件格式"],
+            [
+                r"评审方法前附表[（(]二[）)]\s*符合性检查",
+                r"符合性检查索引",
+                r"符合性检查",
+                r"符合性审查表",
+                r"符合性审查",
+            ],
+            [
+                r"评分办法索引",
+                r"7\.\s*评分因素和评分标准",
+                r"评分标准",
+                r"第六章\s*投标文件格式",
+                r"第六章\s*响应文件格式",
+            ],
         )
-        detailed_block = _extract_heading_block(
+
+        detailed_block = _extract_precise_block(
             tender_text,
-            ["详细评审", "评分标准", "评分办法", "评审标准"],
-            ["投标无效", "响应无效", "响应文件格式", "合同草案"],
+            [
+                r"7\.\s*评分因素和评分标准",
+                r"评分标准",
+                r"评分办法索引",
+                r"详细评审",
+            ],
+            [
+                r"第六章\s*投标文件格式",
+                r"第六章\s*响应文件格式",
+                r"格式\s*1",
+            ],
         )
-        invalid_block = _extract_heading_block(
+
+        invalid_block = _extract_precise_block(
             tender_text,
-            ["投标无效", "响应无效", "无效投标", "无效响应"],
-            ["响应文件格式", "合同草案", "采购需求"],
+            [
+                r"26\.5\s*.*?其他无效投标情况",
+                r"其他无效投标情况",
+                r"投标无效",
+                r"无效投标",
+                r"响应无效",
+            ],
+            [
+                r"第六章\s*投标文件格式",
+                r"第六章\s*响应文件格式",
+                r"格式\s*1",
+            ],
         )
 
         qualification = _parse_table_template_from_block(qualification_block, "资格性审查响应对照表", "qualification")
@@ -680,7 +939,7 @@ class TenderParser:
                 source_title="资格性审查响应对照表",
                 columns=_default_columns("qualification"),
                 rows=[],
-                raw_block="",
+                raw_block=qualification_block or "",
             )
 
         if compliance is None:
@@ -690,17 +949,17 @@ class TenderParser:
                 source_title="符合性审查响应对照表",
                 columns=_default_columns("compliance"),
                 rows=[],
-                raw_block="",
+                raw_block=compliance_block or "",
             )
 
-        if detailed is None and "磋商" in (procurement_type or ""):
+        if detailed is None:
             detailed = TenderTableTemplate(
                 table_name="详细评审响应对照表",
                 section_title="详细评审响应对照表",
                 source_title="详细评审响应对照表",
                 columns=_default_columns("detailed"),
                 rows=[],
-                raw_block="",
+                raw_block=detailed_block or "",
             )
 
         if invalid_table is None:
@@ -710,7 +969,7 @@ class TenderParser:
                 source_title="投标无效情形汇总及自检表",
                 columns=_default_columns("invalid"),
                 rows=[],
-                raw_block="",
+                raw_block=invalid_block or "",
             )
 
         return {
@@ -778,19 +1037,29 @@ class TenderParser:
 
     @staticmethod
     def extract_text_from_docx(docx_path: str | Path) -> str:
-        """从Word文档(.docx)中提取文本"""
+        """从Word文档(.docx)中提取文本，并尽量保留段落/表格原始顺序。"""
         if not _DOCX_AVAILABLE:
             raise ValueError("python-docx 未安装，无法读取Word文件")
         try:
             doc = _DocxDocument(str(docx_path))
-            paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
-            # 同时提取表格内容
-            for table in doc.tables:
-                for row in table.rows:
-                    row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
-                    if row_text:
-                        paragraphs.append(row_text)
-            text = "\n".join(paragraphs)
+            blocks: list[str] = []
+
+            for block in _iter_docx_blocks(doc):
+                if isinstance(block, _DocxParagraph):
+                    line = (block.text or "").strip()
+                    if line:
+                        blocks.append(line)
+                    continue
+
+                if isinstance(block, _DocxTable):
+                    for row in block.rows:
+                        cells = [" ".join((cell.text or "").split()) for cell in row.cells]
+                        cells = [c for c in cells if c]
+                        if cells:
+                            # 用 markdown table 风格保留表格行，便于后续模板解析
+                            blocks.append("| " + " | ".join(cells) + " |")
+
+            text = "\n".join(blocks)
             logger.info(f"成功从Word文档提取文本，共 {len(text)} 字符")
             return text
         except Exception as e:

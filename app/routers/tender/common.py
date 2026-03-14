@@ -27,6 +27,7 @@ from app.schemas import (
     OneClickJobStatusResponse,
     # ErrorResponse
 )
+from app.config import get_settings
 from app.services.tender_parser import create_tender_parser
 from app.services.one_click_generator import generate_bid_sections
 from app.services.docx_builder import build_bid_docx
@@ -52,8 +53,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tender", tags=["招投标系统"])
 
 # 文件存储路径
-UPLOAD_DIR = Path("data/uploads/tenders")
-BID_OUTPUT_DIR = Path("data/outputs/bids")
+_SETTINGS = get_settings()
+UPLOAD_DIR = Path(_SETTINGS.tender_upload_dir)
+BID_OUTPUT_DIR = Path(_SETTINGS.bid_output_dir)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 BID_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
