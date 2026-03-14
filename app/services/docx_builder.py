@@ -454,9 +454,72 @@ def _detect_structure_mode_from_tender(tender=None, sections=None) -> str:
         return "zb"
     return "unknown"
 
+def _default_zb_titles() -> list[str]:
+    return [
+        "一、投标函",
+        "二、开标一览表",
+        "三、投标分项报价表",
+        "四、法定代表人授权书",
+        "五、资格证明文件",
+        "六、商务条款响应及偏离表",
+        "七、技术要求响应及偏离表",
+        "八、供货、安装调试、质量保障及售后服务方案",
+        "九、资格性审查响应对照表",
+        "十、符合性审查响应对照表",
+        "十一、详细评审响应对照表",
+        "十二、无效投标情形自检表",
+    ]
+
+
+def _is_bad_zb_section_title(title: str) -> bool:
+    s = re.sub(r"\s+", "", title or "")
+    if not s:
+        return True
+
+    bad_words = (
+        "项目基本情况",
+        "招标公告",
+        "投标人须知",
+        "评标办法",
+        "合同条款",
+        "采购需求",
+        "目录",
+        "评审索引",
+        "资格性检查索引",
+        "符合性检查索引",
+        "评分办法索引",
+    )
+    return any(x in s for x in bad_words)
+
+
+def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
+    exact_titles = [str(x).strip() for x in (exact_titles or []) if str(x).strip()]
+    mode = _detect_structure_mode_from_tender(tender=tender)
+
+    if not exact_titles:
+        return False
+
+    if mode != "zb":
+        return True
+
+    if len(exact_titles) < 8:
+        return False
+
+    if any(_is_bad_zb_section_title(x) for x in exact_titles):
+        return False
+
+    required_keywords = (
+        "投标函",
+        "开标一览表",
+        "投标分项报价表",
+        "法定代表人授权书",
+        "技术要求响应及偏离表",
+    )
+    return all(any(k in x for x in exact_titles) for k in required_keywords)
+
 def _required_titles_for_tender(tender=None) -> list[str]:
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
-    if exact_titles:
+    if _usable_exact_titles(tender=tender, exact_titles=exact_titles):
         return exact_titles
 
     mode = _detect_structure_mode_from_tender(tender=tender)
@@ -487,6 +550,9 @@ def _required_titles_for_tender(tender=None) -> list[str]:
             "九、详细评审响应对照表",
             "十、投标无效情形汇总及自检表",
         ]
+
+    if mode == "zb":
+        return _default_zb_titles()
 
     return []
 
@@ -527,24 +593,35 @@ def _backfill_required_sections(sections, tender=None):
                 )
             )
 
+    mode = _detect_structure_mode_from_tender(tender=tender, sections=sections)
+
     for s in (sections or []):
         title = (getattr(s, "section_title", "") or "").strip()
-        if title and title not in ordered_set:
-            filled.append(s)
+        if not title:
+            continue
+        if title in ordered_set:
+            continue
+        if mode == "zb" and _is_bad_zb_section_title(title):
+            continue
+        filled.append(s)
 
     return filled
 
 def _assert_new_structure_only(sections, tender=None) -> None:
-    titles = [(getattr(s, "section_title", "") or "").strip() for s in (sections or []) if (getattr(s, "section_title", "") or "").strip()]
+    titles = [
+        (getattr(s, "section_title", "") or "").strip()
+        for s in (sections or [])
+        if (getattr(s, "section_title", "") or "").strip()
+    ]
 
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
-    if exact_titles:
+    mode = _detect_structure_mode_from_tender(tender=tender, sections=sections)
+
+    if _usable_exact_titles(tender=tender, exact_titles=exact_titles):
         missing = [x for x in exact_titles if x not in titles]
         if missing:
             raise RuntimeError(f"检测到招标文件第六章/响应文件格式中的必需章节缺失: {'；'.join(missing)}")
         return
-
-    mode = _detect_structure_mode_from_tender(tender=tender, sections=sections)
 
     if mode == "tp":
         required = {
@@ -591,18 +668,26 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "六、技术偏离表",
             "七、报价书附件",
         }
+    elif mode == "zb":
+        required = set(_default_zb_titles())
+        forbidden = {
+            "一、项目基本情况",
+            "招标公告",
+            "投标人须知",
+            "评标办法",
+            "合同条款",
+            "采购需求",
+        }
     else:
-        # 公开招标/未识别：不做 TP/CS 硬禁止，避免误杀
         return
 
     missing = [x for x in required if x not in titles]
-    hit = [x for x in titles if x in forbidden]
+    hit = [x for x in titles if x in forbidden or _is_bad_zb_section_title(x)]
 
     if missing:
         raise RuntimeError(f"检测到当前采购方式对应必需章节缺失: {'；'.join(missing)}")
     if hit:
         raise RuntimeError(f"检测到当前采购方式不应出现的章节: {'；'.join(hit)}")
-
 
 def build_bid_docx(
     sections: list[BidDocumentSection],

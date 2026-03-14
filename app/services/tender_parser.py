@@ -564,6 +564,13 @@ class TenderParser:
 
     @staticmethod
     def _extract_response_section_titles(tender_text: str, procurement_type: str) -> list[str]:
+        mode = (procurement_type or "").strip()
+        is_zb = "公开招标" in mode or ("招标" in mode and "谈判" not in mode and "磋商" not in mode)
+
+        # 公开招标：先固定走标准 12 章节，避免把目录/公告误识别成投标文件格式章节
+        if is_zb:
+            return DEFAULT_ZB_SECTION_TITLES.copy()
+
         block = _extract_heading_block(
             tender_text,
             ["响应文件格式", "第六章 响应文件格式", "第五章 响应文件格式", "第七章 响应文件格式"],
@@ -579,19 +586,62 @@ class TenderParser:
 
         return titles or _default_section_titles(procurement_type)
 
-    def _extract_response_section_templates(self, tender_text: str, procurement_type: str) -> list[ResponseSectionTemplate]:
-        titles = self._extract_response_section_titles(tender_text, procurement_type)
-        templates: list[ResponseSectionTemplate] = []
+    def _extract_response_section_templates(self, tender_text: str, procurement_type: str):
+        mode = (procurement_type or "").strip()
+        is_zb = "公开招标" in mode or ("招标" in mode and "谈判" not in mode and "磋商" not in mode)
 
-        for title in titles:
-            m = re.match(r"^([一二三四五六七八九十]+)、(.*)$", title)
-            order_no = m.group(1) if m else ""
+        # 公开招标先走稳定骨架，避免误把目录/招标公告中的“项目基本情况”当成正文模板
+        if is_zb:
+            templates = []
+            for t in DEFAULT_ZB_SECTION_TITLES:
+                m = re.match(r"^([一二三四五六七八九十]+)、", t)
+                order_no = m.group(1) if m else ""
+                templates.append(
+                    ResponseSectionTemplate(
+                        order_no=order_no,
+                        title=t,
+                        required=True,
+                        raw_block="",
+                    )
+                )
+            return templates
+
+        block = _extract_heading_block(
+            tender_text,
+            ["响应文件格式", "第六章 响应文件格式", "第五章 响应文件格式", "第七章 响应文件格式"],
+            ["采购需求", "商务要求", "合同草案", "评审", "评分标准"],
+        )
+
+        lines = [line.rstrip() for line in block.splitlines()]
+        title_hits = []
+        for idx, line in enumerate(lines):
+            clean = re.sub(r"^第[一二三四五六七八九十]+章", "", line).strip()
+            if re.match(r"^[一二三四五六七八九十]+、", clean):
+                title_hits.append((idx, clean))
+
+        if not title_hits:
+            return [
+                ResponseSectionTemplate(
+                    order_no=(re.match(r"^([一二三四五六七八九十]+)、", t).group(1)
+                              if re.match(r"^([一二三四五六七八九十]+)、", t) else ""),
+                    title=t,
+                    required=True,
+                    raw_block="",
+                )
+                for t in _default_section_titles(procurement_type)
+            ]
+
+        templates = []
+        for i, (start_idx, title) in enumerate(title_hits):
+            end_idx = title_hits[i + 1][0] if i + 1 < len(title_hits) else len(lines)
+            raw_block = "\n".join(lines[start_idx:end_idx]).strip()
+            order_no = re.match(r"^([一二三四五六七八九十]+)、", title).group(1)
             templates.append(
                 ResponseSectionTemplate(
                     order_no=order_no,
                     title=title,
                     required=True,
-                    raw_block=title,
+                    raw_block=raw_block,
                 )
             )
         return templates
