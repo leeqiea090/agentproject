@@ -894,8 +894,9 @@ def _is_truncated_field(text: str) -> bool:
 def _check_required_new_structure(full_text: str | None, tender=None) -> list[str]:
     text = full_text or ""
 
+    tender_mode = _detect_procurement_mode_from_text("", tender=tender)
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
-    if exact_titles:
+    if tender_mode == "zb" and exact_titles:
         return [x for x in exact_titles if x not in text]
 
     mode = _detect_procurement_mode_from_text(text, tender=tender)
@@ -934,8 +935,9 @@ def _check_required_new_structure(full_text: str | None, tender=None) -> list[st
 def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[str]:
     text = full_text or ""
 
+    tender_mode = _detect_procurement_mode_from_text("", tender=tender)
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
-    if exact_titles:
+    if tender_mode == "zb" and exact_titles:
         # 对“招标文件/第六章原格式驱动”的项目，不再做 TP/CS 老结构误杀
         return []
 

@@ -701,25 +701,96 @@ def _extract_review_rows_from_tender(tender_raw: str, title_patterns: list[str],
 
 
 def _extract_invalid_bid_items(tender_raw: str) -> list[str]:
-    blocks = []
-    for anchors in ([r"投标无效[条款情形]*"], [r"响应无效[条款情形]*"], [r"其他投标无效条款"], [r"其他响应无效条款"]):
-        block = _extract_anchor_block(
-            tender_raw,
-            anchor_patterns=anchors,
-            stop_patterns=[r"评分标准", r"详细评审", r"响应文件格式", r"第[一二三四五六七八九十]+章"],
-            max_chars=6000,
-        )
-        if block:
-            blocks.append(block)
-    items: list[str] = []
-    for block in blocks:
-        for item in _merge_bullet_lines(block):
-            if any(tok in item for tok in ("审查表", "招标文件要求", "响应文件对应内容")):
-                continue
-            if len(item) >= 6 and item not in items:
-                items.append(item.rstrip("；;。") + "。")
-    return items
+    text = tender_raw or ""
+    if not text:
+        return []
 
+    def _clean(line: str) -> str:
+        s = re.sub(r"\s+", " ", (line or "")).strip(" \t\r\n|：:;；，,")
+        s = re.sub(r"^[（(]?\d+[)）]\s*", "", s)
+        s = re.sub(r"^\d+[.、]\s*", "", s)
+        s = re.sub(r"^[一二三四五六七八九十]+\s*[、.]\s*", "", s)
+        return s.strip()
+
+    def _ok(line: str) -> bool:
+        s = _clean(line)
+        if not s or len(s) < 10:
+            return False
+
+        bad = [
+            "审查表",
+            "招标文件要求",
+            "响应文件对应内容",
+            "评分办法索引",
+            "资格性检查索引",
+            "符合性检查索引",
+            "序号",
+            "注：",
+            "说明：",
+        ]
+        if any(x in s for x in bad):
+            return False
+
+        keys = [
+            "无效投标",
+            "投标无效",
+            "视为无效",
+            "按无效投标处理",
+            "按无效处理",
+            "被拒绝",
+            "不予受理",
+            "不予认可",
+            "拒绝其投标",
+        ]
+        return any(k in s for k in keys)
+
+    items: list[str] = []
+
+    # 1) 优先抓真正的规则块
+    block_patterns = [
+        r"26\.5[\s\S]{0,3000}",
+        r"本项目规定的其他无效投标情况[:：]?[\s\S]{0,2200}",
+        r"23\.2[\s\S]{0,1000}",
+        r"26\.6[\s\S]{0,1000}",
+        r"15\.3[\s\S]{0,800}",
+        r"16\.1[\s\S]{0,800}",
+        r"3\.5[\s\S]{0,800}",
+    ]
+
+    blocks: list[str] = []
+    for pat in block_patterns:
+        m = re.search(pat, text)
+        if m:
+            blocks.append(m.group(0))
+
+    # 2) 从块里只提编号条款
+    enum_pat = re.compile(
+        r"(?:^|\n)\s*[（(]?\d+[)）]\s*(.+?)(?=(?:\n\s*[（(]?\d+[)）]\s*)|\Z)",
+        re.S
+    )
+
+    for blk in blocks:
+        for m in enum_pat.finditer(blk):
+            s = _clean(m.group(1))
+            if _ok(s) and s not in items:
+                items.append(s.rstrip("；;。") + "。")
+
+    # 3) 补抓少数没有编号、但非常关键的直接规则句
+    direct_patterns = [
+        r"未按上述要求提供进口产品逐级授权的投标视为未响应招标文件实质性要求，其投标无效",
+        r"凡没有根据投标人须知第\s*15\.1\s*和\s*15\.2\s*条的规定随附投标保证金的投标，将按投标人须知第\s*23\s*条的规定视为无效投标予以拒绝",
+        r"投标有效期不满足要求的投标将被视为无效投标而予以拒绝",
+        r"投标人存在下列情况之一的，投标无效",
+        r"投标人不能证明其报价合理性的，评标委员会应当将其作为无效投标处理",
+    ]
+
+    for pat in direct_patterns:
+        for m in re.finditer(pat, text):
+            s = _clean(m.group(0))
+            if _ok(s) and s not in items:
+                items.append(s.rstrip("；;。") + "。")
+
+    return items
 
 def _extract_scoring_items(tender, tender_raw: str) -> list[str]:
     block = _extract_anchor_block(

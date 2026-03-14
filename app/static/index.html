@@ -423,7 +423,7 @@ async function fetchDownloadWithRetry(url, attempts = 3) {
       if (attempt < attempts) {
         setStatus('info', `<span class="spinner"></span>下载中断，正在发起第 ${attempt + 1} 次下载…`);
         await sleep(800 * attempt);
-        continue;
+
       }
     }
   }

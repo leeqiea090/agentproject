@@ -390,10 +390,10 @@ def _extract_zb_format_block(text: str) -> str:
         best_start = fallback_positions[-1]
 
     tail = text[best_start:]
+    # 公开招标文件的第六章里经常自带“附件”“附录”“申请表”等子块，
+    # 这些内容同样属于投标文件格式，不能在这里提前截断。
     stop_patterns = [
         re.compile(r"(?:^|\n)\s*第七章\b", re.M),
-        re.compile(r"(?:^|\n)\s*附件\b", re.M),
-        re.compile(r"(?:^|\n)\s*附录\b", re.M),
     ]
 
     stop_pos = None
@@ -436,6 +436,20 @@ def _zb_order_no_from_title(title: str, fallback_idx: int) -> str:
     if m:
         return m.group(1)
     return str(fallback_idx)
+
+
+def _cleanup_zb_template_raw_block(title: str, raw_block: str) -> str:
+    lines = [line.rstrip() for line in (raw_block or "").splitlines()]
+    if not lines:
+        return ""
+
+    removable_tail_markers = {"技术文件部分", "商务文件部分"}
+    keep_group_markers = any(token in (title or "") for token in ("投标函", "投标书"))
+
+    while len(lines) > 1 and lines[-1].strip() in removable_tail_markers and not keep_group_markers:
+        lines.pop()
+
+    return "\n".join(lines).strip()
 
 
 def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSectionTemplate]:
@@ -482,7 +496,7 @@ def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSec
     seen: set[str] = set()
     for idx, (start_idx, title) in enumerate(title_hits):
         end_idx = title_hits[idx + 1][0] if idx + 1 < len(title_hits) else len(lines)
-        raw_block = "\n".join(lines[start_idx:end_idx]).strip()
+        raw_block = _cleanup_zb_template_raw_block(title, "\n".join(lines[start_idx:end_idx]).strip())
         key = re.sub(r"\s+", "", title)
         if not raw_block or key in seen:
             continue
@@ -521,6 +535,21 @@ def _default_section_titles(procurement_type: str) -> list[str]:
         return DEFAULT_TP_SECTION_TITLES.copy()
 
     return []
+
+
+def _default_response_section_templates(procurement_type: str) -> list[ResponseSectionTemplate]:
+    templates: list[ResponseSectionTemplate] = []
+    for title in _default_section_titles(procurement_type):
+        match = re.match(r"^([一二三四五六七八九十]+)、", title)
+        templates.append(
+            ResponseSectionTemplate(
+                order_no=match.group(1) if match else "",
+                title=title,
+                required=True,
+                raw_block="",
+            )
+        )
+    return templates
 
 def _fails_package_domain_guard(item_name: str, key: str, req: str) -> bool:
     """
@@ -846,20 +875,10 @@ class TenderParser:
                 return [tpl.title for tpl in templates]
             return DEFAULT_ZB_SECTION_TITLES.copy()
 
-        block = _extract_heading_block(
-            tender_text,
-            ["响应文件格式", "第六章 响应文件格式", "第五章 响应文件格式", "第七章 响应文件格式"],
-            ["采购需求", "商务要求", "合同草案", "评审", "评分标准"],
-        )
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        titles: list[str] = []
-
-        for line in lines:
-            clean = re.sub(r"^第[一二三四五六七八九十]+章", "", line).strip()
-            if re.match(r"^[一二三四五六七八九十]+、", clean):
-                titles.append(clean)
-
-        return titles or _default_section_titles(procurement_type)
+        # 竞争性磋商/谈判当前走系统固定章节骨架，不直接复刻原文件第六章。
+        # PDF 中前文常会引用“第六章 响应文件格式”，继续向后盲提 `一、/二、...`
+        # 容易把“由于厂家赠送（奖励）因素需提供以下材料”这类说明项误收进必需章节。
+        return _default_section_titles(procurement_type)
 
     def _extract_response_section_templates(self, tender_text: str, procurement_type: str):
         mode = (procurement_type or "").strip()
@@ -871,58 +890,9 @@ class TenderParser:
             if templates:
                 return templates
 
-            fallback = []
-            for t in DEFAULT_ZB_SECTION_TITLES:
-                m = re.match(r"^([一二三四五六七八九十]+)、", t)
-                fallback.append(
-                    ResponseSectionTemplate(
-                        order_no=m.group(1) if m else "",
-                        title=t,
-                        required=True,
-                        raw_block="",
-                    )
-                )
-            return fallback
+            return _default_response_section_templates(procurement_type)
 
-        block = _extract_heading_block(
-            tender_text,
-            ["响应文件格式", "第六章 响应文件格式", "第五章 响应文件格式", "第七章 响应文件格式"],
-            ["采购需求", "商务要求", "合同草案", "评审", "评分标准"],
-        )
-
-        lines = [line.rstrip() for line in block.splitlines()]
-        title_hits = []
-        for idx, line in enumerate(lines):
-            clean = re.sub(r"^第[一二三四五六七八九十]+章", "", line).strip()
-            if re.match(r"^[一二三四五六七八九十]+、", clean):
-                title_hits.append((idx, clean))
-
-        if not title_hits:
-            return [
-                ResponseSectionTemplate(
-                    order_no=(re.match(r"^([一二三四五六七八九十]+)、", t).group(1)
-                              if re.match(r"^([一二三四五六七八九十]+)、", t) else ""),
-                    title=t,
-                    required=True,
-                    raw_block="",
-                )
-                for t in _default_section_titles(procurement_type)
-            ]
-
-        templates = []
-        for i, (start_idx, title) in enumerate(title_hits):
-            end_idx = title_hits[i + 1][0] if i + 1 < len(title_hits) else len(lines)
-            raw_block = "\n".join(lines[start_idx:end_idx]).strip()
-            order_no = re.match(r"^([一二三四五六七八九十]+)、", title).group(1)
-            templates.append(
-                ResponseSectionTemplate(
-                    order_no=order_no,
-                    title=title,
-                    required=True,
-                    raw_block=raw_block,
-                )
-            )
-        return templates
+        return _default_response_section_templates(procurement_type)
 
     def _extract_review_tables(self, tender_text: str, procurement_type: str) -> dict[str, TenderTableTemplate | None]:
         def _extract_precise_block(text: str, anchor_patterns: list[str], stop_patterns: list[str]) -> str:
@@ -950,55 +920,158 @@ class TenderParser:
 
             return tail[:stop_pos].strip() if stop_pos is not None else tail.strip()
 
-        qualification_block = _extract_precise_block(
-            tender_text,
-            [
-                r"评审方法前附表[（(]一[）)]\s*资格性检查",
-                r"资格性检查",
-                r"资格审查表",
-                r"资格性审查表",
-            ],
-            [
-                r"评审方法前附表[（(]二[）)]\s*符合性检查",
-                r"符合性检查",
-                r"符合性审查",
-                r"评分办法索引",
-                r"评分标准",
-            ],
-        )
+        def _table_headers(tpl: TenderTableTemplate | None) -> list[str]:
+            return [str(getattr(col, "title", "") or "").strip() for col in (getattr(tpl, "columns", None) or [])]
 
-        compliance_block = _extract_precise_block(
-            tender_text,
-            [
-                r"评审方法前附表[（(]二[）)]\s*符合性检查",
-                r"符合性检查索引",
-                r"符合性检查",
-                r"符合性审查表",
-                r"符合性审查",
-            ],
-            [
-                r"评分办法索引",
-                r"7\.\s*评分因素和评分标准",
-                r"评分标准",
-                r"第六章\s*投标文件格式",
-                r"第六章\s*响应文件格式",
-            ],
-        )
+        def _header_matches(tpl: TenderTableTemplate | None, expected: list[str]) -> bool:
+            headers = [re.sub(r"\s+", "", item) for item in _table_headers(tpl)]
+            target = [re.sub(r"\s+", "", item) for item in expected]
+            return headers == target
 
-        detailed_block = _extract_precise_block(
-            tender_text,
-            [
-                r"7\.\s*评分因素和评分标准",
-                r"评分标准",
-                r"评分办法索引",
-                r"详细评审",
-            ],
-            [
-                r"第六章\s*投标文件格式",
-                r"第六章\s*响应文件格式",
-                r"格式\s*1",
-            ],
+        is_zb = (
+            "公开招标" in (procurement_type or "")
+            or ("招标" in (procurement_type or "") and "谈判" not in (procurement_type or "") and "磋商" not in (procurement_type or ""))
         )
+        zb_format_block = _extract_zb_format_block(tender_text) if is_zb else ""
+
+        qualification = None
+        compliance = None
+        detailed = None
+
+        if zb_format_block:
+            qualification_block = _extract_precise_block(
+                zb_format_block,
+                [
+                    r"资格性检查索引",
+                    r"资格性审查响应对照表",
+                    r"资格性审查表",
+                    r"资格性检查",
+                    r"资格性审查",
+                ],
+                [
+                    r"符合性检查索引",
+                    r"符合性检查",
+                    r"符合性审查",
+                    r"评分办法索引",
+                    r"一、商务部分",
+                    r"格式\s*1",
+                ],
+            )
+            qualification = _parse_table_template_from_block(
+                qualification_block,
+                "资格性审查响应对照表",
+                "qualification",
+            )
+            if qualification and not _header_matches(
+                qualification,
+                ["序号", "审查内容", "合格条件", "投标文件对应页码"],
+            ):
+                qualification = None
+
+            compliance_block = _extract_precise_block(
+                zb_format_block,
+                [
+                    r"符合性检查索引",
+                    r"符合性审查响应对照表",
+                    r"符合性审查表",
+                    r"符合性检查",
+                    r"符合性审查",
+                ],
+                [
+                    r"评分办法索引",
+                    r"一、商务部分",
+                    r"格式\s*1",
+                ],
+            )
+            compliance = _parse_table_template_from_block(
+                compliance_block,
+                "符合性审查响应对照表",
+                "compliance",
+            )
+            if compliance and not _header_matches(
+                compliance,
+                ["序号", "审查内容", "合格条件", "投标文件所在页码"],
+            ):
+                compliance = None
+
+            detailed_block = _extract_precise_block(
+                zb_format_block,
+                [
+                    r"评分办法索引",
+                    r"详细评审响应对照表",
+                    r"详细评审",
+                ],
+                [
+                    r"一、商务部分",
+                    r"格式\s*1",
+                ],
+            )
+            detailed = _parse_table_template_from_block(
+                detailed_block,
+                "详细评审响应对照表",
+                "detailed",
+            )
+            if detailed and not _header_matches(
+                detailed,
+                ["序号", "内容", "评分因素分项", "评审标准", "投标文件对应页码"],
+            ):
+                detailed = None
+
+        qualification_block = ""
+        if qualification is None:
+            qualification_block = _extract_precise_block(
+                tender_text,
+                [
+                    r"评审方法前附表[（(]一[）)]\s*资格性检查",
+                    r"资格性检查",
+                    r"资格审查表",
+                    r"资格性审查表",
+                ],
+                [
+                    r"评审方法前附表[（(]二[）)]\s*符合性检查",
+                    r"符合性检查",
+                    r"符合性审查",
+                    r"评分办法索引",
+                    r"评分标准",
+                ],
+            )
+
+        compliance_block = ""
+        if compliance is None:
+            compliance_block = _extract_precise_block(
+                tender_text,
+                [
+                    r"评审方法前附表[（(]二[）)]\s*符合性检查",
+                    r"符合性检查索引",
+                    r"符合性检查",
+                    r"符合性审查表",
+                    r"符合性审查",
+                ],
+                [
+                    r"评分办法索引",
+                    r"7\.\s*评分因素和评分标准",
+                    r"评分标准",
+                    r"第六章\s*投标文件格式",
+                    r"第六章\s*响应文件格式",
+                ],
+            )
+
+        detailed_block = ""
+        if detailed is None:
+            detailed_block = _extract_precise_block(
+                tender_text,
+                [
+                    r"7\.\s*评分因素和评分标准",
+                    r"评分标准",
+                    r"评分办法索引",
+                    r"详细评审",
+                ],
+                [
+                    r"第六章\s*投标文件格式",
+                    r"第六章\s*响应文件格式",
+                    r"格式\s*1",
+                ],
+            )
 
         invalid_block = _extract_precise_block(
             tender_text,
@@ -1016,9 +1089,24 @@ class TenderParser:
             ],
         )
 
-        qualification = _parse_table_template_from_block(qualification_block, "资格性审查响应对照表", "qualification")
-        compliance = _parse_table_template_from_block(compliance_block, "符合性审查响应对照表", "compliance")
-        detailed = _parse_table_template_from_block(detailed_block, "详细评审响应对照表", "detailed")
+        if qualification is None:
+            qualification = _parse_table_template_from_block(
+                qualification_block,
+                "资格性审查响应对照表",
+                "qualification",
+            )
+        if compliance is None:
+            compliance = _parse_table_template_from_block(
+                compliance_block,
+                "符合性审查响应对照表",
+                "compliance",
+            )
+        if detailed is None:
+            detailed = _parse_table_template_from_block(
+                detailed_block,
+                "详细评审响应对照表",
+                "detailed",
+            )
         invalid_table = _parse_table_template_from_block(invalid_block, "投标无效情形汇总及自检表", "invalid")
 
         if qualification is None:

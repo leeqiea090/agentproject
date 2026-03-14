@@ -135,7 +135,10 @@ def _clean_markdown_content(section_title: str, content: str) -> str:
 
 
 def _get_fixed_table_widths(header_cells: list[str]):
-    key = tuple(header_cells)
+    def _compact(text: str) -> str:
+        return re.sub(r"\s+", "", text or "")
+
+    key = tuple(_compact(cell) for cell in header_cells)
 
     if key == ("序号", "服务名称", "磋商文件的服务需求", "响应文件响应情况", "偏离情况"):
         return [Cm(1.2), Cm(2.8), Cm(5.8), Cm(5.8), Cm(2.2)]
@@ -144,6 +147,9 @@ def _get_fixed_table_widths(header_cells: list[str]):
         return [Cm(1.0), Cm(2.2), Cm(6.0), Cm(4.8), Cm(1.8), Cm(2.0)]
 
     if key == ("序号", "审查内容", "合格条件", "投标文件所在页码"):
+        return [Cm(1.0), Cm(3.2), Cm(8.2), Cm(3.2)]
+
+    if key == ("序号", "审查内容", "合格条件", "投标文件对应页码"):
         return [Cm(1.0), Cm(3.2), Cm(8.2), Cm(3.2)]
 
     if key == ("序号", "内容", "评分因素分项", "评审标准", "投标文件对应页码"):
@@ -510,8 +516,6 @@ def _is_probable_zb_template_title(title: str) -> bool:
     s = re.sub(r"\s+", "", title or "")
     if not s:
         return False
-    if _is_bad_zb_section_title(s):
-        return False
 
     if re.match(r"^格式\s*\d+(?:-\d+)?(?:\.\d+)?", s):
         return True
@@ -538,6 +542,9 @@ def _is_probable_zb_template_title(title: str) -> bool:
     if any(word in s for word in positive_words):
         return True
 
+    if _is_bad_zb_section_title(s):
+        return False
+
     if re.match(r"^(?:7|8|9)\.\d+(?:\.\d+)?", s) and any(
         key in s for key in ("声明函", "业绩表", "授权书", "响应及偏离表", "技术方案", "证明文件", "承诺")
     ):
@@ -554,7 +561,7 @@ def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
         return False
 
     if mode != "zb":
-        return True
+        return False
 
     good_titles: list[str] = []
     seen: set[str] = set()
@@ -834,5 +841,3 @@ def build_bid_docx(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
     return output_path
-
-
