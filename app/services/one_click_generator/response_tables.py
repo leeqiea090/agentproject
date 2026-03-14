@@ -4,10 +4,10 @@ import logging
 import re
 from typing import Any
 
-import app.services.one_click_generator.common as _common
 import app.services.evidence_binder as _evidence_binder
+import app.services.one_click_generator.common as _common
 import app.services.requirement_processor as _requirement_processor
-from app.schemas import ProcurementPackage, TenderDocument
+from app.schemas import ProcurementPackage
 from app.services.evidence_binder import _extract_evidence_snippet, _is_dirty_evidence_snippet
 from app.services.one_click_generator.common import (
     _HARD_REQUIREMENT_MARKERS,

@@ -434,17 +434,34 @@ def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -
         row.cells[0].paragraphs[0].runs[0].font.bold = True
 
 
-def _required_titles_for_tender(tender=None) -> list[str]:
+def _detect_structure_mode_from_tender(tender=None, sections=None) -> str:
+    titles = [getattr(s, "section_title", "") or "" for s in (sections or [])]
     text = " ".join(
         [
             str(getattr(tender, "project_number", "") or ""),
             str(getattr(tender, "procurement_type", "") or ""),
             str(getattr(tender, "project_name", "") or ""),
+            " ".join(getattr(tender, "response_section_titles", []) or []),
+            " ".join(titles),
         ]
     )
-    is_tp = "[TP]" in text or "竞争性谈判" in text
 
-    if is_tp:
+    if "[TP]" in text or "竞争性谈判" in text:
+        return "tp"
+    if "[CS]" in text or "竞争性磋商" in text:
+        return "cs"
+    if "[ZB]" in text or "公开招标" in text or ("招标" in text and "谈判" not in text and "磋商" not in text):
+        return "zb"
+    return "unknown"
+
+def _required_titles_for_tender(tender=None) -> list[str]:
+    exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
+    if exact_titles:
+        return exact_titles
+
+    mode = _detect_structure_mode_from_tender(tender=tender)
+
+    if mode == "tp":
         return [
             "一、响应文件封面格式",
             "二、报价书",
@@ -457,19 +474,21 @@ def _required_titles_for_tender(tender=None) -> list[str]:
             "九、投标无效情形汇总及自检表",
         ]
 
-    return [
-        "一、响应文件封面格式",
-        "二、首轮报价表",
-        "三、分项报价表",
-        "四、技术偏离及详细配置明细表",
-        "五、技术服务和售后服务的内容及措施",
-        "六、法定代表人/单位负责人授权书",
-        "七、资格性审查响应对照表",
-        "八、符合性审查响应对照表",
-        "九、详细评审响应对照表",
-        "十、投标无效情形汇总及自检表",
-    ]
+    if mode == "cs":
+        return [
+            "一、响应文件封面格式",
+            "二、首轮报价表",
+            "三、分项报价表",
+            "四、技术偏离及详细配置明细表",
+            "五、技术服务和售后服务的内容及措施",
+            "六、法定代表人/单位负责人授权书",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、详细评审响应对照表",
+            "十、投标无效情形汇总及自检表",
+        ]
 
+    return []
 
 def _backfill_required_sections(sections, tender=None):
     placeholder_map = {
@@ -491,9 +510,12 @@ def _backfill_required_sections(sections, tender=None):
     }
 
     ordered = _required_titles_for_tender(tender)
-    ordered_set = set(ordered)
+    if not ordered:
+        return list(sections or [])
 
+    ordered_set = set(ordered)
     filled = []
+
     for title in ordered:
         if title in existing:
             filled.append(existing[title])
@@ -513,13 +535,18 @@ def _backfill_required_sections(sections, tender=None):
     return filled
 
 def _assert_new_structure_only(sections, tender=None) -> None:
-    titles = [getattr(s, "section_title", "") or "" for s in (sections or [])]
-    text = "\n".join(titles) + " " + str(getattr(tender, "project_number", "") or "")
+    titles = [(getattr(s, "section_title", "") or "").strip() for s in (sections or []) if (getattr(s, "section_title", "") or "").strip()]
 
-    is_tp = "[TP]" in text or "竞争性谈判" in text
-    is_cs = "[CS]" in text or "竞争性磋商" in text
+    exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
+    if exact_titles:
+        missing = [x for x in exact_titles if x not in titles]
+        if missing:
+            raise RuntimeError(f"检测到招标文件第六章/响应文件格式中的必需章节缺失: {'；'.join(missing)}")
+        return
 
-    if is_tp:
+    mode = _detect_structure_mode_from_tender(tender=tender, sections=sections)
+
+    if mode == "tp":
         required = {
             "一、响应文件封面格式",
             "二、报价书",
@@ -542,7 +569,7 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "九、详细评审响应对照表",
             "十、投标无效情形汇总及自检表",
         }
-    else:
+    elif mode == "cs":
         required = {
             "一、响应文件封面格式",
             "二、首轮报价表",
@@ -564,6 +591,9 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "六、技术偏离表",
             "七、报价书附件",
         }
+    else:
+        # 公开招标/未识别：不做 TP/CS 硬禁止，避免误杀
+        return
 
     missing = [x for x in required if x not in titles]
     hit = [x for x in titles if x in forbidden]
@@ -572,6 +602,7 @@ def _assert_new_structure_only(sections, tender=None) -> None:
         raise RuntimeError(f"检测到当前采购方式对应必需章节缺失: {'；'.join(missing)}")
     if hit:
         raise RuntimeError(f"检测到当前采购方式不应出现的章节: {'；'.join(hit)}")
+
 
 def build_bid_docx(
     sections: list[BidDocumentSection],

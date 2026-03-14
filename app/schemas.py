@@ -427,7 +427,7 @@ class TenderDocument(BaseModel):
     budget: float = Field(description="总预算金额")
     purchaser: str = Field(description="采购人")
     agency: str = Field(default="", description="代理机构")
-    procurement_type: str = Field(default="竞争性谈判", description="采购方式")
+    procurement_type: str = Field(default="", description="采购方式")
     packages: list[ProcurementPackage] = Field(default_factory=list, description="采购包列表")
     commercial_terms: CommercialTerms = Field(default_factory=CommercialTerms, description="商务条款")
     evaluation_criteria: dict[str, Any] = Field(default_factory=dict, description="评分标准")

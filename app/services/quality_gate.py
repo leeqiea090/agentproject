@@ -118,13 +118,23 @@ _TEMPLATE_POLLUTION_INFIX_KEYWORDS = (
 )
 
 def _detect_procurement_mode_from_text(full_text: str | None, tender=None) -> str:
-    text = (full_text or "") + " " + str(getattr(tender, "project_number", "") or "")
-    if "[TP]" in text or "竞争性谈判文件" in text or "采购方式 竞争性谈判" in text:
-        return "tp"
-    if "[CS]" in text or "竞争性磋商文件" in text or "采购方式 竞争性磋商" in text:
-        return "cs"
-    return "tp"
+    text = " ".join(
+        [
+            full_text or "",
+            str(getattr(tender, "project_number", "") or ""),
+            str(getattr(tender, "procurement_type", "") or ""),
+            " ".join(getattr(tender, "response_section_titles", []) or []),
+        ]
+    )
 
+    if "[TP]" in text or "竞争性谈判文件" in text or "采购方式 竞争性谈判" in text or "竞争性谈判" in text:
+        return "tp"
+    if "[CS]" in text or "竞争性磋商文件" in text or "采购方式 竞争性磋商" in text or "竞争性磋商" in text:
+        return "cs"
+    if "[ZB]" in text or "公开招标" in text or ("招标" in text and "谈判" not in text and "磋商" not in text):
+        return "zb"
+
+    return "unknown"
 
 # ── 回归指标质量阈值 ──
 _REGRESSION_THRESHOLDS = {
@@ -883,6 +893,11 @@ def _is_truncated_field(text: str) -> bool:
 
 def _check_required_new_structure(full_text: str | None, tender=None) -> list[str]:
     text = full_text or ""
+
+    exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
+    if exact_titles:
+        return [x for x in exact_titles if x not in text]
+
     mode = _detect_procurement_mode_from_text(text, tender=tender)
 
     if mode == "tp":
@@ -897,7 +912,7 @@ def _check_required_new_structure(full_text: str | None, tender=None) -> list[st
             "八、符合性审查响应对照表",
             "九、投标无效情形汇总及自检表",
         ]
-    else:
+    elif mode == "cs":
         required = [
             "一、响应文件封面格式",
             "二、首轮报价表",
@@ -910,12 +925,20 @@ def _check_required_new_structure(full_text: str | None, tender=None) -> list[st
             "九、详细评审响应对照表",
             "十、投标无效情形汇总及自检表",
         ]
+    else:
+        return []
 
     return [x for x in required if x not in text]
 
 
 def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[str]:
     text = full_text or ""
+
+    exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
+    if exact_titles:
+        # 对“招标文件/第六章原格式驱动”的项目，不再做 TP/CS 老结构误杀
+        return []
+
     mode = _detect_procurement_mode_from_text(text, tender=tender)
 
     if mode == "tp":
@@ -931,7 +954,7 @@ def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[s
             "十、投标无效情形汇总及自检表",
             "竞争性磋商文件",
         ]
-    else:
+    elif mode == "cs":
         forbidden = [
             "一、封面格式",
             "二、报价书",
@@ -942,6 +965,8 @@ def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[s
             "七、报价书附件",
             "竞争性谈判文件",
         ]
+    else:
+        return []
 
     return [x for x in forbidden if x in text]
 

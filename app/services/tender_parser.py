@@ -45,6 +45,21 @@ DEFAULT_CS_SECTION_TITLES = [
     "十、投标无效情形汇总及自检表",
 ]
 
+DEFAULT_ZB_SECTION_TITLES = [
+    "一、投标函",
+    "二、开标一览表",
+    "三、投标分项报价表",
+    "四、法定代表人授权书",
+    "五、资格证明文件",
+    "六、商务条款响应及偏离表",
+    "七、技术要求响应及偏离表",
+    "八、供货、安装调试、质量保障及售后服务方案",
+    "九、资格性审查响应对照表",
+    "十、符合性审查响应对照表",
+    "十一、详细评审响应对照表",
+    "十二、无效投标情形自检表",
+]
+
 DEFAULT_TP_SECTION_TITLES = [
     "一、响应文件封面格式",
     "二、报价书",
@@ -224,12 +239,18 @@ def _extract_heading_block(text: str, heading_keywords: list[str], stop_keywords
     match = pattern.search(text or "")
     return match.group(1).strip() if match else ""
 
-
 def _default_section_titles(procurement_type: str) -> list[str]:
-    mode = procurement_type or ""
+    mode = (procurement_type or "").strip()
+
+    if "公开招标" in mode or ("招标" in mode and "谈判" not in mode and "磋商" not in mode):
+        return DEFAULT_ZB_SECTION_TITLES.copy()
     if "磋商" in mode:
         return DEFAULT_CS_SECTION_TITLES.copy()
-    return DEFAULT_TP_SECTION_TITLES.copy()
+    if "谈判" in mode:
+        return DEFAULT_TP_SECTION_TITLES.copy()
+
+    return []
+
 def _fails_package_domain_guard(item_name: str, key: str, req: str) -> bool:
     """
     防止不同包的技术条款串包。
@@ -649,6 +670,32 @@ class TenderParser:
             "invalid_bid_table": invalid_table,
         }
 
+    def _normalize_procurement_type(self, tender_doc: TenderDocument, tender_text: str) -> TenderDocument:
+        text = " ".join(
+            [
+                tender_text or "",
+                str(getattr(tender_doc, "project_name", "") or ""),
+                str(getattr(tender_doc, "project_number", "") or ""),
+                str(getattr(tender_doc, "procurement_type", "") or ""),
+            ]
+        )
+
+        detected = getattr(tender_doc, "procurement_type", "") or ""
+
+        if "竞争性谈判文件" in text or "[TP]" in text or "竞争性谈判" in text:
+            detected = "竞争性谈判"
+        elif "竞争性磋商文件" in text or "[CS]" in text or "竞争性磋商" in text:
+            detected = "竞争性磋商"
+        elif (
+                "公开招标" in text
+                or ("招标文件" in text and "投标人须知" in text and ("评标办法" in text or "综合评分法" in text))
+        ):
+            detected = "公开招标"
+
+        if detected != (getattr(tender_doc, "procurement_type", "") or ""):
+            return tender_doc.model_copy(update={"procurement_type": detected})
+        return tender_doc
+
     def _enrich_format_templates(self, tender_doc: TenderDocument, tender_text: str) -> TenderDocument:
         section_templates = self._extract_response_section_templates(tender_text, tender_doc.procurement_type)
         review_tables = self._extract_review_tables(tender_text, tender_doc.procurement_type)
@@ -735,8 +782,11 @@ class TenderParser:
             try:
                 parsed_data = self._parse_with_llm(candidate_text)
                 tender_doc = TenderDocument(**parsed_data)
+                tender_doc = self._normalize_procurement_type(tender_doc, candidate_text)
+
                 if self._needs_technical_enrichment(tender_doc):
                     tender_doc = self._enrich_package_requirements(tender_doc, candidate_text)
+
                 tender_doc = self._enrich_package_quantities(tender_doc, candidate_text)
                 tender_doc = self._enrich_format_templates(tender_doc, candidate_text)
                 logger.info(f"成功解析招标文件: {tender_doc.project_name}（输入长度={limit}）")
@@ -772,8 +822,11 @@ class TenderParser:
         try:
             parsed_data = self._parse_with_llm(tender_text)
             tender_doc = TenderDocument(**parsed_data)
+            tender_doc = self._normalize_procurement_type(tender_doc, tender_text)
+
             if self._needs_technical_enrichment(tender_doc):
                 tender_doc = self._enrich_package_requirements(tender_doc, tender_text)
+
             tender_doc = self._enrich_package_quantities(tender_doc, tender_text)
             tender_doc = self._enrich_format_templates(tender_doc, tender_text)
             logger.info(f"成功解析招标文本: {tender_doc.project_name}")
