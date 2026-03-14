@@ -85,6 +85,98 @@ DEFAULT_TP_SECTION_TITLES = [
     "九、投标无效情形汇总及自检表",
 ]
 
+import re
+from typing import List
+
+
+_INVALID_NOISE_PATTERNS = [
+    r"否则将视为.*?废标",
+    r"否则评标时不予认可",
+    r"未提供.*?将导致.*?无效投标",
+    r"注[:：]",
+    r"说明[:：]",
+]
+
+
+def _clean_invalid_line(line: str) -> str:
+    s = re.sub(r"\s+", " ", (line or "")).strip(" \t\r\n|：:;；，,")
+    s = re.sub(r"^[（(]?\d+[)）]\s*", "", s)
+    s = re.sub(r"^\d+[.、]\s*", "", s)
+    s = re.sub(r"^[一二三四五六七八九十]+\s*[、.]\s*", "", s)
+    return s.strip()
+
+
+def _looks_like_invalid_item(line: str) -> bool:
+    s = _clean_invalid_line(line)
+    if not s or len(s) < 10:
+        return False
+    for pat in _INVALID_NOISE_PATTERNS:
+        if re.search(pat, s):
+            return False
+    keywords = [
+        "无效投标", "投标无效", "被拒绝", "视为无效", "不予受理",
+        "不予认可", "不得参加", "未按", "不符合", "拒绝其投标",
+    ]
+    return any(k in s for k in keywords)
+
+
+def _dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in items:
+        key = re.sub(r"\s+", "", x)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(x)
+    return out
+
+
+def _extract_invalid_bid_items_strict(text: str) -> List[str]:
+    text = text or ""
+    items: List[str] = []
+
+    # 一、优先抓“其他无效投标情况”和“26.5 无效投标处理”后的编号条款
+    block_patterns = [
+        r"26\.5[\s\S]{0,3000}",
+        r"本项目规定的其他无效投标情况[:：]?[\s\S]{0,2000}",
+        r"23\.2[\s\S]{0,800}",
+        r"26\.6[\s\S]{0,800}",
+        r"3\.5[\s\S]{0,500}",
+        r"15\.3[\s\S]{0,500}",
+        r"16\.1[\s\S]{0,500}",
+    ]
+
+    blocks = []
+    for pat in block_patterns:
+        m = re.search(pat, text)
+        if m:
+            blocks.append(m.group(0))
+
+    # 二、从 block 中只提枚举条款
+    enum_pat = re.compile(r"(?:^|\n)\s*[（(]?\d+[)）]\s*(.+?)(?=(?:\n\s*[（(]?\d+[)）]\s*)|\Z)", re.S)
+    for blk in blocks:
+        for m in enum_pat.finditer(blk):
+            s = _clean_invalid_line(m.group(1))
+            if _looks_like_invalid_item(s):
+                items.append(s)
+
+    # 三、补抓直接表述句
+    direct_patterns = [
+        r"未按上述要求提供进口产品逐级授权的投标视为未响应招标文件实质性要求，其投标无效",
+        r"凡没有根据投标人须知第 15\.1 和 15\.2 条的规定随附投标保证金的投标，将按投标人须知第 23 条的规定视为无效投标予以拒绝",
+        r"投标有效期不满足要求的投标将被视为无效投标而予以拒绝",
+        r"投标人存在下列情况之一的，投标无效",
+        r"投标人不能证明其报价合理性的，评标委员会应当将其作为无效投标处理",
+    ]
+    for pat in direct_patterns:
+        for m in re.finditer(pat, text):
+            s = _clean_invalid_line(m.group(0))
+            if _looks_like_invalid_item(s):
+                items.append(s)
+
+    return _dedupe_preserve_order(items)
+
 def _normalize_table_key(title: str, idx: int) -> str:
     title = re.sub(r"\s+", "", title or "")
     mapping = {

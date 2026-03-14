@@ -1,0 +1,1109 @@
+"""公开招标格式驱动章节生成。"""
+from __future__ import annotations
+
+from .common import *  # noqa: F401,F403
+def _normalized_title_key(title: str) -> str:
+    s = re.sub(r"\s+", "", title or "")
+    s = s.replace("（格式）", "").replace("(格式)", "")
+    return s
+
+
+def _dedupe_zb_entries(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for title, raw in entries:
+        key = _normalized_title_key(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append((title, raw))
+    return out
+
+
+def _looks_like_safe_zb_template_title(title: str) -> bool:
+    s = _normalized_title_key(title)
+    if not s:
+        return False
+    if _is_bad_zb_template_title(s):
+        return False
+
+    if re.match(r"^格式\s*\d+(?:-\d+)?(?:\.\d+)?", s):
+        return True
+
+    positive = (
+        "投标函",
+        "开标一览表",
+        "投标分项报价表",
+        "投标保证金说明函",
+        "授权书",
+        "投标人一般情况表",
+        "类似项目业绩表",
+        "中小企业声明函",
+        "残疾人福利性单位声明函",
+        "节能环保材料",
+        "采购需求响应及偏离表",
+        "技术要求响应及偏离表",
+        "技术支持资料",
+        "其他技术方案",
+        "制造商授权书",
+        "售后服务承诺书",
+        "招标代理服务费承诺",
+    )
+    if any(word in s for word in positive):
+        return True
+
+    if re.match(r"^(?:7|8|9)\.\d+(?:\.\d+)?", s) and any(
+        k in s for k in ("声明函", "业绩表", "授权书", "响应及偏离表", "技术方案", "证明文件", "承诺")
+    ):
+        return True
+
+    return False
+
+
+def _strip_leading_compound_index(text: str) -> str:
+    s = _clean_text(text or "")
+    if not s:
+        return ""
+    return re.sub(r"^(?:\d+(?:\.\d+)?\s*/\s*){1,6}", "", s).strip()
+
+
+def _extract_invalid_clauses(text: str) -> list[str]:
+    s = _strip_leading_compound_index(_clean_text(text or ""))
+    if not s:
+        return []
+    s = re.sub(r"\s+", " ", s)
+
+    patterns = [
+        r"未按上述要求[^。；\n]{0,140}(?:投标无效|视为未响应[^。；\n]{0,40}|被拒绝|不予认可)",
+        r"未按[^。；\n]{0,140}(?:投标无效|无效投标|被拒绝|不予认可|废标)",
+        r"否则[^。；\n]{0,140}(?:投标无效|无效投标|被拒绝|不予认可|废标)",
+        r"任何一条不满足[^。；\n]{0,120}(?:废标|无效)",
+        r"最低得分[^。；\n]{0,120}(?:无效响应处理|予以拒绝|无效)",
+        r"报价明显低于[^。；\n]{0,180}(?:无效投标|予以拒绝|不再进入后续评审)",
+        r"以可调整价格[^。；\n]{0,120}(?:无效投标|予以拒绝)",
+        r"不符合上述合格投标人资格要求[^。；\n]{0,80}(?:无效投标|拒绝)",
+        r"没有根据[^。；\n]{0,140}(?:无效投标|拒绝)",
+        r"投标有效期不满足要求[^。；\n]{0,60}(?:无效投标|拒绝)",
+        r"提交或参与了一个以上投标[^。；\n]{0,100}(?:无效)",
+        r"未提供[^。；\n]{0,120}(?:无效投标|视为无效投标|被视为无效投标)",
+        r"其投标无效",
+        r"不予认可",
+    ]
+
+    out: list[str] = []
+    for pat in patterns:
+        for m in re.finditer(pat, s):
+            frag = _clean_text(m.group(0)).strip("；;。 ")
+            if not frag:
+                continue
+            if frag == "其投标无效":
+                continue
+            if frag == "不予认可":
+                continue
+            out.append(frag)
+
+    # 技术评分段常见独立否决句补抓
+    for sent in re.split(r"[。；\n]+", s):
+        sent = _clean_text(sent)
+        if not sent:
+            continue
+        if any(k in sent for k in ("任何一条不满足将导致废标", "最低得分为 0 分时将按照无效响应处理", "最低得分为0分时将按照无效响应处理")):
+            out.append(sent)
+
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for item in out:
+        item = re.sub(r"\s+", " ", item).strip("；;。 ")
+        if not item or len(item) < 8:
+            continue
+        if item in seen:
+            continue
+        seen.add(item)
+        cleaned.append(item[:180] + ("…" if len(item) > 180 else ""))
+    return cleaned
+
+
+def _looks_like_invalid_reason(text: str) -> bool:
+    s = _clean_text(text or "")
+    if not s or len(s) < 8:
+        return False
+    noise = ("评分办法索引", "资格性检查索引", "符合性检查索引", "项目编号", "预算金额", "联系方式", "通讯地址", "设备配置及参数清单")
+    if any(x in s for x in noise):
+        return False
+    return any(k in s for k in ("投标无效", "无效投标", "废标", "被拒绝", "不予认可", "视为未响应", "视为无效", "予以拒绝"))
+
+
+def _extract_invalid_candidate_sentences(tender_raw: str) -> list[str]:
+    text = tender_raw or ""
+    if not text:
+        return []
+
+    anchor_patterns = [
+        r"2\.1[^\n。；]{0,80}无效投标",
+        r"3\.5[^\n。；]{0,40}合格的货物及其有关服务",
+        r"10\.1[^\n。；]{0,40}提交或参与了一个以上投标",
+        r"11\.5[^\n。；]{0,40}可调整",
+        r"15\.3[^\n。；]{0,40}投标保证金",
+        r"16\.1[^\n。；]{0,40}投标有效期",
+        r"26\.5[^\n。；]{0,40}其他无效投标情况",
+        r"技术规格要求的响应程度",
+        r"腐败和欺诈行为",
+    ]
+
+    blocks: list[str] = []
+    for pat in anchor_patterns:
+        for m in re.finditer(pat, text):
+            blocks.append(text[m.start(): m.start() + 1200])
+
+    out: list[str] = []
+    for block in blocks:
+        out.extend(_extract_invalid_clauses(block))
+
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for item in out:
+        if item in seen:
+            continue
+        seen.add(item)
+        cleaned.append(item)
+    return cleaned
+
+
+
+def _is_headerish_review_text(text: str) -> bool:
+    s = re.sub(r"\s+", "", text or "")
+    if not s:
+        return True
+
+    bad_markers = (
+        "序号/审查内容/合格条件",
+        "序号/内容/评分因素分项/评审标准",
+        "序号/无效投标情形/自检结果/备注",
+        "序号/审查项/采购文件要求/响应文件对应内容/是否满足/备注",
+        "资格性检查",
+        "资格性审查",
+        "符合性检查",
+        "符合性审查",
+        "评分办法索引",
+        "评审方法前附表",
+        "投标文件所在页码",
+        "投标文件对应页码",
+    )
+    if any(x in s for x in bad_markers):
+        return True
+
+    if s in {"序号", "审查内容", "合格条件", "评分标准", "评审标准", "内容"}:
+        return True
+
+    return False
+
+
+def _split_compound_fields(text: str) -> list[str]:
+    s = _clean_text(text or "")
+    if not s:
+        return []
+
+    parts = [p.strip() for p in re.split(r"\s*/\s*|[｜|]", s) if p.strip()]
+
+    # 去掉前置序号，如：1 / 投标人名称 / 与营业执照一致
+    while parts and re.fullmatch(r"\d+(?:\.\d+)?", parts[0]):
+        parts = parts[1:]
+
+    return parts
+
+
+def _looks_like_detailed_review_item(text: str) -> bool:
+    s = _clean_text(text or "")
+    if not s:
+        return False
+
+    noise = (
+        "品名",
+        "规格型号",
+        "生产厂家",
+        "成交总价",
+        "设备配置及参数清单",
+        "设备所属科室",
+        "项目编号",
+        "数量",
+        "单价",
+        "合计（元）",
+        "含税价",
+    )
+    if any(x in s for x in noise):
+        return False
+
+    good = (
+        "价格",
+        "商务",
+        "技术",
+        "业绩",
+        "包装运输",
+        "售后",
+        "质量保障",
+        "服务保障",
+        "节能",
+        "环保",
+        "评分",
+        "评标价格",
+    )
+    return ("分" in s) or any(x in s for x in good)
+
+
+def _looks_like_detailed_review_rule(text: str) -> bool:
+    s = _clean_text(text or "")
+    if not s:
+        return False
+    if s in {"单位", "数量", "1台"}:
+        return False
+
+    noise = (
+        "品名",
+        "规格型号",
+        "生产厂家",
+        "成交总价",
+        "设备配置及参数清单",
+        "设备所属科室",
+        "项目编号",
+    )
+    if any(x in s for x in noise) and "分" not in s:
+        return False
+
+    good = ("得", "分", "扣", "评分", "评审", "不得分", "满分", "响应", "废标", "否决")
+    return any(x in s for x in good)
+
+
+def _normalize_detailed_review_pair(item_name: str, rule: str) -> tuple[str, str] | None:
+    item_name = _clean_text(item_name or "")
+    rule = _clean_text(rule or "")
+    parts = _split_compound_fields(item_name)
+
+    # 例：1 / 价格部分 / 评标价格（30分） / 具体评分规则
+    if len(parts) >= 3:
+        candidate_name = " / ".join(parts[:2])
+        candidate_rule = " / ".join(parts[2:])
+        if not rule or rule in {"单位", "数量", "1台"} or len(rule) < 6:
+            rule = candidate_rule
+        item_name = candidate_name
+    elif len(parts) >= 2 and (not rule or len(rule) < 6):
+        item_name = parts[0]
+        rule = " / ".join(parts[1:])
+
+    item_name = re.sub(r"^\d+\s*/\s*", "", item_name).strip()
+
+    if not _looks_like_detailed_review_item(item_name):
+        return None
+    if not _looks_like_detailed_review_rule(rule):
+        return None
+    return item_name, rule
+
+
+def _pick_review_item_rule(item: dict) -> tuple[str, str] | None:
+    raw_left = _clean_text(
+        item.get("review_item")
+        or item.get("审查项")
+        or item.get("评审项目")
+        or item.get("评分项目")
+        or item.get("_source_text")
+        or ""
+    )
+    raw_right = _clean_text(
+        item.get("tender_requirement")
+        or item.get("采购文件要求")
+        or item.get("招标文件要求")
+        or item.get("合格条件")
+        or item.get("score_rule")
+        or item.get("评审标准")
+        or item.get("评分标准")
+        or item.get("采购文件评分要求")
+        or ""
+    )
+
+    if _is_headerish_review_text(raw_left) or _is_headerish_review_text(raw_right):
+        return None
+
+    # 先按“详细评审表”专用规则尝试标准化
+    detailed_pair = _normalize_detailed_review_pair(raw_left, raw_right)
+    if detailed_pair:
+        return detailed_pair
+
+    # 再走普通资格/符合性表逻辑
+    if raw_left and raw_right and raw_left != raw_right:
+        return raw_left, raw_right
+
+    parts = _split_compound_fields(raw_left or raw_right)
+    if len(parts) >= 2:
+        left = " / ".join(parts[:-1])
+        right = parts[-1]
+        if _is_headerish_review_text(left) or _is_headerish_review_text(right):
+            return None
+        return left, right
+
+    return None
+
+
+
+
+def _build_zb_service_section(tender, package_index: int = 1) -> str:
+    project_name = getattr(tender, "project_name", "") or "本项目"
+
+    parts = []
+
+    parts.append(
+        "一、供货组织实施方案\n"
+        f"针对{project_name}，我方拟成立专项供货实施小组，设置项目负责人、商务联络、物流协调、安装调试工程师、培训工程师、售后支持人员等岗位，形成“合同签订—备货验货—发运配送—到货验收—安装调试—培训交付—质保服务”全流程闭环。\n\n"
+        "项目实施原则：\n"
+        "1. 按招标文件及合同要求组织供货，确保供货内容、品牌、型号、配置与投标响应一致；\n"
+        "2. 对关键节点实行责任到人、进度到天、问题到单的过程管理；\n"
+        "3. 对运输、安装、调试、验收、培训、售后服务实行全过程留痕管理，便于采购人复核。"
+    )
+
+    parts.append(
+        "二、供货进度计划表\n\n"
+        + _md_table(
+            ["阶段", "工作内容", "计划时长", "输出成果", "责任人"],
+            [
+                ["1", "合同签订、项目启动", "1日", "项目启动确认", "项目负责人"],
+                ["2", "备货、出厂检验、资料整理", "3-7日", "设备/随机资料/清单", "供货负责人"],
+                ["3", "包装、运输、保险、发运", "3-5日", "发货通知、物流单据", "物流协调人员"],
+                ["4", "到货开箱点验", "1日", "到货验收记录", "项目负责人/采购人"],
+                ["5", "安装调试", "1-3日", "安装调试记录", "安装工程师"],
+                ["6", "操作培训", "1日", "培训签到及培训记录", "培训工程师"],
+                ["7", "试运行及履约验收", "按采购人要求", "验收资料、验收单", "项目负责人"],
+            ],
+        )
+    )
+
+    parts.append(
+        "三、包装与运输方案\n"
+        "1. 包装要求：设备采用原厂标准包装或不低于原厂标准的加固包装，做到防潮、防震、防撞、防雨、防锈；\n"
+        "2. 外包装标识：外包装清晰标注项目名称、设备名称、型号规格、数量、收货单位、收货地址、重心方向、轻放防潮等运输标识；\n"
+        "3. 发运管理：发货前再次复核设备名称、型号、数量、附件、随机文件，确保账、物、单一致；\n"
+        "4. 运输保障：根据设备特性合理选择运输工具及路线，对关键设备采取重点防护措施；\n"
+        "5. 到货交接：到货后由双方共同进行外观检查、数量核对、箱单核对、附件点验。"
+    )
+
+    parts.append(
+        "四、配货单样本\n\n"
+        + _md_table(
+            ["序号", "货物名称", "品牌/型号", "数量", "包装箱号", "随机附件/资料", "备注"],
+            [
+                ["1", "流式细胞仪主机", "【待填写】", "1台", "【待填写】", "主机资料、合格证", "【待填写】"],
+                ["2", "配套附件", "【待填写】", "【待填写】", "【待填写】", "装箱清单", "【待填写】"],
+                ["3", "随机软件/授权资料", "【待填写】", "【待填写】", "【待填写】", "授权文件", "【待填写】"],
+            ],
+        )
+    )
+
+    parts.append(
+        "五、安装调试方案\n"
+        "1. 安装前确认：提前与采购人确认安装场地、电源条件、环境条件、网络条件及配套要求；\n"
+        "2. 到货开箱：按装箱清单逐项核对设备、附件、资料；\n"
+        "3. 安装实施：由具备经验的技术工程师完成设备安装、连接、初始化配置；\n"
+        "4. 调试测试：完成开机测试、功能测试、性能测试，并记录调试结果；\n"
+        "5. 问题处理：安装调试中发现异常时，第一时间定位原因并提出整改措施，确保设备具备正式交付条件。"
+    )
+
+    parts.append(
+        "六、质量保障措施及方案\n"
+        "我方针对本项目建立全过程质量控制机制，覆盖备货、出库、包装、运输、安装、调试、培训、验收等环节。\n\n"
+        "质量控制要点：\n"
+        "1. 供货前复核设备配置、技术参数及随机资料，确保与投标响应文件一致；\n"
+        "2. 出库前进行外观检查、数量核对、资料校验；\n"
+        "3. 安装调试后进行功能验证并形成记录；\n"
+        "4. 配合采购人进行履约验收，并按照要求提交完整验收资料。"
+    )
+
+    parts.append(
+        "七、验收资料清单\n\n"
+        + _md_table(
+            ["序号", "资料名称", "是否提供", "备注"],
+            [
+                ["1", "产品合格证/出厂检验资料", "【待填写】", "【待填写】"],
+                ["2", "装箱清单/配货单", "【待填写】", "【待填写】"],
+                ["3", "安装调试记录", "【待填写】", "【待填写】"],
+                ["4", "培训记录", "【待填写】", "【待填写】"],
+                ["5", "使用说明书/维护手册", "【待填写】", "【待填写】"],
+                ["6", "售后服务联系方式", "【待填写】", "【待填写】"],
+                ["7", "验收所需其他资料", "【待填写】", "【待填写】"],
+            ],
+        )
+    )
+
+    parts.append(
+        "八、售后及其他伴随服务方案\n"
+        "1. 在质保期内提供技术支持、维修维护、故障响应、备件保障等服务；\n"
+        "2. 提供现场安装培训和后续技术咨询服务；\n"
+        "3. 对采购人提出的使用问题及时响应并形成处理闭环；\n"
+        "4. 对需要返修、更换的部件，按合同及承诺要求执行。"
+    )
+
+    parts.append(
+        "九、服务保障承诺\n"
+        "1. 严格按照合同签订后30日内完成交货；\n"
+        "2. 严格按照投标文件承诺的配置、参数和服务内容履约；\n"
+        "3. 在接到采购人通知后及时安排专业人员响应；\n"
+        "4. 配合采购人完成安装、调试、培训、验收及后续服务工作；\n"
+        "5. 对项目实施全过程形成书面记录，便于追溯和复核；\n"
+        "6. 质保期内提供持续、稳定、可执行的售后服务。"
+    )
+
+    return "\n\n".join(parts)
+
+def _normalize_procurement_terms_for_zb(text: str) -> str:
+    if not text:
+        return text
+    text = text.replace("谈判文件", "招标文件")
+    text = text.replace("磋商文件", "招标文件")
+    text = text.replace("响应文件", "投标文件")
+    text = text.replace("磋商小组", "评标委员会")
+    return text
+
+
+def _build_zb_technical_response_table(tender, pkg, tender_raw: str) -> str:
+    headers = [
+        "招标文件条目号",
+        "招标文件采购需求的内容与数值",
+        "投标人的技术响应内容与数值",
+        "技术响应偏差说明",
+        "技术支持资料（或证明材料）说明",
+    ]
+
+    project_name = getattr(tender, "project_name", "") or "【待填写：项目名称】"
+    project_no = (
+        getattr(tender, "project_number", "")
+        or getattr(tender, "project_no", "")
+        or "【待填写：招标编号】"
+    )
+
+    rows = [[
+        "【待填写】",
+        "【待按招标文件第五章逐条填写，不得照抄招标要求原文】",
+        "【待填写：投标产品实际响应内容与具体参数数值】",
+        "【待填写：无偏离/正偏离/负偏离】",
+        "【待填写：证明材料名称 + 所在页码/位置】",
+    ]]
+
+    return "\n".join([
+        "格式 8.采购需求响应及偏离表（按招标文件格式填写）",
+        f"项目名称：{project_name}",
+        f"招标编号：{project_no}",
+        f"品目号：{getattr(pkg, 'package_id', '【待填写】')}",
+        _md_table(headers, rows),
+        "",
+        "注：",
+        "1、投标人应对招标文件第五章采购需求的内容给予逐条响应，以投标产品和服务所能达到的内容予以填写，而不应复制招标的技术要求作为响应内容；有具体参数的应填写具体参数。",
+        "2、投标人应按照招标文件第五章采购需求中要求提供投标产品技术支持资料（或证明材料），并在采购需求响应及偏离表中给予文件名称、所处投标文件页码或位置等必要说明。",
+        "投标人名称：                        （加盖单位公章）",
+        "法定代表人：                        (签字盖章)",
+        "授权代表:                           (签字)",
+        "日期：                              ",
+    ])
+
+
+def _title_has_any(title: str, keywords: tuple[str, ...]) -> bool:
+    s = re.sub(r"\s+", "", title or "")
+    return any(k in s for k in keywords)
+
+
+def _is_bad_zb_template_title(title: str) -> bool:
+    s = re.sub(r"\s+", "", title or "")
+    if not s:
+        return True
+
+    bad_words = (
+        "项目基本情况",
+        "招标公告",
+        "投标人须知",
+        "评标办法",
+        "合同条款",
+        "采购需求",
+        "目录",
+        "评审索引",
+        "资格性检查索引",
+        "符合性检查索引",
+        "评分办法索引",
+    )
+    return any(x in s for x in bad_words)
+
+
+def _zb_default_entries() -> list[tuple[str, str]]:
+    return [
+        ("一、投标函", ""),
+        ("二、开标一览表", ""),
+        ("三、投标分项报价表", ""),
+        ("四、法定代表人授权书", ""),
+        ("五、资格证明文件", ""),
+        ("六、商务条款响应及偏离表", ""),
+        ("七、技术要求响应及偏离表", ""),
+        ("八、供货、安装调试、质量保障及售后服务方案", ""),
+        ("九、资格性审查响应对照表", ""),
+        ("十、符合性审查响应对照表", ""),
+        ("十一、详细评审响应对照表", ""),
+        ("十二、无效投标情形自检表", ""),
+    ]
+
+
+def _build_zb_bid_letter(tender) -> str:
+    project_name = getattr(tender, "project_name", "") or "【待填写：项目名称】"
+    project_no = getattr(tender, "project_no", "") or "【待填写：项目编号】"
+
+    return "\n".join([
+        "致：北京典方建设工程咨询有限公司",
+        f"根据贵方为 {project_name} 的投标邀请（招标编号 {project_no}），签字代表经正式授权并代表投标人提交投标文件。",
+        "提交文件包括：",
+        "1. 商务文件部分",
+        "（1）投标函",
+        "（2）开标一览表",
+        "（3）投标分项报价表",
+        "（4）投标保证金说明函/投标保证金凭证",
+        "（5）法定代表人授权书",
+        "（6）商务条款响应及偏离表",
+        "（7）投标人一般情况表及相关证明文件",
+        "（8）类似项目业绩表",
+        "2. 技术文件部分",
+        "（1）采购需求响应及偏离表",
+        "（2）招标文件第五章“采购需求”规定的其他技术响应文件",
+        "据此函，签字代表宣布同意如下：",
+        "1. 投标人递交了投标文件，即意味着接受开标前的招标程序和招标的相应安排。",
+        "2. 后附“开标一览表”中所涉及的货物和服务为我方参加此次投标响应的全部范围。",
+        "3. 投标人将按招标文件的规定履行合同责任和义务。",
+        "4. 我方已详细审阅全部招标文件及有关澄清、修改文件。",
+        "5. 我方保证所提交的全部资料真实、准确、完整。",
+        "",
+        "投标人名称：________________（盖章）",
+        "法定代表人或授权代表：________________（签字）",
+        "日期：________________",
+    ])
+
+
+def _zb_required_template_titles() -> list[str]:
+    return [
+        "格式 3投标分项报价表（格式）",
+        "格式 4.投标保证金说明函（格式）",
+        "格式 5.法定代表人授权书(格式)",
+        "格式 6.商务条款偏离表",
+        "格式 7.投标人一般情况表（格式）",
+        "7.11类似项目业绩表（格式自拟）",
+        "7.12制造商授权书（格式自拟）",
+        "格式 8.采购需求响应及偏离表（格式）",
+        "格式 9.第五章规定的证明文件和其他技术方案",
+    ]
+
+def _get_zb_template_entries(tender) -> list[tuple[str, str]]:
+    templates = getattr(tender, "response_section_templates", []) or []
+    entries: list[tuple[str, str]] = []
+
+    for tpl in templates:
+        title = (getattr(tpl, "title", "") or "").strip()
+        raw_block = (getattr(tpl, "raw_block", "") or "").strip()
+
+        if not title:
+            continue
+        if not _looks_like_safe_zb_template_title(title):
+            continue
+
+        entries.append((title, raw_block))
+
+    entries = _dedupe_zb_entries(entries)
+
+    # 公开招标：只要已经抽到至少 3 个真实模板标题，就以原模板为主；
+    # 缺失的评审表/方案章节由 _build_zb_sections() 末尾补齐，不再整包回退默认十二章。
+    if len(entries) >= 3:
+        return entries
+
+    return _zb_default_entries()
+
+
+def _zb_render_raw_template(raw_block: str, note: str | None = None) -> str:
+    raw = (raw_block or "").strip()
+    if not raw:
+        return ""
+    if note:
+        return f"{raw}\n\n{note}"
+    return raw
+
+def _build_zb_quote_summary_table(tender, packages, tender_raw: str) -> str:
+    headers = ["包号", "货物名称", "数量", "投标报价（元）", "交货期", "交货地点"]
+    rows: list[list[str]] = []
+
+    for pkg in packages:
+        rows.append([
+            str(pkg.package_id),
+            pkg.item_name,
+            _extract_package_quantity(pkg, tender_raw),
+            "【待填写】",
+            _extract_delivery_time(pkg, tender_raw),
+            _extract_delivery_place(pkg, tender_raw),
+        ])
+
+    return (
+        f"项目名称：{tender.project_name}\n"
+        f"项目编号：{tender.project_number}\n\n"
+        f"{_md_table(headers, rows)}\n\n"
+        "供应商全称：【待填写：投标人名称】\n"
+        "日期：【待填写：年 月 日】"
+    )
+
+
+def _build_zb_detailed_review_section(tender, package_index: int = 1) -> str:
+    tpl = None
+    templates = getattr(tender, "review_table_templates", None) or {}
+    tpl = templates.get("detailed")
+
+    rows_data = [
+        ["1", "价格", "评标价格（30分）", "小型和微型企业产品的投标报价在计算报价得分时, 投标报价下浮10%进入报价分计算。(需提供声明函加盖公章并符合相关规定）（小、微企业须按照财库﹝2020﹞46号和财库〔2022〕19号文件的规定提供加盖公章的《中小企业声明函》）\n\n报价得分=（评标基准价/投标报价）*30*100%（即满足招标文件要求且最终报价最低的为评标基准价，其价格分为满分）"],
+        ["2", "商务", "业绩（2分）", "近三年（2022年至今，投标截止日为期，以签订时间为准）类似项目业绩，每有一项得1分，满分2分。（投标文件内附合同或中标通知书复印件并加盖公章）"],
+        ["3", "技术", "对招标文件技术规格要求的响应程度（29分）", "投标文件技术规格响应全部满足招标文件技术要求的得29分，其中有1项重要条款（“▲”号条款）不满足的扣2分；有1项一般条款（非★条款或者“▲”号条款）不满足的，扣1分。采购需求中标注“★”号技术参数为实质性条款，必须逐条进行响应，任何一条不满足将导致废标。"],
+        ["4", "技术", "包装运输方案（12分）", "运输方案完整、全面，包装严密、防水，外层包装标记清晰、详细，并配有详细配货单（提供配货单样本）的得12分；运输方案较为完整、全面，包装较为严密，防水，外层包装标记简单，配有相应的配货单但内容简单的得6分；运输方案一般，包装简单、不能防水，外层包装没有标记，配有相应的配货单但内容不全或未配有配货单的得2分；未提供包装运输方案的不得分。"],
+        ["5", "技术", "售后及其他伴随服务（8分）", "根据投标人针对本项目提供的售后及其他伴随服务方案进行综合评比。"],
+        ["6", "技术", "质量保障措施及方案（12分）", "结合本项目具体情况，拟定质量保障措施及方案，包括但不限于交货进度、安装调试、履约验收的相关内容。根据各投标人提供方案的完整性、合理性、可行性，横向比较。"],
+        ["7", "技术", "服务保障承诺（6分）", "对各投标人针对本项目提供的服务保障承诺进行综合评比，各项服务保障承诺满足或高于本项目要求且切实可行，每提供一条得1分，满分6分。"],
+        ["8", "节能环保", "政府采购节约能源、环境保护评分（1分）", "政府采购的强制采购产品除外：（1）节能产品认证证书得0.5分；（2）环境标志产品认证证书得0.5分。"],
+    ]
+
+    if tpl:
+        headers = _tpl_header_titles(tpl)
+
+        if _same_headers(headers, ["序号", "内容", "评分因素分项", "评审标准", "投标文件对应页码"]):
+            rows = [[r[0], r[1], r[2], r[3], "【待填写：页码】"] for r in rows_data]
+            return "详细评审响应对照表\n" + _render_table_with_headers(headers, rows)
+
+        if _same_headers(headers, ["序号", "评分项目", "评审标准", "响应内容对应位置", "响应说明", "页码"]):
+            rows = [[f"{r[1]} 部分 / {r[2]}", r[3], "【待填写：对应章节/材料】", "【待填写：如何满足该评分项】", "【待填写：页码】"] for r in rows_data]
+            rows = [[str(i + 1)] + row for i, row in enumerate(rows)]
+            return "详细评审响应对照表\n" + _render_table_with_headers(headers, rows)
+
+    headers = ["序号", "评分项目", "评审标准", "响应内容对应位置", "响应说明", "页码"]
+    rows = []
+    for i, r in enumerate(rows_data, start=1):
+        rows.append([str(i), f"{r[1]} 部分 / {r[2]}", r[3], "【待填写：对应章节/材料】", "【待填写：如何满足该评分项】", "【待填写：页码】"])
+    return "详细评审响应对照表\n" + _render_table_with_headers(headers, rows)
+
+def _build_zb_itemized_quote_table(tender, packages, tender_raw: str) -> str:
+    headers = ["包号", "货物名称", "数量", "单价（元）", "总价（元）", "备注"]
+    rows: list[list[str]] = []
+
+    for pkg in packages:
+        rows.append([
+            str(pkg.package_id),
+            pkg.item_name,
+            _extract_package_quantity(pkg, tender_raw),
+            "【待填写】",
+            "【待填写】",
+            "【待填写】",
+        ])
+
+    return (
+        f"项目名称：{tender.project_name}\n"
+        f"项目编号：{tender.project_number}\n\n"
+        f"{_md_table(headers, rows)}\n\n"
+        "说明：如招标文件第六章有更细分项，应继续按原格式补列，不得删列。\n"
+        "供应商全称：【待填写：投标人名称】\n"
+        "日期：【待填写：年 月 日】"
+    )
+
+
+def _build_zb_business_deviation_table(tender, packages, tender_raw: str) -> str:
+    headers = ["序号", "商务条款", "招标文件要求", "响应情况", "偏离说明"]
+    ct = getattr(tender, "commercial_terms", None)
+
+    rows = [
+        ["1", "交货期", "；".join(f"包{p.package_id}：{_extract_delivery_time(p, tender_raw)}" for p in packages), "【待填写】", "【待填写：无偏离/正偏离/负偏离】"],
+        ["2", "交货地点", "；".join(f"包{p.package_id}：{_extract_delivery_place(p, tender_raw)}" for p in packages), "【待填写】", "【待填写】"],
+        ["3", "投标有效期", getattr(ct, "validity_period", "") or "【待填写】", "【待填写】", "【待填写】"],
+        ["4", "付款方式", getattr(ct, "payment_method", "") or "【待填写】", "【待填写】", "【待填写】"],
+        ["5", "质保期", getattr(ct, "warranty_period", "") or "【待填写】", "【待填写】", "【待填写】"],
+        ["6", "履约保证金", getattr(ct, "performance_bond", "") or "【待填写】", "【待填写】", "【待填写】"],
+    ]
+
+    return _md_table(headers, rows)
+
+
+def _build_zb_bid_bond_letter(tender) -> str:
+    agency_name = (
+        getattr(tender, "agency", "")
+        or getattr(tender, "purchaser", "")
+        or "采购代理机构"
+    )
+    project_no = getattr(tender, "project_number", "") or "【待填写】"
+
+    return f"""
+格式 4.投标保证金说明函（格式）
+
+致：{agency_name}
+招标编号：{project_no}
+
+1、投标保证金金额（大写）：【待填写】元，以【待填写：电汇/保函等】方式支付。
+2、在担保期内，采购人或采购代理机构可依据招标文件关于投标保证金没收情形的规定处理本保证金。
+3、后附投标保证金递交凭据及基本账户开户许可证（或《基本存款账户信息》）复印件并加盖公章。
+
+投标人名称：                       （加盖单位公章）
+法定代表人或授权代表：              （签字）
+日期：                              
+""".strip()
+
+def _tpl_header_titles(tpl) -> list[str]:
+    cols = getattr(tpl, "columns", None) or []
+    out = []
+    for c in cols:
+        title = str(getattr(c, "title", "") or "").strip()
+        if title:
+            out.append(title)
+    return out
+
+
+def _norm_title(s: str) -> str:
+    return "".join(str(s or "").split())
+
+
+def _same_headers(actual: list[str], expected: list[str]) -> bool:
+    if len(actual) != len(expected):
+        return False
+    return [_norm_title(x) for x in actual] == [_norm_title(x) for x in expected]
+
+
+def _render_table_with_headers(headers: list[str], rows: list[list[str]]) -> str:
+    return _md_table(headers, rows)
+
+
+
+
+def _build_zb_general_info_table(tender) -> str:
+    headers = ["项目", "内容"]
+    rows = [
+        ["投标人全称", "【待填写】"],
+        ["供应商性质", "【待填写，并附相关证明材料】"],
+        ["法定代表人或负责人姓名", "【待填写】"],
+        ["联系人、联系方式、办公地址", "【待填写】"],
+        ["基本开户银行名称", "【待填写】"],
+        ["良好的商业信誉和健全的财务会计制度", "【待填写，并附财务审计报告或资信证明】"],
+        ["具有履行合同所必需的设备和专业技术能力", "【待填写，并附证明材料或说明】"],
+        ["依法缴纳税收和社会保障资金", "【待填写，并附证明材料】"],
+        ["参加政府采购活动前3年内在经营活动中没有重大违法记录", "【待填写，并附书面声明】"],
+    ]
+    return "\n".join([
+        "格式 7.投标人一般情况表（格式）",
+        f"招标编号：{tender.project_number or '【待填写】'}",
+        _md_table(headers, rows),
+        "注：表后须按招标文件要求附营业执照、财务/资信、纳税社保、信用声明及特定资格证明文件。",
+    ])
+
+
+def _build_zb_performance_table(tender) -> str:
+    headers = ["序号", "项目名称", "用户单位", "供货内容", "签订时间", "合同金额", "证明材料页码"]
+    rows = [["1", "【待填写】", "【待填写】", "【待填写】", "【待填写】", "【待填写】", "【待填写】"]]
+    return "\n".join([
+        "7.11类似项目业绩表（格式自拟）",
+        _md_table(headers, rows),
+        "注：表后须附业绩证明文件（中标通知书或合同复印件），否则不予认可。",
+    ])
+
+
+def _build_zb_manufacturer_authorization(tender, packages) -> str:
+    goods = "、".join(getattr(p, "item_name", "") or "【待填写：货物名称】" for p in (packages or [])) or "【待填写：货物名称】"
+    return f"""
+7.12制造商授权书（格式自拟）
+
+致：{tender.purchaser or '采购人'}
+
+作为【待填写：制造商名称】，现授权【待填写：投标人名称】参加 {tender.project_name or '【待填写：项目名称】'}
+（项目编号：{tender.project_number or '【待填写】'}）投标，就 {goods} 提供投标、供货、安装调试、售后服务等相关支持。
+
+制造商名称（盖章）：【待填写】
+法定代表人或授权代表：【待填写】
+日期：【待填写】
+""".strip()
+
+
+def _build_zb_other_technical_docs_section(tender, packages, tender_raw: str) -> str:
+    pkg = packages[0] if packages else None
+    goods = getattr(pkg, "item_name", "【待填写：货物名称】") if pkg else "【待填写：货物名称】"
+    return "\n".join([
+        "格式 9.第五章规定的证明文件和其他技术方案",
+        f"项目名称：{tender.project_name or '【待填写：项目名称】'}",
+        f"项目编号：{tender.project_number or '【待填写】'}",
+        f"对应货物：{goods}",
+        "",
+        "请按招标文件第五章逐项补充以下内容：",
+        "1. 产品彩页/技术白皮书/官网参数页；",
+        "2. 技术支持资料（或证明材料）与技术响应表逐条对应页码；",
+        "3. 配置清单、随机附件、备件及专用工具清单；",
+        "4. 安装调试方案、培训方案、验收资料清单；",
+        "5. 软件/硬件合法来源及授权证明；",
+        "6. 招标文件要求的其他技术性文件。",
+    ])
+
+def _build_zb_section_content(title: str, raw_block: str, tender, tender_raw: str, packages: list) -> str:
+    raw = (raw_block or "").strip()
+
+    # 第六章原格式优先：只有标题本身像“真实模板标题”，才允许直接按原模板落。
+    if raw and _looks_like_safe_zb_template_title(title):
+        return _zb_render_raw_template(
+            raw,
+            "【按招标文件原格式填写；无内容处填写“无”，不得删改实质性条款。】",
+        )
+
+    if _title_has_any(title, ("资格性审查",)):
+        return _build_zb_qualification_review_section(tender, tender_raw)
+
+    if _title_has_any(title, ("符合性审查", "符合性检查", "符合性审核")):
+        return _build_zb_compliance_review_section(tender, tender_raw)
+
+    if _title_has_any(title, ("详细评审", "评分因素", "评分标准", "评审索引")):
+        return _build_zb_detailed_review_section(tender, tender_raw)
+
+    if _title_has_any(title, ("无效投标", "否决投标", "废标情形", "无效情形")):
+        return _build_zb_invalid_bid_checklist(tender, tender_raw)
+
+    if _title_has_any(title, ("供货", "安装", "调试", "质量保障", "服务方案", "售后服务", "保障承诺")):
+        content = _build_zb_service_section(packages, tender_raw)
+        return _normalize_procurement_terms_for_zb(content)
+
+    if _title_has_any(title, ("投标保证金说明函",)):
+        return _build_zb_bid_bond_letter(tender)
+
+    if _title_has_any(title, ("制造商授权书",)):
+        return _build_zb_manufacturer_authorization(tender, packages)
+
+    if _title_has_any(title, ("投标人一般情况表",)):
+        return _build_zb_general_info_table(tender)
+
+    if _title_has_any(title, ("类似项目业绩表",)):
+        return _build_zb_performance_table(tender)
+
+    if _title_has_any(title, ("第五章", "其他技术响应文件", "其他技术方案", "技术支持资料")):
+        return _build_zb_other_technical_docs_section(tender, packages, tender_raw)
+
+    if _title_has_any(title, ("投标函", "投标书", "报价书")):
+        return f"""
+致：{tender.purchaser or "采购人"}
+
+根据贵方 {tender.project_name}（项目编号：{tender.project_number}）招标文件，我方正式提交投标文件，并声明如下：
+
+1. 我方已详细审阅全部招标文件及有关澄清、修改文件，愿意按照招标文件要求参加投标。
+2. 我方承诺对招标文件提出的商务、技术、服务及合同条款作出实质性响应。
+3. 我方保证所提交的全部资料真实、准确、完整。
+4. 如我方中标，将严格按照招标文件、投标文件及合同约定履行义务。
+
+供应商全称：【待填写：投标人名称】
+法定代表人或授权代表：【待填写】
+日期：【待填写：年 月 日】
+""".strip()
+
+    if _title_has_any(title, ("开标一览表", "报价一览表")):
+        return _build_zb_quote_summary_table(tender, packages, tender_raw)
+
+    if _title_has_any(title, ("分项报价表", "投标分项报价表")):
+        return _build_zb_itemized_quote_table(tender, packages, tender_raw)
+
+    if _title_has_any(title, ("授权书", "法定代表人")):
+        return f"""
+法定代表人（单位负责人）授权书
+
+兹授权【待填写：授权代表姓名】作为我方合法代表，参加 {tender.project_name}
+（项目编号：{tender.project_number}）的投标活动，并全权处理投标、澄清、签约等相关事宜。
+
+法定代表人/单位负责人签字或盖章：【待填写】
+授权代表签字：【待填写】
+供应商全称（公章）：【待填写：投标人名称】
+日期：【待填写：年 月 日】
+""".strip()
+
+    if _title_has_any(title, ("资格证明", "资格文件", "资格材料")):
+        if raw and _looks_like_safe_zb_template_title(title):
+            return raw + "\n\n【请逐项补齐对应证明文件，并标注页码。】"
+        return "【待按招标文件要求逐项提供资格证明文件、资信材料、许可证/备案凭证、财务/纳税/社保证明等。】"
+
+    if _title_has_any(title, ("商务条款", "商务偏离", "商务响应")):
+        return _build_zb_business_deviation_table(tender, packages, tender_raw)
+
+    if _title_has_any(title, ("技术要求响应", "技术响应", "技术偏离", "采购需求响应")):
+        pkg = packages[0] if packages else None
+        if pkg is None:
+            return "【待补：技术要求响应及偏离表】"
+        return _build_zb_technical_response_table(tender, pkg, tender_raw)
+
+    # 兜底时严禁把普通正文条款直接灌入成品文档。
+    if raw and _looks_like_safe_zb_template_title(title):
+        return raw + "\n\n【以上为招标文件原始模板骨架，请严格按原格式填写，不得删减实质性内容。】"
+
+    return "【待按招标文件第六章原格式填写本章节内容】"
+
+def _build_zb_invalid_bid_checklist(tender) -> str:
+    text = getattr(tender, "source_text", "") or ""
+
+    hardcoded = [
+        "不具备招标文件规定的合格投标人资格要求的，投标无效。",
+        "未按照招标文件要求提交投标保证金的，投标无效。",
+        "未按要求提供进口产品逐级授权的，视为未响应招标文件实质性要求，其投标无效。",
+        "投标有效期不满足招标文件要求的，投标无效。",
+        "投标文件未按招标文件规定要求签署、盖章的，按无效投标处理。",
+        "非法定代表人签字而未提供其有效授权委托书的，按无效投标处理。",
+        "投标文件不完整导致不能实质性响应招标文件要求的，按无效投标处理。",
+        "不符合招标文件第四章、第五章所列带“★”号条款要求的，按无效投标处理。",
+        "投标文件含有采购人不能接受的附加条件的，按无效投标处理。",
+        "提供了选择方案或选择报价（包括交叉折扣）的，按无效投标处理。",
+        "提交了转包或分包要求的，按无效投标处理。",
+        "以可调整价格投标报价的，按无效投标处理。",
+        "投标文件技术规格响应最低得分为0分的，按无效投标处理。",
+        "投标文件未提供商务条款响应及偏离表和技术要求响应及偏离表的，按无效投标处理。",
+        "投标报价超过分包预算金额或最高限价的，按无效投标处理。",
+        "属于政府强制采购节能产品而未提供相应证明材料的，按无效投标处理。",
+        "评标委员会认为投标人的报价明显低于其他通过符合性审查投标人的报价，投标人不能证明其报价合理性的，按无效投标处理。",
+    ]
+
+    extracted = []
+    try:
+        from app.services.tender_parser import _extract_invalid_bid_items_strict
+        extracted = _extract_invalid_bid_items_strict(text)
+    except Exception:
+        extracted = []
+
+    merged = []
+    for item in extracted + hardcoded:
+        s = " ".join(str(item or "").split()).strip()
+        if not s:
+            continue
+        if len(s) < 10:
+            continue
+        if s in merged:
+            continue
+        merged.append(s)
+
+    rows = []
+    for i, item in enumerate(merged, start=1):
+        rows.append([str(i), item, "【待填写：符合/不符合】", "【待填写】"])
+
+    return "无效投标情形自检表\n" + _md_table(
+        ["序号", "无效投标情形", "自检结果", "备注"],
+        rows,
+    )
+
+
+def _build_zb_compliance_review_section(tender, package_index: int = 1) -> str:
+    tpl = None
+    templates = getattr(tender, "review_table_templates", None) or {}
+    tpl = templates.get("compliance")
+
+    rows_data = [
+        ["1", "投标人名称", "与营业执照一致"],
+        ["2", "投标文件签字盖章", "投标文件签字、盖章齐全"],
+        ["3", "投标文件格式", "符合投标文件内容及格式要求"],
+        ["4", "报价唯一", "只能有一个有效报价且不超过采购预算"],
+        ["5", "合同履行期限", "合同签订后30日内交货"],
+        ["6", "投标有效期", "90日历日"],
+        ["7", "投标保证金", "满足招标文件要求"],
+        ["8", "采购需求", "满足招标文件“第五章★条款”"],
+        ["9", "其他", "满足招标文件的实质性内容"],
+    ]
+
+    if tpl:
+        headers = _tpl_header_titles(tpl)
+
+        if _same_headers(headers, ["序号", "审查内容", "合格条件", "投标文件所在页码"]):
+            rows = [[r[0], r[1], r[2], "【待填写：页码】"] for r in rows_data]
+            return "符合性审查响应对照表\n" + _render_table_with_headers(headers, rows)
+
+        if _same_headers(headers, ["序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"]):
+            rows = [[r[0], r[1], r[2], "【待填写：对应材料名称/页码】", "【待填写：满足/不满足】", "【待填写】"] for r in rows_data]
+            return "符合性审查响应对照表\n" + _render_table_with_headers(headers, rows)
+
+    headers = ["序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"]
+    rows = [[r[0], r[1], r[2], "【待填写：对应材料名称/页码】", "【待填写：满足/不满足】", "【待填写】"] for r in rows_data]
+    return "符合性审查响应对照表\n" + _render_table_with_headers(headers, rows)
+
+def _build_zb_qualification_review_section(tender, package_index: int = 1) -> str:
+    tpl = None
+    templates = getattr(tender, "review_table_templates", None) or {}
+    tpl = templates.get("qualification")
+
+    rows_data = [
+        ["1", "营业执照", "投标人须在中华人民共和国境内注册，具备有效营业执照，并在人员、设备、资金等方面具有相应能力，提供营业执照复印件。"],
+        ["2", "授权委托书", "提供由法定代表人及委托代理人签字并加盖公章的授权书。"],
+        ["3", "良好的商业信誉和健全的财务会计制度", "提供近一年度（2024年）财务审计报告（经会计师事务所审计）或基本开户银行出具的开标日前三个月内资信证明。"],
+        ["4", "声明书①", "具有履行合同所必需的设备和专业技术能力，附相关证明材料或书面声明。"],
+        ["5", "社保及纳税证明", "提供近半年内任意连续三个月依法缴纳税收和社会保障资金的相关证明材料。"],
+        ["6", "声明书②", "提供参与本采购活动前三年内在经营活动中没有重大违法记录的书面声明。"],
+        ["7", "声明书③", "提供信用中国、中国政府采购网查询截图及书面声明。"],
+        ["8", "声明书④", "提供单位负责人为同一人或存在控股、管理关系声明。"],
+        ["9", "声明书⑤", "提供未为本采购项目提供整体设计、规范编制、项目管理、监理、检测等服务声明。"],
+        ["10", "特定资格要求", "提供医疗器械生产/经营许可证或备案凭证、产品注册证或备案凭证等证明材料。"],
+        ["11", "法律法规规定及招标文件规定的其他要求", "投标人符合法律、行政法规及招标文件规定的其他要求。"],
+    ]
+
+    if tpl:
+        headers = _tpl_header_titles(tpl)
+
+        # 严格匹配原招标文件索引式4列表头
+        if _same_headers(headers, ["序号", "审查内容", "合格条件", "投标文件所在页码"]):
+            rows = [[r[0], r[1], r[2], "【待填写：页码】"] for r in rows_data]
+            return "资格性审查响应对照表\n" + _render_table_with_headers(headers, rows)
+
+        # 兼容当前统一版6列表头
+        if _same_headers(headers, ["序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"]):
+            rows = [[r[0], r[1], r[2], "【待填写：对应材料名称/页码】", "【待填写：满足/不满足】", "【待填写】"] for r in rows_data]
+            return "资格性审查响应对照表\n" + _render_table_with_headers(headers, rows)
+
+    # fallback
+    headers = ["序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"]
+    rows = [[r[0], r[1], r[2], "【待填写：对应材料名称/页码】", "【待填写：满足/不满足】", "【待填写】"] for r in rows_data]
+    return "资格性审查响应对照表\n" + _render_table_with_headers(headers, rows)
+
+
+def _build_zb_sections(
+    tender,
+    tender_raw: str,
+    products: dict | None = None,
+    active_packages: list | None = None,
+) -> list:
+    packages = active_packages or tender.packages
+    entries = _get_zb_template_entries(tender)
+
+    existing_keys = {_normalized_title_key(title) for title, _ in entries}
+    for title in _zb_required_template_titles():
+        key = _normalized_title_key(title)
+        if key not in existing_keys:
+            entries.append((title, ""))
+            existing_keys.add(key)
+
+    sections: list[BidDocumentSection] = []
+    existing_titles = [title for title, _ in entries]
+
+    for title, raw_block in entries:
+        sections.append(
+            BidDocumentSection(
+                section_title=title,
+                content=_build_zb_section_content(title, raw_block, tender, tender_raw, packages),
+            )
+        )
+
+    def _has_any(*keywords: str) -> bool:
+        return any(_title_has_any(title, tuple(keywords)) for title in existing_titles)
+
+    extra_titles: list[str] = []
+
+    if not _has_any("资格性审查", "资格性检查", "资格审查", "资格性检查索引"):
+        extra_titles.append("资格性审查响应对照表")
+
+    if not _has_any("符合性审查", "符合性检查", "符合性审核", "符合性检查索引"):
+        extra_titles.append("符合性审查响应对照表")
+
+    if not _has_any("详细评审", "评分因素", "评分标准", "评分办法", "评分办法索引"):
+        extra_titles.append("详细评审响应对照表")
+
+    if not _has_any("无效投标", "否决投标", "废标情形", "无效情形", "其他无效投标情况"):
+        extra_titles.append("无效投标情形自检表")
+
+    if not _has_any("供货", "安装", "调试", "质量保障", "服务方案", "技术方案", "售后服务承诺书"):
+        extra_titles.append("供货、安装调试、质量保障及售后服务方案")
+
+    for title in extra_titles:
+        sections.append(
+            BidDocumentSection(
+                section_title=title,
+                content=_build_zb_section_content(title, "", tender, tender_raw, packages),
+            )
+        )
+
+    return sections
