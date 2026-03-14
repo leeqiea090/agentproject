@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-from . import common as _common
-from . import crud as _crud
-from . import one_click as _one_click
-from . import workflow as _workflow
-
 
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
@@ -12,6 +7,11 @@ def __reexport_all(module) -> None:
             continue
         globals()[name] = value
 
+
+from . import common as _common
+from . import crud as _crud
+from . import one_click as _one_click
+from . import workflow as _workflow
 
 for _module in (
     _common,
@@ -21,9 +21,6 @@ for _module in (
 ):
     __reexport_all(_module)
 
-
 del _module
 
-
-# 导出路由器对象
 from .common import router

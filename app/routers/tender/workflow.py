@@ -1,16 +1,22 @@
 from __future__ import annotations
 
-import app.routers.tender.common as _common
-import importlib
+from __future__ import annotations
 
+import importlib
+import app.routers.tender.common as _common
+
+
+def __reexport_all(module) -> None:
+    for name, value in vars(module).items():
+        if name.startswith("__"):
+            continue
+        globals()[name] = value
 
 
 for _module in (_common,):
     __reexport_all(_module)
 
-
 del _module
-
 
 def _router_api():
     return importlib.import_module("app.routers.tender")

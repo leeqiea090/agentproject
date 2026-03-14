@@ -1167,7 +1167,6 @@ def _extract_package_scope_text(
 
     full_item_name = _normalize_requirement_line(pkg.item_name)
     item_tokens = [token for token in (full_item_name, *_extract_match_tokens(pkg.item_name)) if token]
-    # Build tokens for other packages' item names to detect cross-package boundaries
     other_tokens: list[str] = []
     for name in other_package_names:
         other_tokens.extend(t for t in _extract_match_tokens(name) if len(t) >= 3 and t not in item_tokens)

@@ -434,6 +434,84 @@ def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -
         row.cells[0].paragraphs[0].runs[0].font.bold = True
 
 
+def _required_titles_for_tender(tender=None) -> list[str]:
+    text = " ".join(
+        [
+            str(getattr(tender, "project_number", "") or ""),
+            str(getattr(tender, "procurement_type", "") or ""),
+            str(getattr(tender, "project_name", "") or ""),
+        ]
+    )
+    is_tp = "[TP]" in text or "竞争性谈判" in text
+
+    if is_tp:
+        return [
+            "一、响应文件封面格式",
+            "二、报价书",
+            "三、报价一览表",
+            "四、资格承诺函",
+            "五、技术偏离及详细配置明细表",
+            "六、技术服务和售后服务的内容及措施",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、投标无效情形汇总及自检表",
+        ]
+
+    return [
+        "一、响应文件封面格式",
+        "二、首轮报价表",
+        "三、分项报价表",
+        "四、技术偏离及详细配置明细表",
+        "五、技术服务和售后服务的内容及措施",
+        "六、法定代表人/单位负责人授权书",
+        "七、资格性审查响应对照表",
+        "八、符合性审查响应对照表",
+        "九、详细评审响应对照表",
+        "十、投标无效情形汇总及自检表",
+    ]
+
+
+def _backfill_required_sections(sections, tender=None):
+    placeholder_map = {
+        "二、首轮报价表": "采用电子招投标的项目无需编制该表格，按投标客户端报价部分填写。",
+        "三、分项报价表": "采用电子招投标的项目无需编制该表格，按投标客户端报价部分填写。",
+        "四、技术偏离及详细配置明细表": "【待人工补齐：按采购文件逐条填写技术偏离及详细配置明细】",
+        "五、技术服务和售后服务的内容及措施": "【待人工补齐：按评分项展开供货、安装调试、质量保证、售后服务方案】",
+        "六、法定代表人/单位负责人授权书": "【待人工补齐：法定代表人/单位负责人授权书】",
+        "七、资格性审查响应对照表": "【待人工补齐：资格性审查响应对照表】",
+        "八、符合性审查响应对照表": "【待人工补齐：符合性审查响应对照表】",
+        "九、详细评审响应对照表": "【待人工补齐：详细评审响应对照表】",
+        "十、投标无效情形汇总及自检表": "【待人工补齐：投标无效情形汇总及自检表】",
+    }
+
+    existing = {
+        (getattr(s, "section_title", "") or "").strip(): s
+        for s in (sections or [])
+        if (getattr(s, "section_title", "") or "").strip()
+    }
+
+    ordered = _required_titles_for_tender(tender)
+    ordered_set = set(ordered)
+
+    filled = []
+    for title in ordered:
+        if title in existing:
+            filled.append(existing[title])
+        else:
+            filled.append(
+                BidDocumentSection(
+                    section_title=title,
+                    content=placeholder_map.get(title, "【待人工补齐本章节内容】"),
+                )
+            )
+
+    for s in (sections or []):
+        title = (getattr(s, "section_title", "") or "").strip()
+        if title and title not in ordered_set:
+            filled.append(s)
+
+    return filled
+
 def _assert_new_structure_only(sections, tender=None) -> None:
     titles = [getattr(s, "section_title", "") or "" for s in (sections or [])]
     text = "\n".join(titles) + " " + str(getattr(tender, "project_number", "") or "")
@@ -513,6 +591,7 @@ def build_bid_docx(
     Returns:
         输出文件路径
     """
+    sections = _backfill_required_sections(sections, tender=tender)
     _assert_new_structure_only(sections, tender=tender)
     doc = Document()
     _set_document_style(doc)
