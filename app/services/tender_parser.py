@@ -18,6 +18,7 @@ from app.schemas import (
     ProcurementPackage,
     ResponseSectionTemplate,
     TenderTableColumn,
+    TenderTableLayoutHint,
     TenderTableRowTemplate,
     TenderTableTemplate,
 )
@@ -52,10 +53,11 @@ DEFAULT_CS_SECTION_TITLES = [
     "四、技术偏离及详细配置明细表",
     "五、技术服务和售后服务的内容及措施",
     "六、法定代表人/单位负责人授权书",
-    "七、资格性审查响应对照表",
-    "八、符合性审查响应对照表",
-    "九、详细评审响应对照表",
-    "十、投标无效情形汇总及自检表",
+    "七、法定代表人/单位负责人和授权代表身份证明",
+    "八、小微企业声明函",
+    "九、残疾人福利性单位声明函",
+    "十、投标人关联单位的说明",
+    "十一、资格承诺函",
 ]
 
 DEFAULT_ZB_SECTION_TITLES = [
@@ -80,9 +82,11 @@ DEFAULT_TP_SECTION_TITLES = [
     "四、资格承诺函",
     "五、技术偏离及详细配置明细表",
     "六、技术服务和售后服务的内容及措施",
-    "七、资格性审查响应对照表",
-    "八、符合性审查响应对照表",
-    "九、投标无效情形汇总及自检表",
+    "七、法定代表人/单位负责人授权书",
+    "八、法定代表人/单位负责人和授权代表身份证明",
+    "九、小微企业声明函",
+    "十、残疾人福利性单位声明函",
+    "十一、投标人关联单位的说明",
 ]
 
 import re
@@ -550,6 +554,14 @@ def _default_response_section_templates(procurement_type: str) -> list[ResponseS
             )
         )
     return templates
+
+
+def _normalize_layout_header(text: str) -> str:
+    return re.sub(r"[\s\r\n\t]+", "", text or "")
+
+
+def _header_signature(headers: Sequence[str]) -> tuple[str, ...]:
+    return tuple(_normalize_layout_header(item) for item in headers if _normalize_layout_header(item))
 
 def _fails_package_domain_guard(item_name: str, key: str, req: str) -> bool:
     """
@@ -1194,6 +1206,98 @@ class TenderParser:
         }
         return tender_doc.model_copy(update=update_payload)
 
+    def _extract_docx_table_layout_hints(self, docx_path: str | Path) -> list[TenderTableLayoutHint]:
+        if not _DOCX_AVAILABLE:
+            return []
+
+        try:
+            doc = _DocxDocument(str(docx_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取 DOCX 表格版式失败：%s", exc)
+            return []
+
+        hints: list[TenderTableLayoutHint] = []
+        last_title = ""
+
+        for block in _iter_docx_blocks(doc):
+            if isinstance(block, _DocxParagraph):
+                text = re.sub(r"\s+", " ", (block.text or "")).strip()
+                if text:
+                    last_title = text
+                continue
+
+            if not isinstance(block, _DocxTable):
+                continue
+
+            header_titles: list[str] = []
+            for row in block.rows:
+                cells = [re.sub(r"\s+", " ", (cell.text or "")).strip() for cell in row.cells]
+                if any(cells):
+                    header_titles = cells
+                    break
+
+            signature = _header_signature(header_titles)
+            if len(signature) < 2:
+                continue
+
+            widths_cm: list[float] = []
+            grid = getattr(block._tbl, "tblGrid", None)
+            if grid is not None:
+                for col in getattr(grid, "gridCol_lst", []):
+                    raw_width = int(getattr(col, "w", 0) or 0)
+                    if raw_width > 0:
+                        widths_cm.append(round(raw_width / 360000.0, 3))
+
+            if len(widths_cm) != len(header_titles):
+                widths_cm = []
+
+            align = ""
+            if block.alignment is not None:
+                align = str(block.alignment).split(".")[-1].lower()
+
+            style_name = ""
+            try:
+                style_name = block.style.name if block.style else ""
+            except Exception:  # noqa: BLE001
+                style_name = ""
+
+            hints.append(
+                TenderTableLayoutHint(
+                    header_titles=header_titles,
+                    column_width_cm=widths_cm,
+                    section_title=last_title,
+                    source_path=str(docx_path),
+                    table_style=style_name,
+                    alignment=align,
+                )
+            )
+
+        deduped: list[TenderTableLayoutHint] = []
+        seen: set[tuple[tuple[str, ...], tuple[int, ...], str]] = set()
+        for hint in hints:
+            key = (
+                _header_signature(hint.header_titles),
+                tuple(int(round(w * 1000)) for w in hint.column_width_cm),
+                re.sub(r"\s+", "", hint.section_title or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(hint)
+
+        return deduped
+
+    def _enrich_docx_table_layouts(self, tender_doc: TenderDocument, file_path: str | Path) -> TenderDocument:
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in (".docx", ".doc"):
+            return tender_doc
+
+        hints = self._extract_docx_table_layout_hints(file_path)
+        if not hints:
+            return tender_doc
+
+        return tender_doc.model_copy(update={"table_layout_hints": hints})
+
 
 
     @staticmethod
@@ -1264,8 +1368,10 @@ class TenderParser:
         Returns:
             结构化的招标文件数据
         """
+        file_path = Path(pdf_path)
+
         # 1. 提取文本（自动识别格式）
-        tender_text = self.extract_text(pdf_path)
+        tender_text = self.extract_text(file_path)
 
         # 可选限制长度并增加降级重试，降低空响应概率
         tender_text = self._apply_parse_length_limit(tender_text)
@@ -1285,6 +1391,7 @@ class TenderParser:
 
                 tender_doc = self._enrich_package_quantities(tender_doc, candidate_text)
                 tender_doc = self._enrich_format_templates(tender_doc, candidate_text)
+                tender_doc = self._enrich_docx_table_layouts(tender_doc, file_path)
                 logger.info(f"成功解析招标文件: {tender_doc.project_name}（输入长度={limit}）")
                 return tender_doc
             except Exception as exc:  # noqa: BLE001

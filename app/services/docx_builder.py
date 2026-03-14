@@ -7,11 +7,9 @@ from typing import Iterable
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.shared import Cm, Pt
 from app.schemas import BidDocumentSection, TenderDocument, CompanyProfile
 
 
@@ -79,6 +77,32 @@ def _append_inline_runs(para, text: str, size: Pt) -> None:
         else:
             run = para.add_run(part)
         run.font.size = size
+
+
+def _heading_body_fallback_text(title: str) -> str:
+    """为只有标题没有正文的页面补一行可编辑提示，避免整页只剩标题。"""
+    s = re.sub(r"\s+", "", title or "")
+    if not s:
+        return "请按招标文件原格式填写本节内容。"
+    if "身份证正反面复印件" in s:
+        return "本页用于粘贴对应身份证正反面复印件，并加盖投标人公章。"
+    if "制造商授权书" in s:
+        return "本页用于放置制造商授权文件原件或复印件，并按招标文件要求签章。"
+    if "类似项目业绩表" in s:
+        return "请按招标文件要求填写类似项目业绩，并在表后附对应证明材料。"
+    if "声明函" in s:
+        return "请按招标文件原格式填写声明内容，并完成签字盖章。"
+    if "承诺书" in s:
+        return "请按招标文件原格式填写承诺内容，并完成签字盖章。"
+    if any(token in s for token in ("偏离表", "响应表", "响应及偏离表", "响应对照表")):
+        return "请按招标文件要求逐项填写，不得漏项、缺项或仅复制采购要求原文。"
+    if any(token in s for token in ("明细表", "报价表", "一览表", "申请表")):
+        return "请按招标文件原格式填写本表内容，并保留原有列项。"
+    return "请按招标文件原格式填写本节内容。"
+
+
+def _append_heading_body_fallback(doc: Document, title: str) -> None:
+    _add_paragraph(doc, _heading_body_fallback_text(title))
 
 
 def _normalize_title(text: str) -> str:
@@ -175,6 +199,87 @@ def _get_fixed_table_widths(header_cells: list[str]):
     return None
 
 
+def _normalize_header_signature(cells: list[str]) -> tuple[str, ...]:
+    return tuple(re.sub(r"[\s\r\n\t]+", "", cell or "") for cell in cells)
+
+
+def _select_table_layout_widths(
+    tender: TenderDocument | None,
+    header_cells: list[str],
+    section_title: str = "",
+):
+    if tender is None:
+        return None
+
+    target_sig = _normalize_header_signature(header_cells)
+    if not target_sig:
+        return None
+
+    section_key = re.sub(r"[\s\r\n\t]+", "", section_title or "")
+    candidates = []
+
+    for hint in getattr(tender, "table_layout_hints", []) or []:
+        hint_headers = list(getattr(hint, "header_titles", []) or [])
+        widths = list(getattr(hint, "column_width_cm", []) or [])
+        if len(hint_headers) != len(header_cells) or len(widths) != len(header_cells):
+            continue
+        if _normalize_header_signature(hint_headers) != target_sig:
+            continue
+
+        source_key = re.sub(r"[\s\r\n\t]+", "", getattr(hint, "section_title", "") or "")
+        score = 0
+        if section_key and source_key:
+            if section_key == source_key:
+                score = 3
+            elif section_key in source_key or source_key in section_key:
+                score = 2
+            else:
+                shared = sum(1 for token in ("资格", "符合", "评审", "报价", "偏离", "投标", "无效") if token in section_key and token in source_key)
+                score = 1 if shared else 0
+        candidates.append((score, widths))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [Cm(width) for width in candidates[0][1]]
+
+
+def _set_repeat_table_header(row) -> None:
+    tr_pr = row._tr.get_or_add_trPr()
+    existing = tr_pr.xpath("./w:tblHeader")
+    if existing:
+        return
+    tbl_header = OxmlElement("w:tblHeader")
+    tbl_header.set(qn("w:val"), "true")
+    tr_pr.append(tbl_header)
+
+
+def _cell_alignment_for_header(header_text: str, *, is_header: bool) -> WD_ALIGN_PARAGRAPH:
+    if is_header:
+        return WD_ALIGN_PARAGRAPH.CENTER
+
+    compact = re.sub(r"[\s\r\n\t]+", "", header_text or "")
+    centered_tokens = (
+        "序号",
+        "包号",
+        "页码",
+        "页次",
+        "是否",
+        "备注",
+        "分值",
+        "数量",
+        "单位",
+        "单价",
+        "合计",
+        "报价",
+        "结果",
+    )
+    if any(token in compact for token in centered_tokens):
+        return WD_ALIGN_PARAGRAPH.CENTER
+    return WD_ALIGN_PARAGRAPH.LEFT
+
+
 def _extract_outline_items(content: str) -> list[str]:
     """从章节 Markdown 中提取目录项（主要提取二级小节）"""
     items: list[str] = []
@@ -196,6 +301,26 @@ def _extract_outline_items(content: str) -> list[str]:
             items.append(candidate)
 
     return items[:20]
+
+
+def _markdown_heading_info(stripped: str) -> tuple[int, str] | None:
+    if stripped.startswith(">"):
+        stripped = re.sub(r"^>\s*", "", stripped)
+    if stripped.startswith("### "):
+        return 3, stripped[4:].strip()
+    if stripped.startswith("#### "):
+        return 3, stripped[5:].strip()
+    if stripped.startswith("## "):
+        return 2, stripped[3:].strip()
+    if stripped.startswith("# "):
+        return 1, stripped[2:].strip()
+    if re.match(r"^第[一二三四五六七八九十]+章[、\s]", stripped):
+        return 1, stripped
+    if re.match(r"^[一二三四五六七八九十]+、", stripped):
+        return 2, stripped
+    if re.match(r"^[（(][一二三四五六七八九十]+[）)]", stripped):
+        return 3, stripped
+    return None
 
 
 def _enable_update_fields_on_open(doc: Document) -> None:
@@ -263,8 +388,13 @@ def _add_toc(doc: Document, sections: Iterable[BidDocumentSection]) -> None:
     tip_run.font.size = Pt(9.5)
     tip_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
-def _render_markdown_table(doc: Document, lines: list[str]) -> None:
-    """将 Markdown 表格渲染为固定列数、固定列宽的 Word 表格"""
+def _render_markdown_table(
+    doc: Document,
+    lines: list[str],
+    tender: TenderDocument | None = None,
+    section_title: str = "",
+) -> None:
+    """将 Markdown 表格渲染为 Word 表格，并优先复用招标模板列宽。"""
     data_rows = [l for l in lines if not re.match(r"^\|[-| :]+\|$", l.strip())]
     if not data_rows:
         return
@@ -292,10 +422,16 @@ def _render_markdown_table(doc: Document, lines: list[str]) -> None:
     table = doc.add_table(rows=len(normalized_rows), cols=col_count)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-    widths = _get_fixed_table_widths(header_cells)
+    widths = _select_table_layout_widths(tender, header_cells, section_title) or _get_fixed_table_widths(header_cells)
     table.autofit = widths is None
     _style_table(table)
+    if table.rows:
+        _set_repeat_table_header(table.rows[0])
 
+    if widths:
+        for col_idx, width in enumerate(widths):
+            if col_idx < len(table.columns):
+                table.columns[col_idx].width = width
 
     for i, row_data in enumerate(normalized_rows):
         for j, cell_text in enumerate(row_data):
@@ -311,19 +447,32 @@ def _render_markdown_table(doc: Document, lines: list[str]) -> None:
                 run.font.bold = True
                 _set_cell_bg(cell, "D9E1F2")
 
+            p.alignment = _cell_alignment_for_header(header_cells[j], is_header=(i == 0))
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
             if widths and j < len(widths):
                 cell.width = widths[j]
 
     doc.add_paragraph()
 
 
-def _parse_and_render_markdown(doc: Document, content: str) -> None:
+def _parse_and_render_markdown(
+    doc: Document,
+    content: str,
+    tender: TenderDocument | None = None,
+    section_title: str = "",
+) -> bool:
     """
     将 Markdown 文本逐行解析并写入 Word 文档。
     支持：# 标题、**粗体**、- 列表、| 表格、普通段落
     """
     lines = content.splitlines()
     i = 0
+    rendered_body = False
+    seen_inner_heading = False
+    body_since_heading = False
+    last_heading_text = ""
+
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
@@ -339,36 +488,47 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
             continue
 
         # 标题
-        if stripped.startswith(">"):
-            stripped = re.sub(r"^>\s*", "", stripped)
-        if stripped.startswith("### "):
-            _add_heading(doc, stripped[4:], 3)
-        elif stripped.startswith("#### "):
-            _add_heading(doc, stripped[5:], 3)
-        elif stripped.startswith("## "):
-            _add_heading(doc, stripped[3:], 2)
-        elif stripped.startswith("# "):
-            _add_heading(doc, stripped[2:], 1)
-        elif re.match(r"^第[一二三四五六七八九十]+章[、\s]", stripped):
-            _add_heading(doc, stripped, 1)
-        elif re.match(r"^[一二三四五六七八九十]+、", stripped):
-            _add_heading(doc, stripped, 2)
-        elif re.match(r"^[（(][一二三四五六七八九十]+[）)]", stripped):
-            _add_heading(doc, stripped, 3)
+        heading_info = _markdown_heading_info(stripped)
+        if heading_info:
+            level, heading_text = heading_info
+            if seen_inner_heading and not body_since_heading and last_heading_text:
+                _append_heading_body_fallback(doc, last_heading_text)
+                rendered_body = True
+                body_since_heading = True
+            if seen_inner_heading and body_since_heading:
+                doc.add_page_break()
+            _add_heading(doc, heading_text, level)
+            seen_inner_heading = True
+            body_since_heading = False
+            last_heading_text = heading_text
 
         # 分割线
         elif stripped.startswith("---"):
             doc.add_paragraph("─" * 40)
+            rendered_body = True
+            body_since_heading = True
 
         # 无序列表
         elif stripped.startswith("- ") or stripped.startswith("* "):
             para = doc.add_paragraph(style="List Bullet")
             _append_inline_runs(para, stripped[2:], Pt(10.5))
+            rendered_body = True
+            body_since_heading = True
 
         # 有序列表
         elif re.match(r"^\d+[\.、]\s*", stripped):
             para = doc.add_paragraph(style="List Number")
             _append_inline_runs(para, re.sub(r"^\d+[\.、]\s*", "", stripped), Pt(10.5))
+            rendered_body = True
+            body_since_heading = True
+
+        elif stripped in {"[PAGE_BREAK]", "[[PAGE_BREAK]]", "<PAGE_BREAK>", "\f"}:
+            if seen_inner_heading and not body_since_heading and last_heading_text:
+                _append_heading_body_fallback(doc, last_heading_text)
+                rendered_body = True
+                body_since_heading = True
+            doc.add_page_break()
+            body_since_heading = False
 
         # Markdown 表格：收集连续的表格行一起渲染
         elif stripped.startswith("|"):
@@ -376,7 +536,9 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
             while i < len(lines) and lines[i].strip().startswith("|"):
                 table_lines.append(lines[i])
                 i += 1
-            _render_markdown_table(doc, table_lines)
+            _render_markdown_table(doc, table_lines, tender=tender, section_title=section_title)
+            rendered_body = True
+            body_since_heading = True
             continue
 
         # 普通段落（含粗体处理）
@@ -384,8 +546,16 @@ def _parse_and_render_markdown(doc: Document, content: str) -> None:
             para = doc.add_paragraph()
             _append_inline_runs(para, stripped, Pt(11))
             para.paragraph_format.space_after = Pt(4)
+            rendered_body = True
+            body_since_heading = True
 
         i += 1
+
+    if seen_inner_heading and not body_since_heading and last_heading_text:
+        _append_heading_body_fallback(doc, last_heading_text)
+        rendered_body = True
+
+    return rendered_body
 
 
 def _set_document_style(doc: Document) -> None:
@@ -406,53 +576,36 @@ def _set_document_style(doc: Document) -> None:
 
 def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -> None:
     """生成投标文件封面"""
-    # 顶部大标题
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    t_run = title.add_run("政 府 采 购 响 应 文 件")
-    t_run.font.size = Pt(26)
-    t_run.font.bold = True
-    t_run.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
-    t_run.font.name = "黑体"
-    t_run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体")
-
-    doc.add_paragraph()
-    doc.add_paragraph()
-
-    def center_kv(key: str, value: str) -> None:
+    def _center_line(text: str, size: int, *, bold: bool = False) -> None:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r_key = p.add_run(f"{key}：")
-        r_key.font.size = Pt(14)
-        r_key.font.bold = True
-        r_val = p.add_run(value)
-        r_val.font.size = Pt(14)
+        run = p.add_run(text)
+        run.font.size = Pt(size)
+        run.font.bold = bold
+        run.font.name = "黑体" if bold else "仿宋"
+        run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体" if bold else "仿宋")
+        p.paragraph_format.space_after = Pt(6)
 
-    center_kv("项目名称", tender.project_name)
-    center_kv("项目编号", tender.project_number)
-
+    _center_line(tender.project_name or "【待填写：项目名称】", 18, bold=True)
+    doc.add_paragraph()
+    _center_line("投 标 文 件", 24, bold=True)
+    doc.add_paragraph()
+    _center_line(f"招标编号：{tender.project_number or '【待填写：项目编号】'}", 14)
     doc.add_paragraph()
     doc.add_paragraph()
+    _center_line(f"投标单位：{_normalize_cover_placeholder(company.name, '投标人名称')}（盖章）", 14)
+    _center_line(f"单位地址：{_normalize_cover_placeholder(company.address, '单位地址')}", 12)
+    doc.add_paragraph()
+    _center_line(datetime.now().strftime("%Y年%m月%d日"), 12)
 
-    # 企业信息框
-    table = doc.add_table(rows=4, cols=2)
-    _style_table(table)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-    info = [
-        ("供应商全称", _normalize_cover_placeholder(company.name, "投标人名称")),
-        ("法定代表人", _normalize_cover_placeholder(company.legal_representative, "法定代表人")),
-        ("联系电话", _normalize_cover_placeholder(company.phone, "联系电话")),
-        ("日期", datetime.now().strftime("%Y年%m月%d日")),
-    ]
-    for row_idx, (label, val) in enumerate(info):
-        row = table.rows[row_idx]
-        row.cells[0].text = label
-        row.cells[1].text = val
-        for cell in row.cells:
-            for run in cell.paragraphs[0].runs:
-                run.font.size = Pt(12)
-        row.cells[0].paragraphs[0].runs[0].font.bold = True
+def _is_cover_section(section: BidDocumentSection) -> bool:
+    title = (getattr(section, "section_title", "") or "").strip()
+    if "封面" in title:
+        return True
+    content = _clean_markdown_content(title, getattr(section, "content", "") or "")
+    compact = re.sub(r"\s+", "", content[:120])
+    return "政府采购" in compact and "响应文件" in compact
 
 
 def _detect_structure_mode_from_tender(tender=None, sections=None) -> str:
@@ -577,7 +730,7 @@ def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
     return len(good_titles) >= 3
 
 
-def _required_titles_for_tender(tender=None) -> list[str]:
+def _required_titles_for_tender(tender=None, sections=None) -> list[str]:
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
     if _usable_exact_titles(tender=tender, exact_titles=exact_titles):
         seen: set[str] = set()
@@ -590,6 +743,45 @@ def _required_titles_for_tender(tender=None) -> list[str]:
                 continue
             seen.add(key)
             filtered.append(title)
+
+        mode = _detect_structure_mode_from_tender(tender=tender, sections=sections)
+        if mode == "zb":
+            existing_titles = [
+                (getattr(section, "section_title", "") or "").strip()
+                for section in (sections or [])
+                if (getattr(section, "section_title", "") or "").strip()
+            ]
+
+            def _has_existing(*keywords: str) -> bool:
+                return any(any(keyword in title for keyword in keywords) for title in existing_titles)
+
+            ordered_titles: list[str] = []
+            for title in (
+                "资格性审查响应对照表",
+                "符合性审查响应对照表",
+                "详细评审响应对照表",
+            ):
+                if _has_existing(title):
+                    ordered_titles.append(title)
+
+            ordered_titles.extend(filtered)
+
+            for title in (
+                "供货、安装调试、质量保障及售后服务方案",
+                "无效投标情形自检表",
+            ):
+                if _has_existing(title):
+                    ordered_titles.append(title)
+
+            deduped: list[str] = []
+            seen.clear()
+            for title in ordered_titles:
+                key = re.sub(r"\s+", "", title)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(title)
+            return deduped
         return filtered
 
     mode = _detect_structure_mode_from_tender(tender=tender)
@@ -602,9 +794,11 @@ def _required_titles_for_tender(tender=None) -> list[str]:
             "四、资格承诺函",
             "五、技术偏离及详细配置明细表",
             "六、技术服务和售后服务的内容及措施",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、投标无效情形汇总及自检表",
+            "七、法定代表人/单位负责人授权书",
+            "八、法定代表人/单位负责人和授权代表身份证明",
+            "九、小微企业声明函",
+            "十、残疾人福利性单位声明函",
+            "十一、投标人关联单位的说明",
         ]
 
     if mode == "cs":
@@ -615,10 +809,11 @@ def _required_titles_for_tender(tender=None) -> list[str]:
             "四、技术偏离及详细配置明细表",
             "五、技术服务和售后服务的内容及措施",
             "六、法定代表人/单位负责人授权书",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、详细评审响应对照表",
-            "十、投标无效情形汇总及自检表",
+            "七、法定代表人/单位负责人和授权代表身份证明",
+            "八、小微企业声明函",
+            "九、残疾人福利性单位声明函",
+            "十、投标人关联单位的说明",
+            "十一、资格承诺函",
         ]
 
     if mode == "zb":
@@ -628,15 +823,26 @@ def _required_titles_for_tender(tender=None) -> list[str]:
 
 def _backfill_required_sections(sections, tender=None):
     placeholder_map = {
+        "二、报价书": "【待人工补齐：按招标文件原格式填写报价书】",
+        "三、报价一览表": "【待人工补齐：按招标文件原格式填写报价一览表】",
+        "四、资格承诺函": "【待人工补齐：黑龙江省政府采购供应商资格承诺函】",
+        "五、技术偏离及详细配置明细表": "【待人工补齐：按采购文件逐条填写技术偏离及详细配置明细】",
+        "六、技术服务和售后服务的内容及措施": "【待人工补齐：按采购文件补齐供货、安装调试、验收、售后服务方案】",
+        "七、法定代表人/单位负责人授权书": "【待人工补齐：法定代表人/单位负责人授权书】",
+        "八、法定代表人/单位负责人和授权代表身份证明": "【待人工补齐：法定代表人/单位负责人和授权代表身份证明】",
+        "九、小微企业声明函": "【待人工补齐：按招标文件原格式保留小微企业声明函；不适用时注明“本项不适用”】",
+        "十、残疾人福利性单位声明函": "【待人工补齐：按招标文件原格式保留残疾人福利性单位声明函；不适用时注明“本项不适用”】",
+        "十一、投标人关联单位的说明": "【待人工补齐：投标人关联单位说明】",
         "二、首轮报价表": "采用电子招投标的项目无需编制该表格，按投标客户端报价部分填写。",
         "三、分项报价表": "采用电子招投标的项目无需编制该表格，按投标客户端报价部分填写。",
         "四、技术偏离及详细配置明细表": "【待人工补齐：按采购文件逐条填写技术偏离及详细配置明细】",
         "五、技术服务和售后服务的内容及措施": "【待人工补齐：按评分项展开供货、安装调试、质量保证、售后服务方案】",
         "六、法定代表人/单位负责人授权书": "【待人工补齐：法定代表人/单位负责人授权书】",
-        "七、资格性审查响应对照表": "【待人工补齐：资格性审查响应对照表】",
-        "八、符合性审查响应对照表": "【待人工补齐：符合性审查响应对照表】",
-        "九、详细评审响应对照表": "【待人工补齐：详细评审响应对照表】",
-        "十、投标无效情形汇总及自检表": "【待人工补齐：投标无效情形汇总及自检表】",
+        "七、法定代表人/单位负责人和授权代表身份证明": "【待人工补齐：法定代表人/单位负责人和授权代表身份证明】",
+        "八、小微企业声明函": "【待人工补齐：按招标文件原格式保留小微企业声明函；不适用时注明“本项不适用”】",
+        "九、残疾人福利性单位声明函": "【待人工补齐：按招标文件原格式保留残疾人福利性单位声明函；不适用时注明“本项不适用”】",
+        "十、投标人关联单位的说明": "【待人工补齐：投标人关联单位说明】",
+        "十一、资格承诺函": "【待人工补齐：黑龙江省政府采购供应商资格承诺函】",
     }
 
     existing = {
@@ -645,7 +851,7 @@ def _backfill_required_sections(sections, tender=None):
         if (getattr(s, "section_title", "") or "").strip()
     }
 
-    ordered = _required_titles_for_tender(tender)
+    ordered = _required_titles_for_tender(tender, sections=sections)
     if not ordered:
         return list(sections or [])
 
@@ -724,20 +930,20 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "四、资格承诺函",
             "五、技术偏离及详细配置明细表",
             "六、技术服务和售后服务的内容及措施",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、投标无效情形汇总及自检表",
+            "七、法定代表人/单位负责人授权书",
+            "八、法定代表人/单位负责人和授权代表身份证明",
+            "九、小微企业声明函",
+            "十、残疾人福利性单位声明函",
+            "十一、投标人关联单位的说明",
         }
         forbidden = {
             "一、封面格式",
             "二、首轮报价表",
             "三、分项报价表",
-            "五、详细配置明细",
-            "六、技术偏离表",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、投标无效情形汇总及自检表",
             "七、报价书附件",
-            "六、法定代表人/单位负责人授权书",
-            "九、详细评审响应对照表",
-            "十、投标无效情形汇总及自检表",
         }
     elif mode == "cs":
         required = {
@@ -747,10 +953,11 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "四、技术偏离及详细配置明细表",
             "五、技术服务和售后服务的内容及措施",
             "六、法定代表人/单位负责人授权书",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、详细评审响应对照表",
-            "十、投标无效情形汇总及自检表",
+            "七、法定代表人/单位负责人和授权代表身份证明",
+            "八、小微企业声明函",
+            "九、残疾人福利性单位声明函",
+            "十、投标人关联单位的说明",
+            "十一、资格承诺函",
         }
         forbidden = {
             "一、封面格式",
@@ -806,13 +1013,28 @@ def build_bid_docx(
     _set_document_style(doc)
     _enable_update_fields_on_open(doc)
 
-    # 封面
-    #_add_cover(doc, tender, company)
-    doc.add_page_break()
-
     # 逐章节渲染（跳过自动生成的封面/目录章节，避免重复）
     skip_titles = {"封面", "目录"}
     render_sections = [section for section in sections if section.section_title not in skip_titles]
+
+    mode = _detect_structure_mode_from_tender(tender=tender, sections=render_sections)
+
+    if render_sections and _is_cover_section(render_sections[0]):
+        cover_section = render_sections[0]
+        cover_content = _clean_markdown_content(cover_section.section_title, cover_section.content)
+        rendered_cover = (
+            _parse_and_render_markdown(doc, cover_content, tender=tender, section_title=cover_section.section_title)
+            if cover_content else False
+        )
+        if not rendered_cover:
+            _append_heading_body_fallback(doc, cover_section.section_title)
+        render_sections = render_sections[1:]
+        if render_sections:
+            doc.add_page_break()
+    elif mode == "zb":
+        _add_cover(doc, tender, company)
+        if render_sections:
+            doc.add_page_break()
 
     # 自动目录页
     if render_sections:
@@ -827,13 +1049,20 @@ def build_bid_docx(
         # doc.add_paragraph()
 
         # 章节内容（Markdown → Word）
-        _parse_and_render_markdown(doc, clean_content)
+        rendered_body = (
+            _parse_and_render_markdown(doc, clean_content, tender=tender, section_title=section.section_title)
+            if clean_content else False
+        )
 
         # 附件列表
         if section.attachments:
             _add_paragraph(doc, "附件：", bold=True)
             for att in section.attachments:
                 doc.add_paragraph(att, style="List Bullet")
+            rendered_body = True
+
+        if not rendered_body:
+            _append_heading_body_fallback(doc, section.section_title)
 
         if idx < len(render_sections) - 1:
             doc.add_page_break()

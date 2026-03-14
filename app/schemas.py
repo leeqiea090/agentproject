@@ -392,6 +392,16 @@ class TenderTableTemplate(BaseModel):
     raw_block: str = Field(default="", description="来源原始文本块")
 
 
+class TenderTableLayoutHint(BaseModel):
+    """招标文件表格版式提示。"""
+    header_titles: list[str] = Field(default_factory=list, description="原始表头文字")
+    column_width_cm: list[float] = Field(default_factory=list, description="列宽（厘米）")
+    section_title: str = Field(default="", description="来源章节或邻近标题")
+    source_path: str = Field(default="", description="来源文件路径")
+    table_style: str = Field(default="", description="来源表格样式名")
+    alignment: str = Field(default="", description="来源表格对齐方式")
+
+
 class ResponseSectionTemplate(BaseModel):
     """响应文件格式章节模板。"""
     order_no: str = Field(default="", description="章序号，如 一 / 二 / 三")
@@ -441,6 +451,7 @@ class TenderDocument(BaseModel):
     compliance_review_table: TenderTableTemplate | None = Field(default=None, description="符合性审查表模板")
     detailed_review_table: TenderTableTemplate | None = Field(default=None, description="详细评审/评分表模板")
     invalid_bid_table: TenderTableTemplate | None = Field(default=None, description="投标无效情形表模板")
+    table_layout_hints: list[TenderTableLayoutHint] = Field(default_factory=list, description="表格版式提示")
 
 
 

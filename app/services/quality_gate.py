@@ -299,7 +299,8 @@ def _count_rendered_forbidden_hits(
             )
             for match in block_pattern.finditer(content):
                 block = match.group(1)
-                if any(tok in block for tok in forbidden):
+                cleaned_block = _clean_rendered_block_for_forbidden_scan(block, tender)
+                if any(tok in cleaned_block for tok in forbidden):
                     hit_count += 1
 
     return hit_count
@@ -909,9 +910,11 @@ def _check_required_new_structure(full_text: str | None, tender=None) -> list[st
             "四、资格承诺函",
             "五、技术偏离及详细配置明细表",
             "六、技术服务和售后服务的内容及措施",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、投标无效情形汇总及自检表",
+            "七、法定代表人/单位负责人授权书",
+            "八、法定代表人/单位负责人和授权代表身份证明",
+            "九、小微企业声明函",
+            "十、残疾人福利性单位声明函",
+            "十一、投标人关联单位的说明",
         ]
     elif mode == "cs":
         required = [
@@ -921,10 +924,11 @@ def _check_required_new_structure(full_text: str | None, tender=None) -> list[st
             "四、技术偏离及详细配置明细表",
             "五、技术服务和售后服务的内容及措施",
             "六、法定代表人/单位负责人授权书",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、详细评审响应对照表",
-            "十、投标无效情形汇总及自检表",
+            "七、法定代表人/单位负责人和授权代表身份证明",
+            "八、小微企业声明函",
+            "九、残疾人福利性单位声明函",
+            "十、投标人关联单位的说明",
+            "十一、资格承诺函",
         ]
     else:
         return []
@@ -948,12 +952,10 @@ def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[s
             "一、封面格式",
             "二、首轮报价表",
             "三、分项报价表",
-            "五、详细配置明细",
-            "六、技术偏离表",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、投标无效情形汇总及自检表",
             "七、报价书附件",
-            "六、法定代表人/单位负责人授权书",
-            "九、详细评审响应对照表",
-            "十、投标无效情形汇总及自检表",
             "竞争性磋商文件",
         ]
     elif mode == "cs":

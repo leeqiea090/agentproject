@@ -275,33 +275,79 @@ def _normalize_number_text(value) -> str:
         return s
 
 
+def _normalize_dense_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _extract_front_matter_scope(tender_raw: str) -> str:
+    text = tender_raw or ""
+    if not text:
+        return ""
+
+    stop_patterns = [
+        r"第二章\s*采购人需求",
+        r"第二章\s*采购需求",
+        r"第五章\s*采购需求",
+        r"第五章\s*货物需求",
+        r"第五章\s*用户需求",
+    ]
+    stop_pos = None
+    for pat in stop_patterns:
+        match = re.search(pat, text)
+        if match:
+            if stop_pos is None or match.start() < stop_pos:
+                stop_pos = match.start()
+    if stop_pos is not None:
+        return text[:stop_pos]
+    return text[:12000]
+
+
 def _extract_package_summary_rows(tender_raw: str) -> list[dict]:
     """
-    从首页/采购邀请中的“磋商内容”表抽包号、名称、数量、预算、交货期、地点。
-    当前项目页里每一包类似：
-    1 X射线血液辐照设备 1 975,000.00 合同签订后90个日历日内交货 甲方指定地点
+    从首页/采购邀请中的“谈判/磋商/招标内容”表抽包号、名称、数量、预算。
+    常见形式：
+    1 X射线血液辐照设备 1 详见采购文件 2,145,000.00
     """
     rows: list[dict] = []
-    pattern = re.compile(
-        r"(?P<pkg>\d+)\s+"
-        r"(?P<name>.+?)\s+"
-        r"(?P<qty>\d+(?:\.\d+)?)\s+"
-        r"(?P<budget>[0-9,]+(?:\.\d+)?)\s+"
-        r"(?P<delivery>合同签订后[^\n]*?交货)\s+"
-        r"(?P<place>甲方指定地点|采购人指定地点|[^\n]+?地点)",
-        re.S,
-    )
-    for m in pattern.finditer(tender_raw):
-        rows.append(
-            {
-                "package_id": m.group("pkg").strip(),
-                "item_name": " ".join(m.group("name").split()),
-                "quantity": m.group("qty").strip(),
-                "budget": m.group("budget").replace(",", "").strip(),
-                "delivery_time": " ".join(m.group("delivery").split()),
-                "delivery_place": " ".join(m.group("place").split()),
-            }
-        )
+    scope = _normalize_dense_text(_extract_front_matter_scope(tender_raw))
+    if not scope:
+        return rows
+
+    patterns = [
+        re.compile(
+            r"(?P<pkg>\d+)\s+"
+            r"(?P<name>.+?)\s+"
+            r"(?P<qty>\d+(?:\.\d+)?)\s+"
+            r"详见采购文件\s+"
+            r"(?P<budget>[0-9,]+(?:\.\d+)?)"
+        ),
+        re.compile(
+            r"(?P<pkg>\d+)\s+"
+            r"(?P<name>.+?)\s+"
+            r"(?P<qty>\d+(?:\.\d+)?)\s+"
+            r"(?P<budget>[0-9,]+(?:\.\d+)?)\s+"
+            r"(?P<delivery>(?:合同签订后|签订合同后)[^。；]*?(?:交货|送达指定地点))\s+"
+            r"(?P<place>甲方指定地点|采购人指定地点|招标人指定地点|[^。；]+?地点)"
+        ),
+    ]
+
+    seen: set[str] = set()
+    for pattern in patterns:
+        for m in pattern.finditer(scope):
+            package_id = m.group("pkg").strip()
+            if package_id in seen:
+                continue
+            seen.add(package_id)
+            rows.append(
+                {
+                    "package_id": package_id,
+                    "item_name": " ".join(m.group("name").split()),
+                    "quantity": m.group("qty").strip(),
+                    "budget": m.group("budget").replace(",", "").strip(),
+                    "delivery_time": " ".join((m.groupdict().get("delivery") or "").split()),
+                    "delivery_place": " ".join((m.groupdict().get("place") or "").split()),
+                }
+            )
     return rows
 
 
@@ -335,9 +381,23 @@ def _extract_delivery_time(pkg, tender_raw: str) -> str:
     if row and row.get("delivery_time"):
         return row["delivery_time"]
 
+    front_scope = _normalize_dense_text(_extract_front_matter_scope(tender_raw))
+    if front_scope:
+        front_patterns = [
+            rf"交货期[：:]?[\s\S]{{0,400}}?合同包\s*{re.escape(str(pkg.package_id))}\s*[（(][^）)]*[）)]\s*[：:]?\s*((?:合同签订后|签订合同后)[^。；]*?(?:交货|送达指定地点))",
+            rf"交货期限[：:]?[\s\S]{{0,400}}?合同包\s*{re.escape(str(pkg.package_id))}\s*[（(][^）)]*[）)]\s*[：:]?\s*((?:合同签订后|签订合同后)[^。；]*?(?:交货|送达指定地点))",
+        ]
+        for pat in front_patterns:
+            match = re.search(pat, front_scope)
+            if match:
+                return " ".join(match.group(1).split())
+
     block = _find_package_block(tender_raw, pkg.package_id)
     if block:
         patterns = [
+            r"采购项目（标的）交付的时间\s*[：:]\s*([^\n]+)",
+            r"采购项目\(标的\)交付的时间\s*[：:]\s*([^\n]+)",
+            r"交付的时间\s*[：:]\s*([^\n]+)",
             r"标的提供的时间\s*([^\n]+)",
             r"合同履行期限\s*([^\n]+)",
             r"交货期[：:]\s*([^\n]+)",
@@ -355,9 +415,23 @@ def _extract_delivery_place(pkg, tender_raw: str) -> str:
     if row and row.get("delivery_place"):
         return row["delivery_place"]
 
+    front_scope = _normalize_dense_text(_extract_front_matter_scope(tender_raw))
+    if front_scope:
+        front_patterns = [
+            rf"交货地点[：:]?[\s\S]{{0,400}}?合同包\s*{re.escape(str(pkg.package_id))}\s*[（(][^）)]*[）)]\s*[：:]?\s*(甲方指定地点|采购人指定地点|招标人指定地点|[^。；]+?地点)",
+            rf"交货地址[：:]?[\s\S]{{0,400}}?合同包\s*{re.escape(str(pkg.package_id))}\s*[（(][^）)]*[）)]\s*[：:]?\s*(甲方指定地点|采购人指定地点|招标人指定地点|[^。；]+?地点)",
+        ]
+        for pat in front_patterns:
+            match = re.search(pat, front_scope)
+            if match:
+                return " ".join(match.group(1).split())
+
     block = _find_package_block(tender_raw, pkg.package_id)
     if block:
         patterns = [
+            r"采购项目（标的）交付的地点\s*[：:]\s*([^\n]+)",
+            r"采购项目\(标的\)交付的地点\s*[：:]\s*([^\n]+)",
+            r"交付的地点\s*[：:]\s*([^\n]+)",
             r"标的提供的地点\s*([^\n]+)",
             r"交货地点[：:]\s*([^\n]+)",
             r"供货地点[：:]\s*([^\n]+)",

@@ -160,3 +160,61 @@ def test_bid_evidence_binding_reserves_evidence_alias_fields() -> None:
     assert binding.evidence_file == "产品说明书.pdf"
     assert binding.evidence_page == 12
     assert binding.evidence_snippet == "主机参数满足要求"
+
+
+def test_validation_gate_ignores_project_meta_when_counting_multi_package_forbidden_terms() -> None:
+    tender = TenderDocument(
+        project_name="手术用头架、X射线血液辐照设备(二次)",
+        project_number="CS-2026-002",
+        budget=1000000.0,
+        purchaser="某医院",
+        agency="某代理机构",
+        procurement_type="竞争性磋商",
+        packages=[
+            ProcurementPackage(
+                package_id="1",
+                item_name="X射线血液辐照设备",
+                quantity=1,
+                budget=700000.0,
+                technical_requirements={"功能": "满足"},
+                delivery_time="合同签订后30日内",
+                delivery_place="采购人指定地点",
+            ),
+            ProcurementPackage(
+                package_id="2",
+                item_name="手术用头架",
+                quantity=3,
+                budget=300000.0,
+                technical_requirements={"功能": "满足"},
+                delivery_time="合同签订后30日内",
+                delivery_place="采购人指定地点",
+            ),
+        ],
+        commercial_terms=CommercialTerms(),
+        evaluation_criteria={},
+        special_requirements="",
+    )
+    sections = [
+        BidDocumentSection(
+            section_title="附一、资格性审查响应对照表",
+            content=(
+                "### 包1：X射线血液辐照设备\n"
+                "项目名称：手术用头架、X射线血液辐照设备(二次)\n"
+                "交货地点：甲方指定地点\n"
+                "响应文件对应内容：资格承诺函及相关证明材料。\n\n"
+                "### 包2：手术用头架\n"
+                "项目名称：手术用头架、X射线血液辐照设备(二次)\n"
+                "交货地点：甲方指定地点\n"
+                "响应文件对应内容：资格承诺函及相关证明材料。\n"
+            ),
+            attachments=[],
+        )
+    ]
+
+    gate = compute_validation_gate(
+        sections=sections,
+        target_package_ids=["1", "2"],
+        tender=tender,
+    )
+
+    assert gate.package_contamination_detected is False
