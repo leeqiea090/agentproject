@@ -4,12 +4,6 @@ import app.routers.tender.common as _common
 import importlib
 
 
-def __reexport_all(module) -> None:
-    for name, value in vars(module).items():
-        if name.startswith("__"):
-            continue
-        globals()[name] = value
-
 
 for _module in (_common,):
     __reexport_all(_module)

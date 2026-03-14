@@ -363,7 +363,43 @@ class AgentRunResponse(BaseModel):
 
 # ==================== 招投标系统数据模型 ====================
 
-# --- 招标文件相关 ---
+# --- 招标文件相关 ---、、
+
+class TenderTableColumn(BaseModel):
+    """招标文件表格列模板。"""
+    key: str = Field(description="列键名，如 seq / requirement / response")
+    title: str = Field(description="原始列表头")
+    required: bool = Field(default=False, description="是否为必填列")
+
+
+class TenderTableRowTemplate(BaseModel):
+    """招标文件表格行模板。"""
+    seq: str = Field(default="", description="序号")
+    cells: dict[str, str] = Field(default_factory=dict, description="列键名 -> 单元格文字")
+    source_text: str = Field(default="", description="来源原文")
+    is_material: bool = Field(default=False, description="是否为实质性条款")
+    package_id: str = Field(default="", description="适用包号，空表示全项目")
+
+
+class TenderTableTemplate(BaseModel):
+    """招标文件表格模板。"""
+    table_name: str = Field(default="", description="表格名称")
+    section_title: str = Field(default="", description="所属章节标题")
+    source_title: str = Field(default="", description="来源标题")
+    columns: list[TenderTableColumn] = Field(default_factory=list, description="原始列表头模板")
+    rows: list[TenderTableRowTemplate] = Field(default_factory=list, description="原始行模板")
+    package_id: str = Field(default="", description="适用包号，空表示全项目")
+    raw_block: str = Field(default="", description="来源原始文本块")
+
+
+class ResponseSectionTemplate(BaseModel):
+    """响应文件格式章节模板。"""
+    order_no: str = Field(default="", description="章序号，如 一 / 二 / 三")
+    title: str = Field(description="章节标题")
+    required: bool = Field(default=True, description="是否为招标文件明确要求的必备章节")
+    raw_block: str = Field(default="", description="章节来源原文")
+    package_id: str = Field(default="", description="适用包号，空表示全项目")
+    table_templates: list[TenderTableTemplate] = Field(default_factory=list, description="本章节内附带的表格模板")
 
 class ProcurementPackage(BaseModel):
     """采购包信息"""
@@ -396,6 +432,16 @@ class TenderDocument(BaseModel):
     commercial_terms: CommercialTerms = Field(default_factory=CommercialTerms, description="商务条款")
     evaluation_criteria: dict[str, Any] = Field(default_factory=dict, description="评分标准")
     special_requirements: str = Field(default="", description="特殊要求说明")
+
+    # ===== 新增：响应文件格式 / 审查表 / 评分表模板 =====
+    response_section_titles: list[str] = Field(default_factory=list, description="响应文件格式章节标题顺序")
+    response_section_templates: list[ResponseSectionTemplate] = Field(default_factory=list, description="响应文件格式章节模板")
+
+    qualification_review_table: TenderTableTemplate | None = Field(default=None, description="资格性审查表模板")
+    compliance_review_table: TenderTableTemplate | None = Field(default=None, description="符合性审查表模板")
+    detailed_review_table: TenderTableTemplate | None = Field(default=None, description="详细评审/评分表模板")
+    invalid_bid_table: TenderTableTemplate | None = Field(default=None, description="投标无效情形表模板")
+
 
 
 class TenderUploadRequest(BaseModel):

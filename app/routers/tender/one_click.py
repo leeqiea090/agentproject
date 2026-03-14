@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logger
+
 import app.routers.tender.common as _common
 import importlib
+
+from app.services.docx_builder import build_bid_docx
 
 
 def __reexport_all(module) -> None:
@@ -118,12 +122,12 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             message="正在输出 Word 文档…",
             progress=90,
         )
-        output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
+        output_file = _common.BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
         build_bid_docx(sections, tender_doc, _PLACEHOLDER_COMPANY, output_file)
         if not output_file.exists() or output_file.stat().st_size == 0:
             raise RuntimeError("Word 文件生成失败，输出文件为空")
 
-        filename = _safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx")
+        filename = _common._safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx")
         download_url = f"/api/tender/one-click/download/{job_id}"
         logger.info("一键生成任务完成: %s -> %s", job_id, output_file)
         is_external_ready = gen_result.validation_gate.passes_external_gate()
@@ -140,9 +144,9 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             filename=filename,
             download_url=download_url,
         )
-        one_click_job_storage[job_id]["validation_gate"] = gen_result.validation_gate.model_dump()
-        one_click_job_storage[job_id]["regression_metrics"] = gen_result.regression_metrics.model_dump()
-        one_click_job_storage[job_id]["draft_level"] = gen_result.draft_level.value
+        _common.one_click_job_storage[job_id]["validation_gate"] = gen_result.validation_gate.model_dump()
+        _common.one_click_job_storage[job_id]["regression_metrics"] = gen_result.regression_metrics.model_dump()
+        _common.one_click_job_storage[job_id]["draft_level"] = gen_result.draft_level.value
     except Exception as exc:  # noqa: BLE001
         logger.error("一键生成后台任务失败：%s", exc, exc_info=True)
         _set_one_click_job_status(

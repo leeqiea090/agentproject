@@ -310,51 +310,6 @@ def _collect_duplicate_requirement_keys(
     return result
 
 
-def _collect_rendered_forbidden_hits(
-    sections: list[BidDocumentSection],
-    tender: TenderDocument | None,
-) -> dict[str, list[str]]:
-    result: dict[str, list[str]] = {}
-    if tender is None:
-        return result
-
-    package_name_map = {pkg.package_id: pkg.item_name for pkg in tender.packages}
-
-    for section in sections:
-        content = section.content or ""
-        if not content:
-            continue
-
-        title = _section_title_text(section)
-        if title and ("第四章" in title or "报价书附件" in title):
-            continue
-        if "第四章 报价书附件" in content:
-            content = content.split("第四章 报价书附件", 1)[0]
-
-        for pkg in tender.packages:
-            other_names = [
-                name for other_id, name in package_name_map.items()
-                if other_id != pkg.package_id
-            ]
-            forbidden = tuple(_package_forbidden_terms(pkg.item_name, other_names))
-            if not forbidden:
-                continue
-
-            block_pattern = re.compile(
-                rf"###\s*包{re.escape(pkg.package_id)}[^\n]*\n(.*?)(?=\n###\s*包\d+[：:]|\n#|\n##|\n###\s*第[一二三四五六七八九十\d]+|\Z)",
-                re.S,
-            )
-            hits: list[str] = []
-            for match in block_pattern.finditer(content):
-                block = match.group(1)
-                hits.extend(tok for tok in forbidden if tok in block)
-
-            if hits:
-                result.setdefault(pkg.package_id, [])
-                result[pkg.package_id].extend(hits)
-
-    return {k: sorted(set(v)) for k, v in result.items()}
-
 
 
 
@@ -404,13 +359,14 @@ def compute_validation_gate(
     for pattern in _PLACEHOLDER_PATTERNS:
         placeholder_count += len(re.findall(pattern, full_text))
 
-    # 1b) 项目元信息异常检测
-    project_meta_issues = _collect_project_meta_issues(full_text, tender, target_package_ids)
-    project_meta_anomaly_detected = bool(project_meta_issues)
-    if project_meta_anomaly_detected:
-        logger.warning("项目元信息异常：%s", "；".join(project_meta_issues[:5]))
-
-
+    core_fallback_markers = (
+        "待补：未从采购文件中自动拆出逐条技术参数，请按采购文件技术要求逐条补录。",
+        "详见采购文件技术要求",
+        "按采购文件售后服务要求执行。",
+    )
+    if any(marker in full_text for marker in core_fallback_markers):
+        project_meta_anomaly_detected = True
+        logger.warning("核心章节仍存在泛化兜底文本，禁止作为可外发底稿。")
 
     # 2) 包件污染检测 — 单包和多包模式均检测
     package_contamination = False
@@ -949,9 +905,14 @@ def _check_required_new_structure(full_text: str | None, tender=None) -> list[st
             "四、技术偏离及详细配置明细表",
             "五、技术服务和售后服务的内容及措施",
             "六、法定代表人/单位负责人授权书",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、详细评审响应对照表",
+            "十、投标无效情形汇总及自检表",
         ]
 
     return [x for x in required if x not in text]
+
 
 def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[str]:
     text = full_text or ""
@@ -966,6 +927,8 @@ def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[s
             "六、技术偏离表",
             "七、报价书附件",
             "六、法定代表人/单位负责人授权书",
+            "九、详细评审响应对照表",
+            "十、投标无效情形汇总及自检表",
             "竞争性磋商文件",
         ]
     else:
@@ -977,13 +940,103 @@ def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[s
             "五、详细配置明细",
             "六、技术偏离表",
             "七、报价书附件",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、投标无效情形汇总及自检表",
             "竞争性谈判文件",
         ]
 
     return [x for x in forbidden if x in text]
+
+def _clean_rendered_block_for_forbidden_scan(
+    block: str,
+    tender: TenderDocument | None = None,
+) -> str:
+    """
+    对渲染后的包内区块做降噪，避免把项目名称/项目编号/数量/交货期等
+    元信息误判为“跨包术语污染”。
+    """
+    if not block:
+        return ""
+
+    drop_prefixes = (
+        "项目名称：",
+        "项目编号：",
+        "数量：",
+        "交货期：",
+        "交货地点：",
+        "供应商全称：",
+        "日期：",
+        "说明：",
+    )
+
+    kept: list[str] = []
+    for raw in block.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith(drop_prefixes):
+            continue
+        if s.startswith("### 包") or s.startswith("#### "):
+            continue
+        kept.append(s)
+
+    cleaned = "\n".join(kept)
+
+    # 项目名称经常包含多个包名，直接整串剔除，避免误判
+    project_name = (getattr(tender, "project_name", "") or "").strip()
+    if project_name:
+        cleaned = cleaned.replace(project_name, "")
+
+    return cleaned
+
+
+
+
+
+def _collect_rendered_forbidden_hits(
+    sections: list[BidDocumentSection],
+    tender: TenderDocument | None,
+) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    if tender is None:
+        return result
+
+    package_name_map = {pkg.package_id: pkg.item_name for pkg in tender.packages}
+
+    for section in sections:
+        content = section.content or ""
+        if not content:
+            continue
+
+        title = _section_title_text(section)
+        if title and ("报价书附件" in title):
+            continue
+        if "报价书附件" in content:
+            content = content.split("报价书附件", 1)[0]
+
+        for pkg in tender.packages:
+            other_names = [
+                name for other_id, name in package_name_map.items()
+                if other_id != pkg.package_id
+            ]
+            forbidden = tuple(_package_forbidden_terms(pkg.item_name, other_names))
+            if not forbidden:
+                continue
+
+            block_pattern = re.compile(
+                rf"###\s*包{re.escape(pkg.package_id)}[^\n]*\n(.*?)(?=\n###\s*包\d+[：:]|\n#|\n##|\n###\s*第[一二三四五六七八九十\d]+|\Z)",
+                re.S,
+            )
+
+            hits: list[str] = []
+            for match in block_pattern.finditer(content):
+                block = match.group(1)
+                cleaned_block = _clean_rendered_block_for_forbidden_scan(block, tender)
+                hits.extend(tok for tok in forbidden if tok in cleaned_block)
+
+            if hits:
+                result.setdefault(pkg.package_id, [])
+                result[pkg.package_id].extend(hits)
+
+    return {k: sorted(set(v)) for k, v in result.items()}
 
 def compute_regression_metrics(
     sections: list[BidDocumentSection],
@@ -1215,14 +1268,21 @@ def _check_required_headings(full_text: str) -> list[str]:
         "一、响应文件封面格式",
         "四、技术偏离及详细配置明细表",
         "五、技术服务和售后服务的内容及措施",
-        "六、法定代表人/单位负责人授权书",
         "资格性审查响应对照表",
         "符合性审查响应对照表",
         "详细评审响应对照表",
         "投标无效情形汇总及自检表",
     ]
+    if "二、首轮报价表" in full_text:
+        required.append("六、法定代表人/单位负责人授权书")
+    if "二、报价书" in full_text:
+        required.extend(["二、报价书", "三、报价一览表", "四、资格承诺函"])
     missing = [x for x in required if x not in full_text]
+    for token in ("详见采购文件技术要求", "按采购文件售后服务要求执行"):
+        if token in full_text:
+            missing.append(f"存在泛化兜底文本：{token}")
     return missing
+
 
 def _sanitize_generated_content(section_title: str, content: str) -> tuple[str, list[str]]:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()

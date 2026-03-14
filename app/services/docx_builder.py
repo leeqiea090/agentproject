@@ -140,6 +140,16 @@ def _get_fixed_table_widths(header_cells: list[str]):
     if key == ("序号", "服务名称", "磋商文件的服务需求", "响应文件响应情况", "偏离情况"):
         return [Cm(1.2), Cm(2.8), Cm(5.8), Cm(5.8), Cm(2.2)]
 
+    if key == ("序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"):
+        return [Cm(1.0), Cm(2.2), Cm(6.0), Cm(4.8), Cm(1.8), Cm(2.0)]
+
+    if key == ("序号", "评审项", "采购文件评分要求", "响应文件对应内容", "自评说明", "证明材料/页码"):
+        return [Cm(1.0), Cm(2.2), Cm(5.4), Cm(4.4), Cm(3.2), Cm(2.2)]
+
+    if key == ("序号", "无效情形", "自检结果", "备注"):
+        return [Cm(1.0), Cm(10.5), Cm(2.4), Cm(3.0)]
+
+    # 兼容旧模板
     if key == ("序号", "审查项", "招标文件要求", "响应情况", "对应材料/页码"):
         return [Cm(1.2), Cm(3.0), Cm(6.0), Cm(4.5), Cm(3.0)]
 
@@ -451,6 +461,8 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "六、技术偏离表",
             "七、报价书附件",
             "六、法定代表人/单位负责人授权书",
+            "九、详细评审响应对照表",
+            "十、投标无效情形汇总及自检表",
         }
     else:
         required = {
@@ -460,6 +472,10 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "四、技术偏离及详细配置明细表",
             "五、技术服务和售后服务的内容及措施",
             "六、法定代表人/单位负责人授权书",
+            "七、资格性审查响应对照表",
+            "八、符合性审查响应对照表",
+            "九、详细评审响应对照表",
+            "十、投标无效情形汇总及自检表",
         }
         forbidden = {
             "一、封面格式",
@@ -469,9 +485,6 @@ def _assert_new_structure_only(sections, tender=None) -> None:
             "五、详细配置明细",
             "六、技术偏离表",
             "七、报价书附件",
-            "七、资格性审查响应对照表",
-            "八、符合性审查响应对照表",
-            "九、投标无效情形汇总及自检表",
         }
 
     missing = [x for x in required if x not in titles]

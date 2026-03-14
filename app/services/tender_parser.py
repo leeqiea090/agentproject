@@ -12,13 +12,17 @@ from langchain_openai import ChatOpenAI
 from app.config import get_settings
 from app.schemas import (
     TenderDocument,
-    ProcurementPackage
+    ProcurementPackage,
+    ResponseSectionTemplate,
+    TenderTableColumn,
+    TenderTableRowTemplate,
+    TenderTableTemplate,
 )
 from app.services.requirement_processor import (
     _find_requirement_pair_position,
     _is_bad_requirement_name,
     _is_bad_requirement_value,
-    _package_forbidden_terms,
+    _package_forbidden_terms, _extract_match_tokens, _safe_text,
 )
 try:
     from docx import Document as _DocxDocument
@@ -28,7 +32,204 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 _FALLBACK_PARSE_CHAR_LIMITS = (24000, 16000, 10000)
+DEFAULT_CS_SECTION_TITLES = [
+    "一、响应文件封面格式",
+    "二、首轮报价表",
+    "三、分项报价表",
+    "四、技术偏离及详细配置明细表",
+    "五、技术服务和售后服务的内容及措施",
+    "六、法定代表人/单位负责人授权书",
+    "七、资格性审查响应对照表",
+    "八、符合性审查响应对照表",
+    "九、详细评审响应对照表",
+    "十、投标无效情形汇总及自检表",
+]
 
+DEFAULT_TP_SECTION_TITLES = [
+    "一、响应文件封面格式",
+    "二、报价书",
+    "三、报价一览表",
+    "四、资格承诺函",
+    "五、技术偏离及详细配置明细表",
+    "六、技术服务和售后服务的内容及措施",
+    "七、资格性审查响应对照表",
+    "八、符合性审查响应对照表",
+    "九、投标无效情形汇总及自检表",
+]
+
+def _normalize_table_key(title: str, idx: int) -> str:
+    title = re.sub(r"\s+", "", title or "")
+    mapping = {
+        "序号": "seq",
+        "评审项目": "review_item",
+        "审查项": "review_item",
+        "条款名称": "review_item",
+        "采购文件要求": "tender_requirement",
+        "磋商文件要求": "tender_requirement",
+        "招标文件要求": "tender_requirement",
+        "响应文件内容": "response_content",
+        "响应文件对应内容": "response_content",
+        "投标文件内容": "response_content",
+        "是否满足": "is_match",
+        "是否响应": "is_match",
+        "备注": "remark",
+        "页码": "page_no",
+        "分值": "score",
+        "标准分": "score",
+        "评分标准": "score_rule",
+        "评审标准": "score_rule",
+        "无效情形": "invalid_reason",
+        "证明材料": "evidence",
+        "证明材料页码": "evidence",
+        "自评说明": "self_note",
+    }
+    return mapping.get(title, f"col_{idx}")
+
+
+def _default_columns(table_kind: str) -> list[TenderTableColumn]:
+    if table_kind == "qualification":
+        titles = ["序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"]
+    elif table_kind == "compliance":
+        titles = ["序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"]
+    elif table_kind == "detailed":
+        titles = ["序号", "评审项", "采购文件评分要求", "响应文件对应内容", "自评说明", "证明材料/页码"]
+    elif table_kind == "invalid":
+        titles = ["序号", "无效情形", "自检结果", "备注"]
+    else:
+        titles = ["序号", "内容"]
+
+    return [
+        TenderTableColumn(
+            key=_normalize_table_key(t, i),
+            title=t,
+            required=(i <= 3),
+        )
+        for i, t in enumerate(titles, start=1)
+    ]
+
+
+def _split_pipe_row(line: str) -> list[str]:
+    parts = [part.strip() for part in line.strip().strip("|").split("|")]
+    return [p for p in parts if p]
+
+
+def _is_separator_row(line: str) -> bool:
+    sample = line.strip().replace("|", "").replace(":", "").replace("-", "")
+    return not sample
+
+
+def _make_row_from_text(text: str, columns: list[TenderTableColumn], seq: int) -> TenderTableRowTemplate:
+    cells: dict[str, str] = {}
+    if columns:
+        cells[columns[0].key] = str(seq)
+    if len(columns) >= 2:
+        cells[columns[1].key] = text
+    for col in columns[2:]:
+        cells[col.key] = ""
+
+    return TenderTableRowTemplate(
+        seq=str(seq),
+        cells=cells,
+        source_text=text,
+        is_material=("★" in text or "※" in text or "实质性" in text),
+    )
+
+
+def _parse_table_template_from_block(block: str, table_name: str, table_kind: str) -> TenderTableTemplate | None:
+    block = (block or "").strip()
+    if not block:
+        return None
+
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    pipe_lines = [line for line in lines if "|" in line and len(_split_pipe_row(line)) >= 2]
+
+    columns: list[TenderTableColumn] = []
+    rows: list[TenderTableRowTemplate] = []
+
+    # 情况1：原文里能识别出“|”表格
+    if pipe_lines:
+        header_cells = _split_pipe_row(pipe_lines[0])
+        columns = [
+            TenderTableColumn(
+                key=_normalize_table_key(title, idx),
+                title=title,
+                required=(idx <= 3),
+            )
+            for idx, title in enumerate(header_cells, start=1)
+        ]
+
+        seq_no = 1
+        for line in pipe_lines[1:]:
+            if _is_separator_row(line):
+                continue
+            cells_raw = _split_pipe_row(line)
+            if not cells_raw:
+                continue
+
+            cell_map: dict[str, str] = {}
+            for idx, col in enumerate(columns):
+                cell_map[col.key] = cells_raw[idx] if idx < len(cells_raw) else ""
+
+            rows.append(
+                TenderTableRowTemplate(
+                    seq=cell_map.get(columns[0].key, str(seq_no)),
+                    cells=cell_map,
+                    source_text=" | ".join(cells_raw),
+                    is_material=("★" in " ".join(cells_raw) or "※" in " ".join(cells_raw)),
+                )
+            )
+            seq_no += 1
+
+    # 情况2：不是标准表格，而是编号条款，退化成“行模板”
+    if not columns:
+        columns = _default_columns(table_kind)
+        merged: list[str] = []
+
+        for line in lines:
+            if re.match(r"^(?:\d+[、.）)]|[（(]?\d+[）)]|[一二三四五六七八九十]+[、.]|★|※)", line):
+                merged.append(line)
+            else:
+                if merged:
+                    merged[-1] += " " + line
+
+        for idx, item in enumerate(merged, start=1):
+            if len(item.strip()) < 2:
+                continue
+            rows.append(_make_row_from_text(item.strip(), columns, idx))
+
+    if not rows:
+        return None
+
+    return TenderTableTemplate(
+        table_name=table_name,
+        section_title=table_name,
+        source_title=table_name,
+        columns=columns,
+        rows=rows,
+        raw_block=block,
+    )
+
+
+def _extract_heading_block(text: str, heading_keywords: list[str], stop_keywords: list[str] | None = None) -> str:
+    stop_keywords = stop_keywords or [
+        "资格性审查", "符合性审查", "详细评审", "评分标准", "响应文件格式",
+        "采购需求", "商务要求", "合同草案", "合同包", "采购包", "投标无效", "响应无效",
+    ]
+
+    all_keys = heading_keywords + stop_keywords
+    pattern = re.compile(
+        rf"(?:{'|'.join(map(re.escape, heading_keywords))})[：:]?(.*?)(?=(?:{'|'.join(map(re.escape, all_keys))})[：:]?|$)",
+        re.S,
+    )
+    match = pattern.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _default_section_titles(procurement_type: str) -> list[str]:
+    mode = procurement_type or ""
+    if "磋商" in mode:
+        return DEFAULT_CS_SECTION_TITLES.copy()
+    return DEFAULT_TP_SECTION_TITLES.copy()
 def _fails_package_domain_guard(item_name: str, key: str, req: str) -> bool:
     """
     防止不同包的技术条款串包。
@@ -341,6 +542,128 @@ class TenderParser:
         return tender_doc
 
     @staticmethod
+    def _extract_response_section_titles(tender_text: str, procurement_type: str) -> list[str]:
+        block = _extract_heading_block(
+            tender_text,
+            ["响应文件格式", "第六章 响应文件格式", "第五章 响应文件格式", "第七章 响应文件格式"],
+            ["采购需求", "商务要求", "合同草案", "评审", "评分标准"],
+        )
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        titles: list[str] = []
+
+        for line in lines:
+            clean = re.sub(r"^第[一二三四五六七八九十]+章", "", line).strip()
+            if re.match(r"^[一二三四五六七八九十]+、", clean):
+                titles.append(clean)
+
+        return titles or _default_section_titles(procurement_type)
+
+    def _extract_response_section_templates(self, tender_text: str, procurement_type: str) -> list[ResponseSectionTemplate]:
+        titles = self._extract_response_section_titles(tender_text, procurement_type)
+        templates: list[ResponseSectionTemplate] = []
+
+        for title in titles:
+            m = re.match(r"^([一二三四五六七八九十]+)、(.*)$", title)
+            order_no = m.group(1) if m else ""
+            templates.append(
+                ResponseSectionTemplate(
+                    order_no=order_no,
+                    title=title,
+                    required=True,
+                    raw_block=title,
+                )
+            )
+        return templates
+
+    def _extract_review_tables(self, tender_text: str, procurement_type: str) -> dict[str, TenderTableTemplate | None]:
+        qualification_block = _extract_heading_block(
+            tender_text,
+            ["资格性审查表", "资格审查表", "资格性审查", "资格审查"],
+            ["符合性审查", "详细评审", "评分标准", "投标无效", "响应无效", "响应文件格式"],
+        )
+        compliance_block = _extract_heading_block(
+            tender_text,
+            ["符合性审查表", "符合性审查"],
+            ["详细评审", "评分标准", "投标无效", "响应无效", "响应文件格式"],
+        )
+        detailed_block = _extract_heading_block(
+            tender_text,
+            ["详细评审", "评分标准", "评分办法", "评审标准"],
+            ["投标无效", "响应无效", "响应文件格式", "合同草案"],
+        )
+        invalid_block = _extract_heading_block(
+            tender_text,
+            ["投标无效", "响应无效", "无效投标", "无效响应"],
+            ["响应文件格式", "合同草案", "采购需求"],
+        )
+
+        qualification = _parse_table_template_from_block(qualification_block, "资格性审查响应对照表", "qualification")
+        compliance = _parse_table_template_from_block(compliance_block, "符合性审查响应对照表", "compliance")
+        detailed = _parse_table_template_from_block(detailed_block, "详细评审响应对照表", "detailed")
+        invalid_table = _parse_table_template_from_block(invalid_block, "投标无效情形汇总及自检表", "invalid")
+
+        if qualification is None:
+            qualification = TenderTableTemplate(
+                table_name="资格性审查响应对照表",
+                section_title="资格性审查响应对照表",
+                source_title="资格性审查响应对照表",
+                columns=_default_columns("qualification"),
+                rows=[],
+                raw_block="",
+            )
+
+        if compliance is None:
+            compliance = TenderTableTemplate(
+                table_name="符合性审查响应对照表",
+                section_title="符合性审查响应对照表",
+                source_title="符合性审查响应对照表",
+                columns=_default_columns("compliance"),
+                rows=[],
+                raw_block="",
+            )
+
+        if detailed is None and "磋商" in (procurement_type or ""):
+            detailed = TenderTableTemplate(
+                table_name="详细评审响应对照表",
+                section_title="详细评审响应对照表",
+                source_title="详细评审响应对照表",
+                columns=_default_columns("detailed"),
+                rows=[],
+                raw_block="",
+            )
+
+        if invalid_table is None:
+            invalid_table = TenderTableTemplate(
+                table_name="投标无效情形汇总及自检表",
+                section_title="投标无效情形汇总及自检表",
+                source_title="投标无效情形汇总及自检表",
+                columns=_default_columns("invalid"),
+                rows=[],
+                raw_block="",
+            )
+
+        return {
+            "qualification_review_table": qualification,
+            "compliance_review_table": compliance,
+            "detailed_review_table": detailed,
+            "invalid_bid_table": invalid_table,
+        }
+
+    def _enrich_format_templates(self, tender_doc: TenderDocument, tender_text: str) -> TenderDocument:
+        section_templates = self._extract_response_section_templates(tender_text, tender_doc.procurement_type)
+        review_tables = self._extract_review_tables(tender_text, tender_doc.procurement_type)
+        section_titles = [item.title for item in section_templates]
+
+        update_payload = {
+            "response_section_titles": section_titles,
+            "response_section_templates": section_templates,
+            **review_tables,
+        }
+        return tender_doc.model_copy(update=update_payload)
+
+
+
+    @staticmethod
     def extract_text_from_pdf(pdf_path: str | Path) -> str:
         """从PDF文件中提取文本"""
         try:
@@ -415,6 +738,7 @@ class TenderParser:
                 if self._needs_technical_enrichment(tender_doc):
                     tender_doc = self._enrich_package_requirements(tender_doc, candidate_text)
                 tender_doc = self._enrich_package_quantities(tender_doc, candidate_text)
+                tender_doc = self._enrich_format_templates(tender_doc, candidate_text)
                 logger.info(f"成功解析招标文件: {tender_doc.project_name}（输入长度={limit}）")
                 return tender_doc
             except Exception as exc:  # noqa: BLE001
@@ -451,6 +775,7 @@ class TenderParser:
             if self._needs_technical_enrichment(tender_doc):
                 tender_doc = self._enrich_package_requirements(tender_doc, tender_text)
             tender_doc = self._enrich_package_quantities(tender_doc, tender_text)
+            tender_doc = self._enrich_format_templates(tender_doc, tender_text)
             logger.info(f"成功解析招标文本: {tender_doc.project_name}")
             return tender_doc
         except Exception as e:  # noqa: BLE001
@@ -568,6 +893,8 @@ class TenderParser:
                     val_tokens = [t for t in _extract_match_tokens(val) if len(t) >= 2]
                     if val_tokens and not any(t in local_excerpt for t in val_tokens[:4]):
                         continue
+
+                    cleaned[key] = val or matched
 
             return cleaned
         except:

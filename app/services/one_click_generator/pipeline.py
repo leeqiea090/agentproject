@@ -416,15 +416,26 @@ def generate_bid_sections(
         target_package_ids=target_package_ids,
         tender=tender,
     )
-    final_reasons = gate.failure_reasons()
+    reasons = gate.failure_reasons()
+
+    display_reasons = reasons
+    if not external_gate_enabled:
+        display_reasons = [
+            r for r in reasons
+            if not (r.startswith("证据覆盖不足") or r.startswith("证据空白"))
+        ]
+        if not display_reasons and reasons:
+            display_reasons = ["投标侧资料未齐，当前输出为待补充底稿"]
+
     logger.info(
-        "最终硬校验: mixing=%s, contamination=%s, placeholders=%d, "
+        "硬校验(pass=%d): mixing=%s, contamination=%s, placeholders=%d, "
         "evidence=%.1f%%, reasons=%s",
+        heal_pass,
         gate.table_category_mixing,
         gate.package_contamination_detected,
         gate.placeholder_count,
         gate.bid_evidence_coverage * 100,
-        final_reasons or "无",
+        display_reasons or "无",
     )
 
     # ── Step 5: 稿件等级判定 & 双输出 ──

@@ -3,6 +3,290 @@ from __future__ import annotations
 from app.schemas import BidDocumentSection, TenderDocument, ProcurementPackage
 
 
+def _extract_review_block(tender_raw: str, title_keywords: list[str], stop_keywords: list[str] | None = None) -> str:
+    stop_keywords = stop_keywords or [
+        "响应文件格式", "合同包", "采购包", "报价", "技术参数", "商务要求", "采购需求", "资格承诺函",
+    ]
+    for key in title_keywords:
+        pat = re.compile(
+            rf"{re.escape(key)}[：:]?(.*?)(?:(?:{'|'.join(map(re.escape, stop_keywords))})|$)",
+            re.S,
+        )
+        m = pat.search(tender_raw)
+        if m:
+            body = re.sub(r"-第\d+页-", "", m.group(1) or "")
+            body = re.sub(r"\n{3,}", "\n\n", body).strip()
+            if body:
+                return body
+    return ""
+
+
+def _extract_review_rows_from_block(block: str) -> list[str]:
+    if not block:
+        return []
+
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    merged: list[str] = []
+
+    for line in lines:
+        if re.match(
+            r"^(?:\d+[、.）)]|[（(]?\d+[）)]|[一二三四五六七八九十]+[、.]|★|※|评审因素|评分标准|评审项目)",
+            line,
+        ):
+            merged.append(line)
+        else:
+            if merged:
+                merged[-1] += " " + line
+
+    cleaned: list[str] = []
+    for item in merged:
+        s = " ".join(item.split())
+        if len(s) < 4:
+            continue
+        if s in {"评审标准", "评分标准", "详细评审", "资格审查", "符合性审查"}:
+            continue
+        cleaned.append(s.replace("|", "/"))
+
+    return cleaned
+
+
+def _clean_text(value) -> str:
+    return " ".join(str(value or "").replace("|", "/").split())
+
+
+def _md_table(headers: list[str], rows: list[list[str]]) -> str:
+    aligns = ["---:"] + ["---"] * (len(headers) - 1)
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(aligns) + " |",
+    ]
+    for row in rows:
+        fixed = [_clean_text(x) for x in row]
+        if len(fixed) < len(headers):
+            fixed += [""] * (len(headers) - len(fixed))
+        elif len(fixed) > len(headers):
+            fixed = fixed[: len(headers) - 1] + [" / ".join(fixed[len(headers) - 1 :])]
+        lines.append("| " + " | ".join(fixed) + " |")
+    return "\n".join(lines)
+
+
+def _row_to_cells(row) -> dict[str, str]:
+    cells = {str(k): _clean_text(v) for k, v in (getattr(row, "cells", {}) or {}).items()}
+    source_text = _clean_text(getattr(row, "source_text", ""))
+    package_id = _clean_text(getattr(row, "package_id", ""))
+    if source_text:
+        cells["_source_text"] = source_text
+    if package_id:
+        cells["_package_id"] = package_id
+    return cells
+
+
+def _pick_template_rows(table, pkg=None) -> list[dict[str, str]]:
+    raw_rows = list(getattr(table, "rows", []) or [])
+    if not raw_rows:
+        return []
+
+    normalized = [_row_to_cells(row) for row in raw_rows]
+    if pkg is None:
+        return normalized
+
+    pkg_id = str(getattr(pkg, "package_id", "") or "").strip()
+    item_name = _clean_text(getattr(pkg, "item_name", ""))
+
+    picked: list[dict[str, str]] = []
+    saw_pkg_hint = False
+
+    for cells in normalized:
+        haystack = " ".join(v for k, v in cells.items() if not k.startswith("_"))
+        row_pkg = cells.get("_package_id", "")
+
+        if row_pkg:
+            saw_pkg_hint = True
+            if row_pkg == pkg_id:
+                picked.append(cells)
+                continue
+
+        if any(marker and marker in haystack for marker in (f"合同包{pkg_id}", f"包{pkg_id}", item_name)):
+            saw_pkg_hint = True
+            picked.append(cells)
+
+    if picked:
+        return picked
+
+    # 如果表本身没有任何包号提示，默认整张表对所有包通用
+    if not saw_pkg_hint:
+        return normalized
+
+    return []
+
+def _build_cs_qualification_review_section(tender, packages, tender_raw: str) -> str:
+    headers = ["序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"]
+    tpl = getattr(tender, "qualification_review_table", None)
+
+    fallback_rows = [
+        {"review_item": "符合《中华人民共和国政府采购法》第二十二条规定的条件", "tender_requirement": "提供黑龙江省政府采购供应商资格承诺函或等效证明材料"},
+        {"review_item": "不存在《中华人民共和国政府采购法实施条例》第十八条情形", "tender_requirement": "提供承诺函或等效证明材料"},
+        {"review_item": "未被列入失信被执行人、重大税收违法失信主体、政府采购严重违法失信行为记录名单", "tender_requirement": "提供承诺函或查询结果"},
+        {"review_item": "法定代表人/单位负责人授权书及身份证明材料齐全", "tender_requirement": "按招标文件标准格式提交授权书、法定代表人/授权代表身份证明"},
+        {"review_item": "本项目特定资格要求", "tender_requirement": "按医疗器械目录分类提供经营许可/备案凭证/生产许可证/注册证；非医疗器械无需提供"},
+    ]
+
+    parts: list[str] = []
+    for pkg in packages:
+        picked = _pick_template_rows(tpl, pkg) if tpl else []
+        source_rows = picked or fallback_rows
+
+        rows: list[list[str]] = []
+        for idx, item in enumerate(source_rows, start=1):
+            review_item = item.get("review_item") or f"审查项{idx}"
+            tender_requirement = item.get("tender_requirement") or item.get("_source_text") or review_item
+            rows.append([
+                str(idx),
+                review_item,
+                tender_requirement,
+                "【待填写：对应材料名称/页码】",
+                "【待填写：满足/不满足】",
+                "【待填写】",
+            ])
+
+        parts.extend([
+            f"### 包{pkg.package_id}：{pkg.item_name}",
+            _md_table(headers, rows),
+            "",
+        ])
+
+    return "\n".join(parts).strip()
+
+
+def _build_cs_compliance_review_section(tender_raw: str) -> str:
+    fallback_rows = [
+        "响应文件签署、盖章、密封、格式、页码、装订等符合采购文件要求。",
+        "报价唯一且未超过采购预算或最高限价，不存在缺项漏项。",
+        "对采购文件实质性条款、★/※条款逐条作出明确响应。",
+        "不存在采购文件载明的其他无效响应情形。",
+    ]
+
+    block = _extract_review_block(
+        tender_raw,
+        ["符合性审查表", "符合性审查", "符合性审查要求"],
+        ["详细评审", "评分标准", "响应文件格式", "合同包", "采购包"],
+    )
+    rows = _extract_review_rows_from_block(block) or fallback_rows
+
+    lines = [
+        "| 序号 | 审查项 | 采购文件要求 | 响应文件对应内容 | 是否满足 | 备注 |",
+        "|---:|---|---|---|---|---|",
+    ]
+    for idx, item in enumerate(rows, start=1):
+        lines.append(
+            f"| {idx} | 审查项{idx} | {item} | 【待填写：对应材料名称/页码】 | "
+            f"【待填写：满足/不满足】 | 【待填写】 |"
+        )
+
+    return "\n".join(lines)
+
+
+def _build_cs_detailed_review_section(tender, packages, tender_raw: str) -> str:
+    headers = ["序号", "评审项", "采购文件评分要求", "响应文件对应内容", "自评说明", "证明材料/页码"]
+    tpl = getattr(tender, "detailed_review_table", None)
+
+    fallback_rules = [
+        ("技术参数", "根据招标文件技术参数逐条评审。非★项每不满足一项扣分，五项及以上不满足或★条款不满足按无效/废标处理。"),
+        ("供货保证措施及运输方案", "至少展开：①供货流程及时间安排；②出库、包装措施；③运输方案及应急措施；④运输风险预防及损坏处理方案；⑤到货交接、签收验货方案。"),
+        ("安装调试阶段方案", "至少展开：①人员配备；②安装措施；③调试措施；④安装调试工期保障；⑤安装调试应急预案。"),
+        ("质量保证及技术措施", "至少展开：①质量保证管理体系；②质量技术人员方案及职责分工；③监督机制；④质量问题应急处理方案。"),
+        ("售后服务方案", "至少展开：①售后服务方案；②售后服务流程；③售后服务标准；④售后服务人员安排；⑤售后应急处理方案。"),
+        ("投标报价得分", "投标报价得分＝（评标基准价/投标报价）×价格分值。"),
+    ]
+
+    parts: list[str] = []
+    for pkg in packages:
+        picked = _pick_template_rows(tpl, pkg) if tpl else []
+        rows: list[list[str]] = []
+
+        if picked:
+            for idx, item in enumerate(picked, start=1):
+                review_item = item.get("review_item") or f"评审项{idx}"
+                score_rule = (
+                    item.get("score_rule")
+                    or item.get("tender_requirement")
+                    or item.get("_source_text")
+                    or review_item
+                )
+                rows.append([
+                    str(idx),
+                    review_item,
+                    score_rule,
+                    "【待填写：对应章节/材料】",
+                    "【待填写：如何满足该评分项】",
+                    "【待填写：页码】",
+                ])
+        else:
+            for idx, (review_item, score_rule) in enumerate(fallback_rules, start=1):
+                rows.append([
+                    str(idx),
+                    review_item,
+                    score_rule,
+                    "【待填写：对应章节/材料】",
+                    "【待填写：如何满足该评分项】",
+                    "【待填写：页码】",
+                ])
+
+        parts.extend([
+            f"### 包{pkg.package_id}：{pkg.item_name}",
+            _md_table(headers, rows),
+            "",
+        ])
+
+    return "\n".join(parts).strip()
+
+def _build_cs_invalid_bid_checklist(tender, tender_raw: str) -> str:
+    headers = ["序号", "无效情形", "自检结果", "备注"]
+    tpl = getattr(tender, "invalid_bid_table", None)
+    picked = _pick_template_rows(tpl) if tpl else []
+
+    items: list[str] = []
+    if picked:
+        for row in picked:
+            text = row.get("invalid_reason") or row.get("_source_text") or row.get("review_item") or ""
+            text = _clean_text(text)
+            if text:
+                items.append(text)
+
+    # 兜底补足本项目显著缺失的无效情形
+    fallback = [
+        "资格性审查任一项未通过。",
+        "符合性审查任一项未通过。",
+        "未在投标截止时间前上传加密电子响应文件，视为自动放弃投标。",
+        "未按招标文件要求参加远程开标会。",
+        "未在规定时间内完成电子响应文件在线解密。",
+        "经检查数字证书无效，或投标人自身原因造成电子响应文件未能解密。",
+        "未在规定时间内完成签章确认。",
+        "任意一条不满足磋商文件★号条款要求。",
+        "单项产品五条及以上不满足非★号条款要求。",
+        "供应商所提报的技术参数没有如实填写，没有与竞争性磋商文件技术要求一一对应，只简单填写“响应/完全响应”或未逐条填写应答。",
+        "供应商提报的技术参数中没有明确品牌、型号、规格、配置等。",
+        "单项商品报价超单项预算。",
+        "所报产品需软件而未提供正版软件，或强制节能产品未提供有效证明。",
+        "未按竞争性磋商文件规定要求签字、盖章。",
+        "响应文件中提供虚假材料、串通投标，或属于依法视为串通投标的情形。",
+        "提交的技术参数与所提供的技术证明文件不一致。",
+        "报价明显不合理且不能提供有效合理说明材料。",
+        "法律法规、采购文件规定的其他无效响应情形。",
+    ]
+
+    if not items:
+        items = fallback
+    else:
+        seen = set(items)
+        for x in fallback:
+            if x not in seen:
+                items.append(x)
+                seen.add(x)
+
+    rows = [[str(idx), item, "【待填写：符合/不符合】", "【待填写】"] for idx, item in enumerate(items, start=1)]
+    return _md_table(headers, rows)
+
 def _detect_procurement_mode(tender, tender_raw: str) -> str:
     text = " ".join(
         [
@@ -101,15 +385,39 @@ def _extract_delivery_time(pkg, tender_raw: str) -> str:
     row = _find_summary_row(tender_raw, pkg.package_id)
     if row and row.get("delivery_time"):
         return row["delivery_time"]
-    return "按采购文件要求"
 
+    block = _find_package_block(tender_raw, pkg.package_id)
+    if block:
+        patterns = [
+            r"标的提供的时间\s*([^\n]+)",
+            r"合同履行期限\s*([^\n]+)",
+            r"交货期[：:]\s*([^\n]+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, block)
+            if m:
+                return " ".join(m.group(1).split())
+
+    return "按采购文件要求"
 
 def _extract_delivery_place(pkg, tender_raw: str) -> str:
     row = _find_summary_row(tender_raw, pkg.package_id)
     if row and row.get("delivery_place"):
         return row["delivery_place"]
-    return "甲方指定地点"
 
+    block = _find_package_block(tender_raw, pkg.package_id)
+    if block:
+        patterns = [
+            r"标的提供的地点\s*([^\n]+)",
+            r"交货地点[：:]\s*([^\n]+)",
+            r"供货地点[：:]\s*([^\n]+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, block)
+            if m:
+                return " ".join(m.group(1).split())
+
+    return "甲方指定地点"
 
 def _extract_package_budget(pkg, tender_raw: str) -> str:
     row = _find_summary_row(tender_raw, pkg.package_id)
@@ -138,17 +446,33 @@ def _budget_text(pkg: ProcurementPackage) -> str:
 
 
 def _find_package_block(tender_raw: str, package_id: str) -> str:
-    matches = list(re.finditer(r"合同包(\d+)（", tender_raw))
-    for idx, m in enumerate(matches):
-        if m.group(1) == str(package_id):
-            start = m.start()
-            if idx + 1 < len(matches):
-                end = matches[idx + 1].start()
-            else:
-                tail = re.search(r"第三章\s*供应商须知", tender_raw[m.end():])
-                end = m.end() + tail.start() if tail else len(tender_raw)
-            return tender_raw[start:end]
-    return ""
+    pid = str(package_id).strip()
+
+    header_patterns = [
+        rf"合同包\s*{re.escape(pid)}\s*[（(:：]?",
+        rf"包\s*{re.escape(pid)}\s*[：:]",
+        rf"第\s*{re.escape(pid)}\s*包",
+        rf"采购包\s*{re.escape(pid)}\s*[：:]?",
+    ]
+
+    starts: list[tuple[int, int]] = []
+    for pat in header_patterns:
+        for m in re.finditer(pat, tender_raw):
+            starts.append((m.start(), m.end()))
+
+    if not starts:
+        return ""
+
+    starts.sort(key=lambda x: x[0])
+    start, _ = starts[0]
+
+    next_header_pat = re.compile(
+        r"(合同包\s*\d+\s*[（(:：]?|包\s*\d+\s*[：:]|第\s*\d+\s*包|采购包\s*\d+\s*[：:]?)"
+    )
+    m_next = next_header_pat.search(tender_raw, starts[0][1])
+    end = m_next.start() if m_next else len(tender_raw)
+
+    return tender_raw[start:end]
 
 
 def _extract_detail_quantity(pkg: ProcurementPackage, tender_raw: str) -> str:
@@ -819,6 +1143,181 @@ def _build_tp_service_text(pkg, tender_raw: str) -> str:
     return "\n".join(f"- {x}" for x in merged)
 
 
+
+def _extract_anchor_block(text: str, anchor_patterns: list[str], stop_patterns: list[str] | None = None, max_chars: int = 9000) -> str:
+    if not text:
+        return ""
+    stop_patterns = stop_patterns or []
+    start = -1
+    for pat in anchor_patterns:
+        m = re.search(pat, text, re.S)
+        if m:
+            start = m.start()
+            break
+    if start < 0:
+        return ""
+    end = min(len(text), start + max_chars)
+    tail = text[start:end]
+    for pat in stop_patterns:
+        m2 = re.search(pat, tail, re.S)
+        if m2 and m2.start() > 0:
+            tail = tail[:m2.start()]
+            break
+    return tail.strip()
+
+
+def _merge_bullet_lines(block: str) -> list[str]:
+    if not block:
+        return []
+    raw_lines = [" ".join(line.strip().split()) for line in block.splitlines() if line and line.strip()]
+    merged: list[str] = []
+    bullet_pat = re.compile(r"^(?:[（(]?\d+[）)]|\d+[、.]|[一二三四五六七八九十]+[、.]|[①②③④⑤⑥⑦⑧⑨⑩])")
+    for line in raw_lines:
+        if bullet_pat.match(line):
+            merged.append(line)
+        else:
+            if merged:
+                merged[-1] += (" " if not merged[-1].endswith(("：", ":")) else "") + line
+            else:
+                merged.append(line)
+    cleaned: list[str] = []
+    for item in merged:
+        s = re.sub(r"^(?:[（(]?\d+[）)]|\d+[、.]|[一二三四五六七八九十]+[、.]|[①②③④⑤⑥⑦⑧⑨⑩])\s*", "", item).strip()
+        if len(s) < 4:
+            continue
+        if any(tok in s for tok in ("审查项", "招标文件要求", "响应文件对应内容", "是否满足", "备注")):
+            continue
+        cleaned.append(s)
+    return cleaned
+
+
+def _split_review_row(text: str) -> tuple[str, str]:
+    s = text.strip(" ：:")
+    for sep in ("：", ":", "——", "--", "-", "，"):
+        if sep in s:
+            left, right = s.split(sep, 1)
+            left = left.strip()
+            right = right.strip()
+            if 2 <= len(left) <= 24 and right:
+                return left, right
+    short = s[:18].rstrip("，。；:：")
+    return short or "审查项", s
+
+
+def _build_review_table_markdown(rows: list[tuple[str, str]]) -> str:
+    lines = [
+        "| 序号 | 审查项 | 招标文件要求 | 响应文件对应内容 | 是否满足 | 备注 |",
+        "|---:|---|---|---|---|---|",
+    ]
+    for idx, (item_name, requirement) in enumerate(rows, start=1):
+        lines.append(
+            f"| {idx} | {item_name} | {requirement} | 【待填写：对应材料名称/页码】 | "
+            f"【待填写：满足/不满足】 | 【待填写】 |"
+        )
+    return "\n".join(lines)
+
+
+def _extract_review_rows_from_tender(tender_raw: str, title_patterns: list[str], fallback_rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    block = _extract_anchor_block(
+        tender_raw,
+        anchor_patterns=title_patterns,
+        stop_patterns=[r"表[三四五六七八九十]", r"(?:第[一二三四五六七八九十]+章)", r"投标无效", r"响应无效", r"评分标准", r"详细评审"],
+        max_chars=5000,
+    )
+    items = _merge_bullet_lines(block)
+    rows: list[tuple[str, str]] = []
+    for item in items:
+        if any(tok in item for tok in ("未通过", "无效投标", "响应无效")):
+            continue
+        rows.append(_split_review_row(item))
+    return rows or fallback_rows
+
+
+def _extract_invalid_bid_items(tender_raw: str) -> list[str]:
+    blocks = []
+    for anchors in ([r"投标无效[条款情形]*"], [r"响应无效[条款情形]*"], [r"其他投标无效条款"], [r"其他响应无效条款"]):
+        block = _extract_anchor_block(
+            tender_raw,
+            anchor_patterns=anchors,
+            stop_patterns=[r"评分标准", r"详细评审", r"响应文件格式", r"第[一二三四五六七八九十]+章"],
+            max_chars=6000,
+        )
+        if block:
+            blocks.append(block)
+    items: list[str] = []
+    for block in blocks:
+        for item in _merge_bullet_lines(block):
+            if any(tok in item for tok in ("审查表", "招标文件要求", "响应文件对应内容")):
+                continue
+            if len(item) >= 6 and item not in items:
+                items.append(item.rstrip("；;。") + "。")
+    return items
+
+
+def _extract_scoring_items(tender, tender_raw: str) -> list[str]:
+    block = _extract_anchor_block(
+        tender_raw,
+        anchor_patterns=[r"详细评审", r"评分标准", r"评审标准"],
+        stop_patterns=[r"响应文件格式", r"第[一二三四五六七八九十]+章", r"投标无效", r"响应无效"],
+        max_chars=7000,
+    )
+    items = []
+    for item in _merge_bullet_lines(block):
+        if any(tok in item for tok in ("资格性审查", "符合性审查", "价格分采用", "未通过", "废标")):
+            continue
+        if len(item) >= 6 and item not in items:
+            items.append(item)
+    if items:
+        return items
+    eval_rules = getattr(tender, "evaluation_criteria", {}) or {}
+    fallback: list[str] = []
+    for k, v in eval_rules.items():
+        fallback.append(f"{k}：{v}")
+    return fallback
+
+
+def _build_detailed_review_section(tender, tender_raw: str) -> str:
+    items = _extract_scoring_items(tender, tender_raw)
+    lines = [
+        "| 序号 | 评分项 | 招标文件评分标准 | 响应文件对应内容 | 自评说明 | 证明材料页码 |",
+        "|---:|---|---|---|---|---|",
+    ]
+    if not items:
+        items = ["【待补：从采购文件评分标准章节提取详细评审项】"]
+    for idx, item in enumerate(items, start=1):
+        if "：" in item:
+            name, rule = item.split("：", 1)
+        elif ":" in item:
+            name, rule = item.split(":", 1)
+        else:
+            name, rule = f"评分项{idx}", item
+        lines.append(
+            f"| {idx} | {name.strip()} | {rule.strip()} | 【待填写：对应响应内容】 | "
+            f"【待填写：自评得分理由】 | 【待填写：页码】 |"
+        )
+    return "\n".join(lines)
+
+
+def _default_cs_qualification_rows() -> list[tuple[str, str]]:
+    return [
+        ("资格承诺", "符合《中华人民共和国政府采购法》第二十二条规定，并按采购文件要求提交资格承诺函或对应证明材料"),
+        ("营业执照", "提交有效营业执照或事业单位法人证书等主体资格证明材料"),
+        ("信用记录", "未被列入失信被执行人、重大税收违法失信主体、政府采购严重违法失信行为记录名单"),
+        ("法定代表人授权", "法定代表人/单位负责人授权代表参加时提交授权书及身份证明"),
+        ("特定资格", "按本项目特定资格要求提交许可证、备案凭证、注册证、授权书等材料"),
+    ]
+
+
+def _default_cs_compliance_rows() -> list[tuple[str, str]]:
+    return [
+        ("响应文件完整性", "响应文件的格式、签署、盖章、目录、页码和响应内容应符合采购文件要求"),
+        ("报价有效性", "报价唯一且不超过预算/最高限价，不得缺项、漏项"),
+        ("实质性响应", "对采购文件带※/★及其他实质性条款逐条明确响应，不得负偏离"),
+        ("交货和质保", "交货期、交货地点、质保期、售后响应等主要商务条款满足采购文件要求"),
+        ("其他无效情形", "不存在围标串标、弄虚作假及采购文件列明的其他无效响应情形"),
+    ]
+
+
 def _build_tp_sections(
     tender,
     tender_raw: str,
@@ -998,6 +1497,34 @@ def _build_cs_sections(
         )
     )
 
+    sections.append(
+        BidDocumentSection(
+            section_title="七、资格性审查响应对照表",
+            content=_build_cs_qualification_review_section(tender, packages, tender_raw),
+        )
+    )
+
+    sections.append(
+        BidDocumentSection(
+            section_title="八、符合性审查响应对照表",
+            content=_build_cs_compliance_review_section(tender, tender_raw),
+        )
+    )
+
+    sections.append(
+        BidDocumentSection(
+            section_title="九、详细评审响应对照表",
+            content=_build_cs_detailed_review_section(tender, packages, tender_raw),
+        )
+    )
+
+    sections.append(
+        BidDocumentSection(
+            section_title="十、投标无效情形汇总及自检表",
+            content=_build_cs_invalid_bid_checklist(tender, tender_raw),
+        )
+    )
+
     return sections
 
 # def _find_package_block(tender_raw: str, package_id: str) -> str:
@@ -1044,30 +1571,47 @@ def _extract_numbered_points(block: str) -> list[tuple[str, str]]:
 
 def _extract_cs_requirement_rows(pkg, tender_raw: str) -> list[dict]:
     block = _find_package_block(tender_raw, pkg.package_id)
-    points = _extract_numbered_points(block)
+    if not block:
+        return [{"seq": "1", "item_name": pkg.item_name, "requirement": "详见采购文件技术要求"}]
+
+    captured: list[str] = []
+    patterns = [
+        r"2\s*设备配置与配件\s*(.*?)(?:4\s*售后服务|说明\s*打|合同包\s*\d+|$)",
+        r"3\s*技术参数与性能要求[（(].*?[)）]?\s*(.*?)(?:4\s*售后服务|说明\s*打|合同包\s*\d+|$)",
+        r"技术标准与要求\s*(.*?)(?:4\s*售后服务|说明\s*打|合同包\s*\d+|$)",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, block, re.S)
+        if m and (m.group(1) or "").strip():
+            captured.append(m.group(1).strip())
+
+    tech_text = "\n".join(captured).strip()
+    if not tech_text:
+        return [{"seq": "1", "item_name": pkg.item_name, "requirement": "详见采购文件技术要求"}]
+
+    lines = [_clean_text(x) for x in tech_text.splitlines() if _clean_text(x)]
+    merged: list[str] = []
+
+    for line in lines:
+        if re.match(r"^\*?\d+(?:\.\d+)+\s*", line):
+            merged.append(line)
+        elif merged:
+            merged[-1] += " " + line
 
     rows: list[dict] = []
+    for idx, item in enumerate(merged, start=1):
+        item = _clean_text(item)
+        if not item:
+            continue
+        rows.append({
+            "seq": str(idx),
+            "item_name": pkg.item_name,
+            "requirement": item,
+        })
 
-    if not points:
-        rows.append(
-            {
-                "seq": "1",
-                "service_name": pkg.item_name,
-                "requirement": "详见采购文件技术要求",
-            }
-        )
-        return rows
+    return rows or [{"seq": "1", "item_name": pkg.item_name, "requirement": "详见采购文件技术要求"}]
 
-    for idx, (code, text) in enumerate(points, start=1):
-        service_name = code
-        rows.append(
-            {
-                "seq": str(idx),
-                "service_name": service_name,
-                "requirement": text,
-            }
-        )
-    return rows
 
 def _build_cs_pkg_deviation_table(tender, pkg, tender_raw: str) -> str:
     qty = _extract_package_quantity(pkg, tender_raw)
@@ -1085,47 +1629,64 @@ def _build_cs_pkg_deviation_table(tender, pkg, tender_raw: str) -> str:
         "|---:|---|---|---|---|",
     ]
 
+    generic_hit = len(rows) == 1 and rows[0].get("requirement") == "详见采购文件技术要求"
     for row in rows:
+        response_placeholder = "【待填写：品牌/型号/规格/配置及逐条响应】"
+        if generic_hit:
+            response_placeholder = "【待补：按采购文件逐条拆解参数后填写品牌/型号/配置/偏离说明】"
         lines.append(
-            f"| {row['seq']} | {row['service_name']} | {row['requirement'].replace('|', '/')} | "
-            f"【待填写：品牌/型号/规格/配置及逐条响应】 | 【待填写：无偏离/正偏离/负偏离】 |"
+            f"| {row['seq']} | {row['item_name']} | {row['requirement']} | "
+            f"{response_placeholder} | 【待填写：无偏离/正偏离/负偏离】 |"
         )
 
-    lines.extend(
-        [
-            "",
-            "供应商全称：【待填写：投标人名称】",
-            "日期：【待填写：年 月 日】",
-        ]
-    )
+    lines.extend([
+        "",
+        "说明：带“※/★”或采购文件明确为实质性条款的项目，必须逐条实质性响应，不能只写“响应/完全响应”。",
+        "",
+        "供应商全称：【待填写：投标人名称】",
+        "日期：【待填写：年 月 日】",
+    ])
     return "\n".join(lines)
 
 def _extract_cs_service_points(pkg, tender_raw: str) -> list[str]:
     block = _find_package_block(tender_raw, pkg.package_id)
-    lines = [line.strip() for line in block.splitlines() if line.strip()]
-    points: list[str] = []
+    if not block:
+        return []
 
-    capture = False
-    for line in lines:
-        if re.search(r"售后服务", line):
-            capture = True
-            continue
-        if capture and re.match(r"^\d+(?:\.\d+)+", line):
-            points.append(line)
-        if capture and ("附件" in line or "评分" in line or "响应文件格式" in line):
+    service_text = ""
+    patterns = [
+        r"六、售后服务要求[：:]?(.*?)(?:说明\s*打|评分标准|商务要求|合同包\s*\d+|包\s*\d+[：:]|第\s*\d+\s*包|$)",
+        r"售后服务要求[：:]?(.*?)(?:说明\s*打|评分标准|商务要求|合同包\s*\d+|包\s*\d+[：:]|第\s*\d+\s*包|$)",
+        r"服务要求[：:]?(.*?)(?:说明\s*打|评分标准|商务要求|合同包\s*\d+|包\s*\d+[：:]|第\s*\d+\s*包|$)",
+        r"商务要求[：:]?(.*?)(?:评分标准|合同包\s*\d+|包\s*\d+[：:]|第\s*\d+\s*包|$)",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, block, re.S)
+        if m and (m.group(1) or "").strip():
+            service_text = m.group(1).strip()
             break
 
-    if not points:
-        return ["按采购文件售后服务要求执行。"]
+    if not service_text:
+        return []
 
+    raw_lines = [line.strip() for line in service_text.splitlines() if line.strip()]
     merged: list[str] = []
-    for p in points:
-        if re.match(r"^\d+(?:\.\d+)+", p):
-            merged.append(p)
+
+    for line in raw_lines:
+        if re.match(r"^(?:\d+[、.：:]|[（(]?\d+[）)]|[一二三四五六七八九十]+、)", line):
+            merged.append(line)
         else:
             if merged:
-                merged[-1] += " " + p
-    return merged or ["按采购文件售后服务要求执行。"]
+                merged[-1] += " " + line
+
+    cleaned = []
+    for item in merged:
+        s = " ".join(item.split())
+        if s and s not in {"售后服务要求", "服务要求", "商务要求"}:
+            cleaned.append(s.replace("|", "/"))
+
+    return cleaned
 
 
 def _build_cs_service_section(packages, tender_raw: str) -> str:
@@ -1135,44 +1696,60 @@ def _build_cs_service_section(packages, tender_raw: str) -> str:
         qty = _extract_package_quantity(pkg, tender_raw)
         delivery_time = _extract_delivery_time(pkg, tender_raw)
         delivery_place = _extract_delivery_place(pkg, tender_raw)
-        service_points = _extract_cs_service_points(pkg, tender_raw)
 
-        parts.extend(
-            [
-                f"### 包{pkg.package_id}：{pkg.item_name}",
-                f"数量：{qty}",
-                f"交货期：{delivery_time}",
-                f"交货地点：{delivery_place}",
-                "",
-                "#### 1. 供货组织措施",
-                "我方将成立专项项目执行小组，对备货、运输、到货、安装、调试、培训、验收、售后全过程实施节点管理，确保按采购文件要求完成交付。",
-                "",
-                "#### 2. 安装调试与培训措施",
-                "设备到货后由专业工程师完成开箱核验、安装调试、功能验证，并对操作人员及工程技术人员进行现场培训。",
-                "",
-                "#### 3. 本包售后服务承诺",
-            ]
-        )
+        parts.extend([
+            f"### 包{pkg.package_id}：{pkg.item_name}",
+            f"数量：{qty}",
+            f"交货期：{delivery_time}",
+            f"交货地点：{delivery_place}",
+            "",
+            "#### 1. 供货组织措施",
+            "1）供货流程及时间安排：中标后立即启动合同分解、排产锁货、发运审批、到货预约四级计划，形成节点进度表并明确责任人。",
+            "2）产品出库、包装措施：发货前完成数量、型号、外观、随机附件复核；包装按原厂标准执行，落实防震、防潮、防压、防磕碰措施。",
+            "3）运输方案及应急措施：采用专车或合规物流运输，全程跟踪；如遇天气、道路、航班等异常情况，立即启动改期或备用线路方案。",
+            "4）运输风险预防及损坏处理方案：投保运输险，到货发现破损、受潮、缺件时，现场拍照取证并同步启动补发、换货或整改流程。",
+            "5）到达指定地点后交接、签收验货方案：设备到达后由项目经理会同采购人完成数量清点、外观检查、随机资料核验及签收确认。",
+            "",
+            "#### 2. 安装调试阶段方案",
+            "1）人员配备：安排项目经理、安装工程师、调试工程师、培训工程师，明确岗位职责和联系方式。",
+            "2）安装措施：按场地条件进行开箱核验、设备定位、部件组装、通电前检查，确保安装过程规范可控。",
+            "3）调试措施：完成功能调试、参数校准、联机测试和试运行，形成调试记录。",
+            "4）安装调试工期保障措施：设备到货后按采购人通知及时进场，倒排安装调试计划，保障在约定时限内完成。",
+            "5）安装调试应急预案：对场地条件异常、配件缺失、电源环境不符、联机故障等情况设置应急处理机制。",
+            "",
+            "#### 3. 培训措施",
+            "1）对操作人员开展开关机、标准操作流程、注意事项、常见问题处理等培训。",
+            "2）对管理人员开展设备管理、维护要求、风险控制、记录留存等培训。",
+            "3）培训完成后组织现场答疑和操作确认，并形成培训签到和培训记录。",
+            "",
+            "#### 4. 验收配合措施",
+            "1）到货验收：配合采购人对外包装、数量、随机附件、资料进行验收。",
+            "2）安装验收：提交安装调试记录，配合完成功能配置验收。",
+            "3）技术验收：按招标文件技术参数逐项核验，并提供相应证明资料。",
+            "4）资料移交：提交合格证、说明书、装箱单、注册证/备案凭证、配置清单、保修资料等。",
+            "",
+            "#### 5. 质量保证及技术措施",
+            "1）建立项目质量保证管理体系，明确项目经理总负责制。",
+            "2）明确质量技术人员方案及职责分工，形成安装、调试、培训、售后岗位责任表。",
+            "3）建立监督机制，对发货、到货、安装、调试、验收等关键节点进行复核。",
+            "4）如发生质量问题，第一时间隔离问题设备/配件、分析原因并落实纠正和补救措施。",
+            "",
+            "#### 6. 售后服务承诺",
+            "1）售后服务方案：按采购文件约定的质保年限和服务要求执行。",
+            "2）售后服务流程：报修受理→远程诊断→现场服务→故障排除→回访闭环。",
+            "3）售后服务标准：按厂家及行业规范提供维保、巡检、升级和备件保障服务。",
+            "4）售后服务人员安排：明确售后负责人、工程师及联系电话。",
+            "5）售后应急处理方案：对停机、核心部件异常等情况启动快速响应机制。",
+            "",
+        ])
 
-        for p in service_points:
-            parts.append(f"- {p}")
-
-        parts.extend(
-            [
-                "",
-                "#### 4. 验收配合措施",
-                "我方将按采购文件要求提交合格证、说明书、注册证/备案凭证、装箱单及其他随机资料，并配合采购人完成到货验收、功能验收和性能验收。",
-                "",
-            ]
-        )
-
-    parts.extend(
-        [
-            "供应商全称：【待填写：投标人名称】",
-            "日期：【待填写：年 月 日】",
-        ]
-    )
+    parts.extend([
+        "供应商全称：【待填写：投标人名称】",
+        "日期：【待填写：年 月 日】",
+    ])
     return "\n".join(parts)
+
+
 
 
 def build_format_driven_sections(
