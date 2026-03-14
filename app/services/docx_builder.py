@@ -158,8 +158,9 @@ def _get_fixed_table_widths(header_cells: list[str]):
     if key == ("序号", "无效投标情形", "自检结果", "备注"):
         return [Cm(1.0), Cm(10.5), Cm(2.4), Cm(3.0)]
 
-    if key == ("序号", "货物名称", "品牌型号、产地", "数量/单位", "报价(元)", "招标文件的参数和要求", "响应文件参数", "偏离情况"):
-        return [Cm(1.0), Cm(2.2), Cm(3.0), Cm(1.7), Cm(2.0), Cm(4.5), Cm(4.5), Cm(1.6)]
+    if key == ("招标文件条目号", "招标文件采购需求的内容与数值", "投标人的技术响应内容与数值", "技术响应偏差说明",
+               "技术支持资料（或证明材料）说明"):
+        return [Cm(2.0), Cm(5.2), Cm(5.2), Cm(2.4), Cm(3.2)]
 
     # 兼容旧模板
     if key == ("序号", "审查项", "招标文件要求", "响应情况", "对应材料/页码"):
@@ -505,6 +506,45 @@ def _is_bad_zb_section_title(title: str) -> bool:
     )
     return any(x in s for x in bad_words)
 
+def _is_probable_zb_template_title(title: str) -> bool:
+    s = re.sub(r"\s+", "", title or "")
+    if not s:
+        return False
+    if _is_bad_zb_section_title(s):
+        return False
+
+    if re.match(r"^格式\s*\d+(?:-\d+)?(?:\.\d+)?", s):
+        return True
+
+    positive_words = (
+        "投标函",
+        "开标一览表",
+        "投标分项报价表",
+        "投标保证金说明函",
+        "授权书",
+        "投标人一般情况表",
+        "类似项目业绩表",
+        "中小企业声明函",
+        "残疾人福利性单位声明函",
+        "节能环保材料",
+        "采购需求响应及偏离表",
+        "技术要求响应及偏离表",
+        "技术支持资料",
+        "其他技术方案",
+        "制造商授权书",
+        "售后服务承诺书",
+        "招标代理服务费承诺",
+    )
+    if any(word in s for word in positive_words):
+        return True
+
+    if re.match(r"^(?:7|8|9)\.\d+(?:\.\d+)?", s) and any(
+        key in s for key in ("声明函", "业绩表", "授权书", "响应及偏离表", "技术方案", "证明文件", "承诺")
+    ):
+        return True
+
+    return False
+
 
 def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
     exact_titles = [str(x).strip() for x in (exact_titles or []) if str(x).strip()]
@@ -516,28 +556,34 @@ def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
     if mode != "zb":
         return True
 
-    if len(exact_titles) < 8:
-        return False
+    good_titles: list[str] = []
+    seen: set[str] = set()
+    for title in exact_titles:
+        if not _is_probable_zb_template_title(title):
+            continue
+        key = re.sub(r"\s+", "", title)
+        if key in seen:
+            continue
+        seen.add(key)
+        good_titles.append(title)
 
-    if any(_is_bad_zb_section_title(x) for x in exact_titles):
-        return False
+    return len(good_titles) >= 3
 
-    required_groups = (
-        ("投标函",),
-        ("开标一览表",),
-        ("投标分项报价表", "分项报价表"),
-        ("法定代表人授权书", "授权书"),
-        ("采购需求响应及偏离表", "技术要求响应及偏离表"),
-    )
-    return all(
-        any(any(k in title for k in group) for title in exact_titles)
-        for group in required_groups
-    )
 
 def _required_titles_for_tender(tender=None) -> list[str]:
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
     if _usable_exact_titles(tender=tender, exact_titles=exact_titles):
-        return exact_titles
+        seen: set[str] = set()
+        filtered: list[str] = []
+        for title in exact_titles:
+            if not _is_probable_zb_template_title(title):
+                continue
+            key = re.sub(r"\s+", "", title)
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append(title)
+        return filtered
 
     mode = _detect_structure_mode_from_tender(tender=tender)
 
@@ -611,6 +657,23 @@ def _backfill_required_sections(sections, tender=None):
             )
 
     mode = _detect_structure_mode_from_tender(tender=tender, sections=sections)
+    allow_extra_keywords = (
+        "资格性审查",
+        "符合性审查",
+        "符合性检查",
+        "详细评审",
+        "评分因素",
+        "评分标准",
+        "无效投标",
+        "否决投标",
+        "废标情形",
+        "供货",
+        "安装",
+        "调试",
+        "质量保障",
+        "售后服务",
+        "服务方案",
+    )
 
     for s in (sections or []):
         title = (getattr(s, "section_title", "") or "").strip()
@@ -618,8 +681,14 @@ def _backfill_required_sections(sections, tender=None):
             continue
         if title in ordered_set:
             continue
-        if mode == "zb" and _is_bad_zb_section_title(title):
-            continue
+
+        if mode == "zb":
+            compact = re.sub(r"\s+", "", title)
+            if _is_bad_zb_section_title(compact):
+                continue
+            if not _is_probable_zb_template_title(title) and not any(k in compact for k in allow_extra_keywords):
+                continue
+
         filled.append(s)
 
     return filled

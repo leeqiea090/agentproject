@@ -255,40 +255,49 @@ def _extract_heading_block(text: str, heading_keywords: list[str], stop_keywords
 
 def _extract_zb_format_block(text: str) -> str:
     """
-    公开招标项目：优先精确截取“第六章 投标文件格式/响应文件格式”正文块。
-    不能再简单取最后一个“投标文件格式”字样，否则很容易命中
-    “投标文件格式特殊要求”“符合投标文件内容及格式要求”等普通条款。
+    公开招标项目：精确截取“第六章 投标文件格式/响应文件格式”正文块。
+    目录里也会出现“第六章 投标文件格式”，因此不能简单取最后一次出现的位置，
+    需要验证命中点后面是否真的进入了模板正文。
     """
     text = text or ""
     if not text:
         return ""
 
-    chapter_patterns = [
-        re.compile(r"(?:^|\n)\s*第六章\s*投标文件格式", re.M),
-        re.compile(r"(?:^|\n)\s*第六章\s*响应文件格式", re.M),
-    ]
+    chapter_pat = re.compile(r"(?:^|\n)\s*第六章\s*(?:投标文件格式|响应文件格式)", re.M)
+    expected_markers = (
+        "格式 1",
+        "格式1",
+        "格式 2",
+        "格式2",
+        "格式 3",
+        "格式3",
+        "格式 8",
+        "格式8",
+        "格式 9",
+        "格式9",
+        "中小企业声明函",
+        "残疾人福利性单位声明函",
+        "类似项目业绩表",
+        "制造商授权书",
+        "采购需求响应及偏离表",
+        "招标代理服务费承诺",
+    )
 
-    start = None
-    for pat in chapter_patterns:
-        m = pat.search(text)
-        if m:
-            start = m.start()
+    best_start = None
+    for m in chapter_pat.finditer(text):
+        tail = text[m.start():]
+        window = tail[:2500]
+        if any(marker in window for marker in expected_markers):
+            best_start = m.start()
             break
 
-    # 次优回退：找包含“第六章”且后续近邻出现“投标文件格式/响应文件格式”的位置
-    if start is None:
-        for m in re.finditer(r"(?:^|\n)\s*第[一二三四五六七八九十]+章", text):
-            snippet = text[m.start(): m.start() + 120]
-            if "投标文件格式" in snippet or "响应文件格式" in snippet:
-                start = m.start()
-                break
+    if best_start is None:
+        fallback_positions = [m.start() for m in chapter_pat.finditer(text)]
+        if not fallback_positions:
+            return ""
+        best_start = fallback_positions[-1]
 
-    if start is None:
-        return ""
-
-    tail = text[start:]
-
-    # 终止于下一章 / 附件 / 附录，避免把后续全部吃进去
+    tail = text[best_start:]
     stop_patterns = [
         re.compile(r"(?:^|\n)\s*第七章\b", re.M),
         re.compile(r"(?:^|\n)\s*附件\b", re.M),
@@ -305,12 +314,8 @@ def _extract_zb_format_block(text: str) -> str:
     return tail[:stop_pos].strip() if stop_pos is not None else tail.strip()
 
 _ZB_FORMAT_TITLE_PATTERNS = (
-    # 例：格式 1.投标函（格式） / 格式 3投标分项报价表（格式）
     re.compile(r"^格式\s*\d+(?:-\d+)?(?:\.\d+)?(?:[.．、]?\s*.*)?$"),
-    # 例：7.7.1 中小企业声明函 / 7.12制造商授权书
-    re.compile(r"^\d+(?:\.\d+)+\s*.+$"),
-    # 例：格式2-1（单独一行）
-    re.compile(r"^格式\s*\d+(?:-\d+)+$"),
+    re.compile(r"^(?:7\.(?:7(?:\.\d+)?|11|12)|8\.\d+|9\.\d+)\s*(?:中小企业声明函|残疾人福利性单位声明函|节能.?环保材料|类似项目业绩表|制造商授权书|采购需求响应及偏离表|.*技术.*方案|.*证明文件.*|招标代理服务费承诺).*$"),
     re.compile(r"^售后服务承诺书$"),
     re.compile(r"^招标代理服务费承诺$"),
     re.compile(r"^[一二三四五六七八九十]+、\s*招标代理服务费承诺$"),
@@ -320,14 +325,11 @@ def _normalize_zb_format_title(line: str) -> str:
     raw = (line or "").strip()
     if not raw:
         return ""
-
     compact = re.sub(r"\s+", "", raw).replace("．", ".")
     compact = compact.replace("（", "(").replace("）", ")")
-
     for pat in _ZB_FORMAT_TITLE_PATTERNS:
         if pat.match(compact):
             return compact
-
     return ""
 
 def _zb_order_no_from_title(title: str, fallback_idx: int) -> str:
@@ -347,14 +349,7 @@ def _zb_order_no_from_title(title: str, fallback_idx: int) -> str:
 def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSectionTemplate]:
     """
     从公开招标文件第六章中抽取原始“格式模板”。
-    支持：
-    - 格式 1.投标函（格式）
-    - 格式2-1  + 下一行标题
-    - 7.7.1 中小企业声明函
-    - 7.7.2 残疾人福利性单位声明函
-    - 7.7.3 节能/环保材料
-    - 7.11 类似项目业绩表
-    - 7.12 制造商授权书
+    只识别真正的模板标题，不再把 3.1 / 8.1 / 17.2 这类正文条款当成模板标题。
     """
     block = _extract_zb_format_block(tender_text)
     if not block:
@@ -368,7 +363,6 @@ def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSec
         line = lines[i].strip()
         title = _normalize_zb_format_title(line)
 
-        # 兼容“格式2-1”单独占一行、下一行才是标题
         if title and re.fullmatch(r"格式\s*\d+(?:-\d+)+", title):
             next_title = ""
             j = i + 1
@@ -379,8 +373,8 @@ def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSec
                     break
                 j += 1
             if next_title:
-                merged = f"{title} {next_title}"
-                title_hits.append((i, merged))
+                merged_title = _normalize_zb_format_title(f"{title} {next_title}") or f"{title} {next_title}"
+                title_hits.append((i, merged_title))
                 i += 1
                 continue
 
@@ -389,14 +383,18 @@ def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSec
 
         i += 1
 
-    # 公开招标第六章如果抽不到足够模板，就返回空，交由后续回退逻辑处理
-    if len(title_hits) < 5:
+    if len(title_hits) < 3:
         return []
 
     templates: list[ResponseSectionTemplate] = []
+    seen: set[str] = set()
     for idx, (start_idx, title) in enumerate(title_hits):
         end_idx = title_hits[idx + 1][0] if idx + 1 < len(title_hits) else len(lines)
         raw_block = "\n".join(lines[start_idx:end_idx]).strip()
+        key = re.sub(r"\s+", "", title)
+        if not raw_block or key in seen:
+            continue
+        seen.add(key)
         templates.append(
             ResponseSectionTemplate(
                 order_no=_zb_order_no_from_title(title, idx + 1),
@@ -405,7 +403,6 @@ def _extract_zb_response_section_templates(tender_text: str) -> list[ResponseSec
                 raw_block=raw_block,
             )
         )
-
     return templates
 
 def _iter_docx_blocks(doc: _DocxDocumentType):
