@@ -10,6 +10,7 @@ from app.config import get_settings
 
 
 def _message_to_text(message: Any) -> str:
+    """把模型消息对象提取成纯文本。"""
     content = getattr(message, "content", "")
     if isinstance(content, str):
         return content.strip()
@@ -26,6 +27,7 @@ def _message_to_text(message: Any) -> str:
 
 
 def get_chat_model(temperature: float | None = None) -> ChatOpenAI:
+    """创建当前配置对应的聊天模型实例。"""
     settings = get_settings()
     if not settings.llm_api_key:
         raise RuntimeError("LLM_API_KEY is not set.")
@@ -50,6 +52,7 @@ def run_completion(
     user_prompt: str,
     temperature: float | None = None,
 ) -> str:
+    """执行一次基础模型补全调用。"""
     model = get_chat_model(temperature=temperature)
     messages = [SystemMessage(system_prompt), HumanMessage(user_prompt)]
     response = model.invoke(messages)
@@ -63,6 +66,7 @@ def run_with_tools(
     max_rounds: int = 4,
     temperature: float | None = None,
 ) -> str:
+    """执行一次带工具能力的模型调用。"""
     if not tools:
         return run_completion(system_prompt=system_prompt, user_prompt=user_prompt, temperature=temperature)
 

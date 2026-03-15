@@ -9,6 +9,7 @@ import app.services.tender_workflow.sanitization as _sanitization
 import app.services.tender_workflow.reporting as _reporting
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -28,6 +29,7 @@ def _second_validation(
     products: dict[str, ProductSpecification] | None = None,
     evidence_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """执行生成后的第二轮内容校验。"""
     check_items: list[dict[str, str]] = []
     issues: list[str] = []
     suggestions: list[str] = []
@@ -674,6 +676,7 @@ def _second_validation(
 
 
 def _append_unique(base: list[str], extras: list[str]) -> list[str]:
+    """追加unique。"""
     for item in extras:
         normalized = str(item).strip()
         if normalized and normalized not in base:
@@ -682,6 +685,7 @@ def _append_unique(base: list[str], extras: list[str]) -> list[str]:
 
 
 def _format_eval_rules(evaluation_criteria: dict[str, Any]) -> list[str]:
+    """格式化evalrules。"""
     if not evaluation_criteria:
         return []
     rules: list[str] = []
@@ -694,6 +698,7 @@ def _format_eval_rules(evaluation_criteria: dict[str, Any]) -> list[str]:
 
 
 def _default_required_materials(tender: TenderDocument) -> list[str]:
+    """返回默认required资料。"""
     materials = [
         "营业执照及法定代表人身份证明",
         "法定代表人授权书及授权代表身份证明",
@@ -724,6 +729,7 @@ def _default_required_materials(tender: TenderDocument) -> list[str]:
 
 
 def _default_step1_result(tender: TenderDocument) -> dict[str, Any]:
+    """返回默认step1结果。"""
     packages = [
         {
             "package_id": pkg.package_id,
@@ -758,6 +764,7 @@ def _default_step1_result(tender: TenderDocument) -> dict[str, Any]:
 
 
 def _material_item(item: str, status: str, evidence: str, suggestion: str = "") -> dict[str, str]:
+    """组装单个资料检查项。"""
     return {
         "item": item,
         "status": status,
@@ -767,6 +774,7 @@ def _material_item(item: str, status: str, evidence: str, suggestion: str = "") 
 
 
 def _default_step4_if_blocked(reason: str) -> dict[str, Any]:
+    """返回默认step4if阻断状态。"""
     return {
         "ready_for_submission": False,
         "risk_level": "high",

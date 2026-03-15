@@ -14,6 +14,7 @@ _PROJECT_ROOT = _APP_DIR.parent
 
 
 def _int_env(name: str, default: int) -> int:
+    """读取整型环境变量，失败时回退到默认值。"""
     value = os.getenv(name)
     if value is None:
         return default
@@ -24,6 +25,7 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _float_env(name: str, default: float) -> float:
+    """读取浮点型环境变量，失败时回退到默认值。"""
     value = os.getenv(name)
     if value is None:
         return default
@@ -34,6 +36,7 @@ def _float_env(name: str, default: float) -> float:
 
 
 def _bool_env(name: str, default: bool) -> bool:
+    """读取布尔环境变量并转换成开关值。"""
     value = os.getenv(name)
     if value is None:
         return default
@@ -41,6 +44,7 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 def _path_env(name: str, default: Path) -> Path:
+    """读取路径环境变量并解析成绝对路径。"""
     value = os.getenv(name)
     path = Path(value).expanduser() if value else default
     if path.is_absolute():
@@ -99,4 +103,5 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """返回缓存后的应用配置对象。"""
     return Settings()

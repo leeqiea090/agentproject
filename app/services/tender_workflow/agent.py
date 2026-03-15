@@ -16,6 +16,7 @@ from app.schemas import TenderDocument
 
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -27,11 +28,13 @@ for _module in (_common, _classification, _product_facts, _evidence, _materializ
 del _module
 
 def _workflow_api():
+    """动态导入正式工作流聚合模块。"""
     return importlib.import_module("app.services.tender_workflow")
 class TenderWorkflowAgent:
     """十层招投标工作流 Agent。"""
 
     def __init__(self, llm: ChatOpenAI):
+        """初始化TenderWorkflowAgent。"""
         self.llm = llm
 
     def step1_analyze_tender(

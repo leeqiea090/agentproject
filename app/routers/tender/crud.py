@@ -13,6 +13,7 @@ from app.schemas import (
     BidGenerateRequest,
     BidGenerateResponse,
     CompanyProfile,
+    DraftLevel,
     ProductSpecification,
     TenderDocument,
     TenderParseResponse,
@@ -47,6 +48,7 @@ from app.routers.tender.common import (
 
 
 def _existing_output_file(file_path: str | Path | None) -> Path | None:
+    """返回存在且可下载的输出文件路径。"""
     if not file_path:
         return None
 
@@ -400,12 +402,23 @@ async def generate_bid_document(request: BidGenerateRequest):
             }
 
         stored_sections = _sections_for_storage_or_response(materialized_sections, sections, outbound_view)
+        docx_draft_level = (
+            DraftLevel.external_ready
+            if bool(outbound_view.get("generated"))
+            else DraftLevel.internal_draft
+        )
 
         file_path = ""
         download_url = ""
         if stored_sections:
             output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
-            build_bid_docx(stored_sections, tender_doc, company_profile, output_file)
+            build_bid_docx(
+                stored_sections,
+                tender_doc,
+                company_profile,
+                output_file,
+                draft_level=docx_draft_level,
+            )
             file_path = str(output_file)
             download_url = f"/api/tender/bid/download/{bid_id}?format=docx"
         outbound_view["file_path"] = file_path
@@ -526,7 +539,17 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
             output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
 
             try:
-                build_bid_docx(sections, tender_doc, company, output_file)
+                build_bid_docx(
+                    sections,
+                    tender_doc,
+                    company,
+                    output_file,
+                    draft_level=(
+                        DraftLevel.internal_draft
+                        if str((bid_info.get("outbound_report") or {}).get("status", "")).strip() == "阻断外发"
+                        else bid_info.get("draft_level") or DraftLevel.external_ready.value
+                    ),
+                )
             except Exception as e:
                 logger.error(f"Word文件生成失败: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Word文件生成失败: {str(e)}")
@@ -538,10 +561,18 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
         if isinstance(bid_info.get("outbound_report"), dict):
             bid_info["outbound_report"]["file_path"] = str(output_file)
 
+        doc_label = (
+            "投标底稿"
+            if (
+                str((bid_info.get("outbound_report") or {}).get("status", "")).strip() == "阻断外发"
+                or str(bid_info.get("draft_level") or "").strip() == DraftLevel.internal_draft.value
+            )
+            else "投标文件"
+        )
         return FileResponse(
             output_file,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=_safe_download_filename(f"投标文件_{project_name}", ".docx"),
+            filename=_safe_download_filename(f"{doc_label}_{project_name}", ".docx"),
         )
 
     elif format == "markdown":

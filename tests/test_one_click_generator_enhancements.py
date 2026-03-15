@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.schemas import BidDocumentSection, BidEvidenceBinding, CommercialTerms, NormalizedRequirement, ProcurementPackage, ProductSpecification, TenderDocument
+from app.schemas import BidDocumentSection, BidEvidenceBinding, ClauseCategory, CommercialTerms, NormalizedRequirement, ProcurementPackage, ProductSpecification, TenderDocument
 from app.services.one_click_generator import (
     _apply_template_pollution_guard,
     _build_configuration_table,
@@ -19,7 +19,7 @@ from app.services.one_click_generator.pipeline import _pack_normalized_result
 from app.services.one_click_generator.response_tables import _build_deviation_table
 from app.services.evidence_binder import _extract_evidence_snippet
 from app.services.one_click_generator.config_tables import _build_main_parameter_table
-from app.services.requirement_processor import _extract_package_scope_text
+from app.services.requirement_processor import _classify_clause_category, _extract_package_scope_text
 from app.services.tender_parser import TenderParser
 
 
@@ -27,6 +27,7 @@ def _sample_tender(
     project_name: str = "检验设备采购项目",
     special_requirements: str = "本项目按中小企业政策执行，允许联合体投标。",
 ) -> TenderDocument:
+    """构造测试用的招标文档样例。"""
     return TenderDocument(
         project_name=project_name,
         project_number="XJ-2026-001",
@@ -57,6 +58,7 @@ def _sample_tender(
 
 
 def test_template_pollution_guard_removes_prompt_artifacts() -> None:
+    """测试模板pollutionguardremovespromptartifacts。"""
     from app.schemas import BidDocumentSection
 
     sections = [
@@ -86,6 +88,7 @@ def test_template_pollution_guard_removes_prompt_artifacts() -> None:
 
 
 def test_enterprise_declaration_branching_for_sme_policy() -> None:
+    """测试中小企业policy的enterprisedeclarationbranching。"""
     tender = _sample_tender()
     block = _build_enterprise_declaration_block(tender, "2026年03月09日")
     assert "企业类型声明函（分支选择）" in block
@@ -96,6 +99,7 @@ def test_enterprise_declaration_branching_for_sme_policy() -> None:
 
 
 def test_enterprise_declaration_keeps_branches_without_sme_policy() -> None:
+    """测试enterprisedeclarationkeepsbrancheswithout中小企业policy。"""
     tender = _sample_tender(
         project_name="通用设备采购项目",
         special_requirements="按采购文件执行，不涉及政策加分。",
@@ -107,6 +111,7 @@ def test_enterprise_declaration_keeps_branches_without_sme_policy() -> None:
 
 
 def test_technical_section_is_forced_structured() -> None:
+    """测试技术章节isforcedstructured。"""
     tender = _sample_tender(special_requirements="本项目不接受联合体。")
     section = _gen_technical(llm=None, tender=tender, tender_raw="raw text")
     assert "### 包1：" in section.content
@@ -120,6 +125,7 @@ def test_technical_section_is_forced_structured() -> None:
 
 
 def test_qualification_section_uses_detected_region_title() -> None:
+    """测试资格审查章节usesdetected地区标题。"""
     tender = _sample_tender(project_name="吉林大学中日联谊医院流式细胞仪采购项目")
     section = _gen_qualification(llm=None, tender=tender)
     assert "吉林省政府采购供应商资格承诺函" in section.content
@@ -127,6 +133,7 @@ def test_qualification_section_uses_detected_region_title() -> None:
 
 
 def test_qualification_section_prefers_purchaser_region_over_agency_region() -> None:
+    """测试资格审查章节preferspurchaser地区overagency地区。"""
     tender = _sample_tender(project_name="流式细胞仪采购项目")
     tender.purchaser = "吉林大学中日联谊医院"
     tender.agency = "北京某招标有限公司"
@@ -138,6 +145,7 @@ def test_qualification_section_prefers_purchaser_region_over_agency_region() -> 
 
 
 def test_generated_sections_are_word_friendly_without_raw_markdown_markers() -> None:
+    """测试generated章节arewordfriendlywithoutrawmarkdownmarkers。"""
     tender = _sample_tender()
     technical = _gen_technical(llm=None, tender=tender, tender_raw="技术参数：激光器≥3；荧光通道≥11。")
     appendix = _gen_appendix(llm=None, tender=tender, tender_raw="技术参数：激光器≥3；荧光通道≥11。")
@@ -149,6 +157,7 @@ def test_generated_sections_are_word_friendly_without_raw_markdown_markers() -> 
 
 
 def test_technical_section_can_fallback_to_raw_text_requirements() -> None:
+    """测试技术章节canfallbackto原始文本需求。"""
     tender = _sample_tender()
     tender.packages[0].technical_requirements = {}
 
@@ -165,6 +174,7 @@ def test_technical_section_can_fallback_to_raw_text_requirements() -> None:
 
 
 def test_technical_fallback_filters_out_scoring_and_contract_noise() -> None:
+    """测试技术fallbackfiltersoutscoringandcontract噪声。"""
     tender = _sample_tender()
     tender.packages[0].technical_requirements = {}
 
@@ -190,6 +200,7 @@ def test_technical_fallback_filters_out_scoring_and_contract_noise() -> None:
 
 
 def test_compliance_terms_normalize_contract_placeholders() -> None:
+    """测试符合性审查termsnormalizecontractplaceholders。"""
     tender = _sample_tender()
     tender.commercial_terms.payment_method = (
         "甲方在支付本合同项下每一笔款项前，乙方应当开具并提供等额合格的发票，"
@@ -205,6 +216,7 @@ def test_compliance_terms_normalize_contract_placeholders() -> None:
 
 
 def test_appendix_filters_document_format_noise_from_parameter_table() -> None:
+    """测试参数表格中的appendixfilters文档格式噪声。"""
     tender = _sample_tender()
     tender.packages[0].technical_requirements = {}
 
@@ -227,6 +239,7 @@ def test_appendix_filters_document_format_noise_from_parameter_table() -> None:
 
 
 def test_appendix_payment_sentence_avoids_duplicate_contract_clause() -> None:
+    """测试appendix付款sentenceavoidsduplicatecontract条款。"""
     tender = _sample_tender()
     tender.commercial_terms.payment_method = "按招标文件及合同约定执行"
 
@@ -237,6 +250,7 @@ def test_appendix_payment_sentence_avoids_duplicate_contract_clause() -> None:
 
 
 def test_effective_requirements_split_composite_technical_parameters() -> None:
+    """测试有效需求切分composite技术parameters。"""
     tender = _sample_tender()
     pkg = tender.packages[0]
     pkg.technical_requirements = {
@@ -252,6 +266,7 @@ def test_effective_requirements_split_composite_technical_parameters() -> None:
 
 
 def test_effective_requirements_prefers_complete_raw_values_over_dirty_parser_values() -> None:
+    """测试有效需求preferscompleteraw值over脏解析器值。"""
     pkg = ProcurementPackage(
         package_id="5",
         item_name="全自动化学发光免疫分析仪（2025357）",
@@ -284,15 +299,7 @@ def test_effective_requirements_prefers_complete_raw_values_over_dirty_parser_va
 
 
 def test_requirement_rows_bind_evidence_within_same_package_scope() -> None:
-    pkg1 = ProcurementPackage(
-        package_id="1",
-        item_name="X射线血液辐照设备",
-        quantity=1,
-        budget=2145000.0,
-        technical_requirements={"适用范围": "国内", "工作用途": "输血科"},
-        delivery_time="合同签订后30个日历日内交货",
-        delivery_place="甲方指定地点",
-    )
+    """测试需求行绑定证据withinsame包件范围。"""
     pkg2 = ProcurementPackage(
         package_id="2",
         item_name="手术用头架",
@@ -323,6 +330,7 @@ def test_requirement_rows_bind_evidence_within_same_package_scope() -> None:
 
 
 def test_configuration_table_uses_real_configuration_items_instead_of_template() -> None:
+    """测试模板的configuration表格uses有效configuration项instead。"""
     tender = _sample_tender(project_name="手术用头架采购项目")
     pkg = tender.packages[0]
     pkg.item_name = "手术用头架"
@@ -340,6 +348,7 @@ def test_configuration_table_uses_real_configuration_items_instead_of_template()
 
 
 def test_requirement_rows_keep_response_values_pending_until_bidder_facts_are_bound() -> None:
+    """测试需求行keep响应值待补until投标侧事实arebound。"""
     tender = _sample_tender()
     pkg = tender.packages[0]
     pkg.technical_requirements = {"激光器": "≥3", "荧光通道": "≥11"}
@@ -353,6 +362,7 @@ def test_requirement_rows_keep_response_values_pending_until_bidder_facts_are_bo
 
 
 def test_requirement_rows_can_consume_structured_workflow_matches() -> None:
+    """测试需求行canconsumestructured工作流matches。"""
     tender = _sample_tender()
     pkg = tender.packages[0]
 
@@ -402,6 +412,7 @@ def test_requirement_rows_can_consume_structured_workflow_matches() -> None:
 
 
 def test_pkg_deviation_table_exposes_missing_tech_points_instead_of_fake_fallback() -> None:
+    """测试fakefallback的包件偏离表exposesmissing技术要点instead。"""
     tender = _sample_tender()
     pkg = tender.packages[0]
 
@@ -412,6 +423,7 @@ def test_pkg_deviation_table_exposes_missing_tech_points_instead_of_fake_fallbac
 
 
 def test_generate_bid_sections_forwards_structured_payload_to_format_generator() -> None:
+    """测试生成投标章节forwardsstructuredpayloadto格式生成器。"""
     tender = _sample_tender().model_copy(
         update={
             "project_number": "[TP]XJ-2026-001",
@@ -471,6 +483,7 @@ def test_generate_bid_sections_forwards_structured_payload_to_format_generator()
 
 
 def test_pack_normalized_result_keeps_full_semantic_value_instead_of_bare_threshold() -> None:
+    """测试bare阈值的打包归一化结果keepsfullsemantic值instead。"""
     packed = _pack_normalized_result(
         {
             "1": [
@@ -492,6 +505,7 @@ def test_pack_normalized_result_keeps_full_semantic_value_instead_of_bare_thresh
 
 
 def test_pack_normalized_result_falls_back_to_source_text_when_raw_value_is_thin() -> None:
+    """测试打包归一化结果fallsbacktosource文本whenraw值isthin。"""
     packed = _pack_normalized_result(
         {
             "1": [
@@ -512,7 +526,215 @@ def test_pack_normalized_result_falls_back_to_source_text_when_raw_value_is_thin
     assert packed["technical_requirements"][0]["normalized_value"] == "要求本地设有厂家技术服务人员，接到通知后0.5小时内响应"
 
 
+def test_pack_normalized_result_serializes_clause_category_enum_to_plain_value() -> None:
+    """测试打包归一化结果会把 ClauseCategory 枚举序列化成裸字符串。"""
+    packed = _pack_normalized_result(
+        {
+            "1": [
+                NormalizedRequirement(
+                    package_id="1",
+                    requirement_id="pkg1-req-003",
+                    param_name="售后服务",
+                    raw_text="售后服务：质保期5年",
+                    source_text="售后服务：质保期5年",
+                    category=ClauseCategory.service_requirement,
+                )
+            ]
+        }
+    )
+
+    assert packed["technical_requirements"][0]["category"] == "service_requirement"
+
+
+def test_clause_classifier_keeps_after_sales_lis_requirement_out_of_technical_table() -> None:
+    """测试含 LIS 关键词的售后要求不会被误判成技术条款。"""
+    category = _classify_clause_category("售后服务要求", "承担双向LIS数据传输费用")
+    assert category == ClauseCategory.service_requirement
+
+
+def test_clause_classifier_treats_plain_upgrade_clause_as_service_requirement() -> None:
+    """测试“升级/免费升级”短条款归为服务要求，不污染技术表。"""
+    category = _classify_clause_category("4.9 升级", "免费升级")
+    assert category == ClauseCategory.service_requirement
+
+
+def test_generate_bid_sections_excludes_enum_categorized_service_rows_from_technical_table() -> None:
+    """测试生成章节时，枚举分类的售后/合规条款不会污染技术表，售后条款进入服务章节。"""
+    tender = TenderDocument(
+        project_name="手术用头架、X射线血液辐照设备(二次)",
+        project_number="[230001]wdzb[CS]20250014-1",
+        budget=2145000.0,
+        purchaser="某医院",
+        agency="某代理机构",
+        procurement_type="竞争性磋商",
+        packages=[
+            ProcurementPackage(
+                package_id="1",
+                item_name="X射线血液辐照设备",
+                quantity=1,
+                budget=2145000.0,
+                technical_requirements={},
+                delivery_time="合同签订后30个日历日内交货",
+                delivery_place="甲方指定地点",
+            )
+        ],
+        commercial_terms=CommercialTerms(
+            payment_method="按招标文件及合同约定执行",
+            validity_period="90日历天",
+            warranty_period="5年",
+            performance_bond="不收取",
+        ),
+        evaluation_criteria={},
+        special_requirements="",
+    )
+
+    result = generate_bid_sections(
+        tender,
+        (
+            "合同包1（X射线血液辐照设备）\n"
+            "3 技术参数与性能要求\n"
+            "3.1 辐照杯中心剂量率：≥5Gy/min\n"
+            "4 售后服务\n"
+            "4.1 质保期：5年\n"
+        ),
+        llm=None,
+        normalized_result={
+            "technical_requirements": [
+                {
+                    "requirement_id": "tech-1",
+                    "package_id": "1",
+                    "param_name": "辐照杯中心剂量率",
+                    "normalized_value": "≥5Gy/min",
+                    "raw_text": "辐照杯中心剂量率：≥5Gy/min",
+                    "source_text": "辐照杯中心剂量率：≥5Gy/min",
+                    "category": ClauseCategory.technical_requirement,
+                },
+                {
+                    "requirement_id": "svc-1",
+                    "package_id": "1",
+                    "param_name": "售后服务",
+                    "normalized_value": "质保期：5年",
+                    "raw_text": "售后服务：质保期：5年",
+                    "source_text": "售后服务：质保期：5年",
+                    "category": ClauseCategory.service_requirement,
+                },
+                {
+                    "requirement_id": "cmp-1",
+                    "package_id": "1",
+                    "param_name": "实质性条款说明",
+                    "normalized_value": "若有任何一条负偏离或不满足则导致响应无效",
+                    "raw_text": "实质性条款说明：若有任何一条负偏离或不满足则导致响应无效",
+                    "source_text": "实质性条款说明：若有任何一条负偏离或不满足则导致响应无效",
+                    "category": ClauseCategory.compliance_note,
+                },
+            ]
+        },
+    )
+
+    deviation_section = next(section for section in result.sections if section.section_title == "四、技术偏离及详细配置明细表")
+    service_section = next(section for section in result.sections if section.section_title == "五、技术服务和售后服务的内容及措施")
+
+    assert "辐照杯中心剂量率" in deviation_section.content
+    assert "售后服务" not in deviation_section.content
+    assert "实质性条款说明" not in deviation_section.content
+    assert "质保期：5年" in service_section.content
+    assert "辐照杯中心剂量率" not in service_section.content
+
+
+def test_requirement_rows_fall_back_to_raw_atomic_items_when_structured_rows_are_too_coarse() -> None:
+    """测试结构化结果过粗时，技术表会回退原文补齐，避免只剩空壳骨架。"""
+    pkg = ProcurementPackage(
+        package_id="1",
+        item_name="手术用头架",
+        quantity=1,
+        budget=100000.0,
+        technical_requirements={
+            "固定方式": "三钉式固定，三钉按等腰三角形分布，三钉同步对头部加压，固定稳固",
+            "三钉压力分布": "三钉压力分布均匀，都具有压力指示线，可以单独调节全部头钉压力",
+            "双钉侧调整": "双钉侧可灵活调整，锁紧后无晃动，保证受力均衡",
+            "连接器旋转": "连接器可以360度灵活旋转，方便和头夹连接",
+        },
+        delivery_time="合同签订后90个日历日内交货",
+        delivery_place="甲方指定地点",
+    )
+    tender_raw = (
+        "包1 手术用头架\n"
+        "3 技术参数与性能要求（一行只写一个方面）\n"
+        "3.1 固定方式：三钉式固定，三钉按等腰三角形分布，三钉同步对头部加压，固定稳固。\n"
+        "3.2 压力调节：三钉压力分布均匀，都具有压力指示线，可以单独调节全部头钉压力。\n"
+        "3.3 双钉侧调整：双钉侧可灵活调整，锁紧后无晃动，保证受力均衡。\n"
+        "3.4 连接器旋转：连接器可以360度灵活旋转，方便和头夹连接。\n"
+    )
+
+    rows, total = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        normalized_result={
+            "technical_requirements": [
+                {
+                    "requirement_id": "pkg1-req-001",
+                    "package_id": "1",
+                    "param_name": "技术参数与性能要求",
+                    "normalized_value": "3.1 固定方式：三钉式固定，三钉按等腰三角形分布，三钉同步对头部加压，固定稳固",
+                    "category": "technical_requirement",
+                },
+                {
+                    "requirement_id": "pkg1-req-002",
+                    "package_id": "1",
+                    "param_name": "是否进口",
+                    "normalized_value": "是",
+                    "category": "technical_requirement",
+                },
+            ]
+        },
+    )
+
+    keys = {row["key"] for row in rows}
+    assert "技术参数与性能要求" not in keys
+    assert "固定方式" in keys
+    assert "三钉压力分布" in keys or "压力调节" in keys
+    assert "连接器旋转" in keys
+    assert total >= len(rows) >= 4
+
+
+def test_fallback_requirement_rows_filter_after_sales_and_compliance_from_technical_table() -> None:
+    """测试原文兜底技术表不会混入售后条款和实质性条款说明。"""
+    pkg = ProcurementPackage(
+        package_id="1",
+        item_name="全自动化学发光免疫分析仪",
+        quantity=1,
+        budget=100000.0,
+        technical_requirements={},
+        delivery_time="合同签订后30个日历日内交货",
+        delivery_place="甲方指定地点",
+    )
+    tender_raw = (
+        "包1 全自动化学发光免疫分析仪\n"
+        "3 技术参数与性能要求\n"
+        "3.1 检测速度：≥200测试/小时。\n"
+        "3.2 样本位：≥100个。\n"
+        "4 售后服务要求\n"
+        "4.1 承担双向LIS数据传输费用。\n"
+        "4.2 质保期：5年。\n"
+        "4.9 升级：免费升级。\n"
+        "5 实质性条款说明：若有任何一条负偏离或不满足则导致响应无效。\n"
+    )
+
+    rows, total = _build_requirement_rows(pkg, tender_raw)
+
+    combined_rows = [f"{row['key']} {row['requirement']}" for row in rows]
+    assert any("检测速度" in text for text in combined_rows)
+    assert any("样本位" in text for text in combined_rows)
+    assert all("售后" not in text for text in combined_rows)
+    assert all("LIS数据传输费用" not in text for text in combined_rows)
+    assert all("质保期" not in text for text in combined_rows)
+    assert all("升级" not in text for text in combined_rows)
+    assert all("实质性条款" not in text for text in combined_rows)
+    assert total >= len(rows) >= 2
+
+
 def test_deviation_table_treats_string_none_as_unfilled_response() -> None:
+    """测试偏离表treatsstringnoneasunfilled响应。"""
     tender = _sample_tender(project_name="检验科购置全自动电泳仪等设备")
     pkg = tender.packages[0]
 
@@ -539,6 +761,7 @@ def test_deviation_table_treats_string_none_as_unfilled_response() -> None:
 
 
 def test_generated_sections_do_not_use_commitment_sentences_as_response_values() -> None:
+    """测试generated章节donotuse承诺sentencesas响应值。"""
     tender = _sample_tender()
     pkg = tender.packages[0]
     pkg.technical_requirements = {"激光器": "≥3", "荧光通道": "≥11"}
@@ -554,6 +777,7 @@ def test_generated_sections_do_not_use_commitment_sentences_as_response_values()
 
 
 def test_detail_quote_table_prefers_quantity_inferred_from_package_scope() -> None:
+    """测试包件范围中的明细报价表格prefers数量inferred。"""
     tender = TenderDocument(
         project_name="手术用头架、X射线血液辐照设备(二次)",
         project_number="[230001]wdzb[CS]20250014-1",
@@ -603,6 +827,7 @@ def test_detail_quote_table_prefers_quantity_inferred_from_package_scope() -> No
 
 
 def test_configuration_table_can_extract_items_from_raw_configuration_section() -> None:
+    """测试rawconfiguration章节中的configuration表格canextract项。"""
     tender = _sample_tender(project_name="检验科设备采购项目")
     pkg = tender.packages[0]
     pkg.item_name = "进口全自动电泳仪"
@@ -629,6 +854,7 @@ def test_configuration_table_can_extract_items_from_raw_configuration_section() 
 
 
 def test_configuration_table_can_use_product_profile_config_items() -> None:
+    """测试configuration表格canuse产品画像配置项。"""
     tender = _sample_tender(project_name="检验科设备采购项目")
     pkg = tender.packages[0]
     pkg.item_name = "进口全自动电泳仪"
@@ -652,6 +878,7 @@ def test_configuration_table_can_use_product_profile_config_items() -> None:
 
 
 def test_configuration_table_prefers_pkg_quantity_over_raw_guess() -> None:
+    """测试configuration表格prefers包件数量overrawguess。"""
     pkg = ProcurementPackage(
         package_id="6",
         item_name="进口流式细胞分析仪（2025349）",
@@ -681,6 +908,7 @@ def test_configuration_table_prefers_pkg_quantity_over_raw_guess() -> None:
 
 
 def test_extract_package_scope_text_skips_multi_package_summary_lines() -> None:
+    """测试extract包件范围文本skipsmulti包件汇总行。"""
     pkg = ProcurementPackage(
         package_id="1",
         item_name="进口全自动电泳仪（2025342）",
@@ -712,6 +940,7 @@ def test_extract_package_scope_text_skips_multi_package_summary_lines() -> None:
 
 
 def test_evidence_snippet_does_not_fallback_to_other_package_text() -> None:
+    """测试证据片段doesnotfallbacktoother包件文本。"""
     source, quote, mapped = _extract_evidence_snippet(
         "包1 技术参数\n检测原理：琼脂凝胶电泳法\n",
         "照明系统",
@@ -725,6 +954,7 @@ def test_evidence_snippet_does_not_fallback_to_other_package_text() -> None:
 
 
 def test_main_parameter_table_filters_out_non_technical_rows() -> None:
+    """测试主参数表filtersoutnon技术行。"""
     tender = _sample_tender(project_name="检验科设备采购项目")
     pkg = tender.packages[0]
 
@@ -764,6 +994,7 @@ def test_main_parameter_table_filters_out_non_technical_rows() -> None:
 
 
 def test_effective_requirements_clean_dirty_value_and_replace_generic_config_placeholder() -> None:
+    """测试有效需求清理脏值andreplacegeneric配置占位符。"""
     tender = _sample_tender()
     pkg = tender.packages[0]
     pkg.technical_requirements = {
@@ -778,6 +1009,7 @@ def test_effective_requirements_clean_dirty_value_and_replace_generic_config_pla
 
 
 def test_requirement_rows_trim_evidence_before_configuration_and_complaint_sections() -> None:
+    """测试需求行裁剪证据beforeconfigurationandcomplaint章节。"""
     tender = _sample_tender(project_name="检验科设备采购项目")
     pkg = tender.packages[0]
     pkg.item_name = "进口流式细胞分析仪"
@@ -808,6 +1040,7 @@ def test_requirement_rows_trim_evidence_before_configuration_and_complaint_secti
 
 
 def test_parser_can_correct_package_quantity_from_package_scope_text() -> None:
+    """测试包件范围文本中的解析器cancorrect包件数量。"""
     quantity = TenderParser._infer_package_quantity_from_text(
         tender_text=(
             "包1 X射线血液辐照设备\n"
@@ -824,6 +1057,7 @@ def test_parser_can_correct_package_quantity_from_package_scope_text() -> None:
 
 
 def test_validation_gate_does_not_flag_meaningful_short_param_names_as_truncated() -> None:
+    """测试校验门禁doesnotflagmeaningfulshort参数名称astruncated。"""
     sections = [
         BidDocumentSection(
             section_title="第三章 商务及技术部分",
@@ -877,6 +1111,7 @@ def test_validation_gate_does_not_flag_meaningful_short_param_names_as_truncated
 
 
 def test_validation_gate_does_not_use_fixed_package_ids_for_device_pollution() -> None:
+    """测试设备pollution的校验门禁doesnotusefixed包件 ID。"""
     tender = _sample_tender(project_name="流式细胞分析仪采购项目")
     sections = [
         BidDocumentSection(
@@ -915,6 +1150,7 @@ def test_validation_gate_does_not_use_fixed_package_ids_for_device_pollution() -
 
 
 def test_generate_bid_sections_strict_mode_outputs_pending_draft_when_validation_still_fails() -> None:
+    """测试生成投标章节严格模式输出待补草稿when校验stillfails。"""
     tender = _sample_tender(project_name="单包严格外发校验项目")
     raw_text = (
         "包1 流式细胞分析仪\n"

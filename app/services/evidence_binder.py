@@ -66,6 +66,7 @@ def _locate_requirement_block(
 
 
 def _extract_scope_excerpt(text: str, pos: int, matched: str, anchor: str) -> tuple[str, int, int]:
+    """提取命中范围附近的原文摘录。"""
     if pos < 0:
         return "", 0, 0
 
@@ -86,6 +87,7 @@ def _extract_scope_excerpt(text: str, pos: int, matched: str, anchor: str) -> tu
 
 
 def _is_non_technical_excerpt(excerpt: str) -> bool:
+    """判断摘录是否偏离技术语境。"""
     bad_hints = (
         "投标报价", "报价书", "预算", "履约保证金",
         "付款方式", "交货期", "商务条款", "资格审查",
@@ -96,6 +98,7 @@ def _is_non_technical_excerpt(excerpt: str) -> bool:
 
 def _find_requirement_excerpt_in_scope(text: str, req_key: str, req_val: str) -> tuple[str, int, int]:
     # 1) key + value 精确/近似配对
+    """在指定范围内查找需求对应的原文摘录。"""
     pos, matched = _find_requirement_pair_position(text, req_key, req_val)
     if pos >= 0 and matched:
         excerpt, char_start, char_end = _extract_scope_excerpt(text, pos, matched, req_key)
@@ -506,6 +509,7 @@ def _trim_evidence_snippet(snippet: str, anchor: str) -> str:
 
 
 def _is_dirty_evidence_snippet(text: str) -> bool:
+    """判断证据片段是否包含噪声或污染内容。"""
     q = re.sub(r"\s+", " ", (text or "").strip())
     if not q:
         return True
@@ -527,6 +531,7 @@ def _is_dirty_evidence_snippet(text: str) -> bool:
     return any(re.search(p, q, flags=re.IGNORECASE) for p in bad_patterns)
 
 def _extract_evidence_snippet(package_raw: str, req_key: str, req_val: str, fallback_raw: str = "") -> tuple[str, str, bool]:
+    """提取可用于展示的证据片段。"""
     source = "招标原文片段"
     if not package_raw.strip() and not fallback_raw.strip():
         return source, "", False
@@ -561,7 +566,7 @@ def _extract_evidence_snippet(package_raw: str, req_key: str, req_val: str, fall
     if _is_dirty_evidence_snippet(snippet):
         return source, "", False
 
-    if len(snippet) < 6:
+    if len(snippet) < 4:
         return source, "", False
 
     if len(snippet) > 120:

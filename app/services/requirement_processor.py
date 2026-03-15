@@ -16,8 +16,23 @@ logger = logging.getLogger(__name__)
 
 _MAX_TECH_ROWS_PER_PACKAGE = 80
 _PACKAGE_SCOPE_BEFORE_LINES = 8
-_PACKAGE_SCOPE_AFTER_LINES = 45
+_PACKAGE_SCOPE_AFTER_LINES = 160
+def _clean_atomic_value(text: str) -> str:
+    """清理原子值。"""
+    value = _as_text(text).strip()
+    if not value:
+        return ""
 
+    value = re.sub(r"^[，,、；;：:\-—\s]+", "", value)
+    value = re.sub(r"[\s，,；;。:：]+$", "", value)
+
+    if value in {"详见招标文件", "详见采购文件", "按招标文件", "按采购文件"}:
+        return ""
+
+    if re.fullmatch(r"[，,、；;：:\-—]+", value):
+        return ""
+
+    return value
 _HARD_REQUIREMENT_MARKERS = ("≥", "≤", ">=", "<=", "不低于", "不少于", "不高于", "不大于", "至少")
 _TECH_SECTION_HINTS = ("技术参数", "技术要求", "采购需求", "性能要求", "配置要求", "参数要求", "技术指标")
 _GENERIC_TECH_KEYS = ("技术参数", "主要技术参数", "性能要求", "技术指标", "参数要求", "核心技术参数")
@@ -215,6 +230,7 @@ _BAD_VALUE_WHOLE = {
 _BAD_VALUE_PUNCT_TAILS = ("，", ",", "、", "；", ";", "：", ":")
 
 def _looks_like_incomplete_numeric_phrase(text: str) -> bool:
+    """判断likeincomplete数值phrase。"""
     stripped = (text or "").strip()
     if not stripped:
         return False
@@ -237,6 +253,7 @@ def _looks_like_incomplete_numeric_phrase(text: str) -> bool:
 
 
 def _is_bad_requirement_value(value: str) -> bool:
+    """判断异常需求值。"""
     stripped = (value or "").strip()
     if not stripped:
         return False
@@ -297,6 +314,7 @@ def _package_forbidden_terms(
 # ── Helper functions ──
 
 def _safe_text(text: str | None, default: str = "详见招标文件") -> str:
+    """安全地返回可用文本。"""
     if text is None:
         return default
     stripped = str(text).strip()
@@ -306,6 +324,7 @@ def _safe_text(text: str | None, default: str = "详见招标文件") -> str:
 
 
 def _as_text(value: Any) -> str:
+    """把输入值整理成可用字符串。"""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -322,46 +341,93 @@ def _as_text(value: Any) -> str:
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    """判断文本是否包含任一关键词。"""
     return any(keyword in text for keyword in keywords)
 
 
 def _contains_non_technical_content(text: str) -> bool:
+    """判断文本是否混入非技术性内容。"""
     return _contains_any(text, _NON_TECH_KEYS) or _contains_any(text, _NON_TECH_CONTENT_HINTS)
 
 
 def _normalize_requirement_line(line: str) -> str:
+    """归一化需求行。"""
     normalized = line.replace("\t", " ").replace("\r", " ").strip()
     normalized = re.sub(r"\s+", " ", normalized)
-    normalized = re.sub(r"^[★▲■●]\s*", "", normalized)
+    normalized = re.sub(r"([A-Za-z])\s+(?=[\u4e00-\u9fa5])", r"\1", normalized)
+    normalized = re.sub(r"(?<=[\u4e00-\u9fa5])\s+([A-Za-z])", r"\1", normalized)
+    normalized = re.sub(r"^[★▲■●※*]+\s*", "", normalized)
     normalized = re.sub(r"^\d+(?:\.\d+){0,5}\s+", "", normalized)
-    normalized = re.sub(r"^[（(]?\d+[）)]\s*", "", normalized)
-    normalized = re.sub(r"^[（(]?[一二三四五六七八九十\d]+[）).、]\s*", "", normalized)
+    normalized = re.sub(r"^[（(]?\d+\s*[）)]\s*", "", normalized)
+    normalized = re.sub(r"^[（(]?[一二三四五六七八九十\d]+\s*[）).、]\s*", "", normalized)
     normalized = re.sub(r"^(?:[-*•]|第\d+[项条]?)\s*", "", normalized)
 
     return normalized.strip(" ;；")
 
 
+def _compact_scope_text(text: str) -> str:
+    """压缩范围文本。"""
+    normalized = _normalize_requirement_line(text)
+    normalized = normalized.replace("（", "(").replace("）", ")").replace("．", ".")
+    return re.sub(r"\s+", "", normalized)
+
+
+def _scope_window_text(lines: list[str], start: int, span: int = 8) -> str:
+    """返回window文本。"""
+    return " ".join(
+        _normalize_requirement_line(line)
+        for line in lines[start:min(len(lines), start + span)]
+        if _normalize_requirement_line(line)
+    )
+
+
+def _is_scope_noise_line(text: str) -> bool:
+    """判断范围噪声行。"""
+    normalized = _normalize_requirement_line(text)
+    if not normalized:
+        return True
+    if re.fullmatch(r"-?\s*第\s*\d+\s*页\s*-?", normalized):
+        return True
+    if normalized in {"序号", "要求", "备注说明", "参数性质", "技术标准与要求", "主要商务要求"}:
+        return True
+    if normalized in {"（续上页）", "(续上页)", "续上页"}:
+        return True
+    if "我院设备的技术参数与性能要求的基本格式" in normalized:
+        return True
+    return False
+
+
 def _is_outline_token(text: str) -> bool:
+    """判断outlinetoken。"""
     return bool(re.fullmatch(r"[（(]?\d+(?:\.\d+){0,5}[）)]?", text.strip()))
 
 
 def _looks_like_technical_requirement(text: str) -> bool:
+    """判断like技术需求。"""
     if any(marker in text for marker in _HARD_REQUIREMENT_MARKERS):
         return True
     if _contains_any(text, _TECH_KEYWORDS):
+        return True
+    if any(marker in text for marker in ("适用范围", "工作用途", "检测原理", "设备名称", "产地")):
         return True
     return bool(re.search(r"\d", text) and _contains_any(text, ("支持", "具备", "配置", "提供", "采用", "满足")))
 
 
 def _extract_requirement_pair(fragment: str) -> tuple[str, str] | None:
+    """提取需求键值对。"""
     normalized = _normalize_requirement_line(fragment)
     normalized = re.sub(r"^(?:采购需求|技术参数|技术要求|性能要求|配置要求|参数要求|技术指标)[:：]?\s*", "", normalized)
-    if len(normalized) < 4 or len(normalized) > 120:
+    if len(normalized) < 4 or len(normalized) > 320:
         return None
     if _contains_non_technical_content(normalized):
         return None
     if not _looks_like_technical_requirement(normalized):
         return None
+
+    def _trim_requirement_value(text: str) -> str:
+        """裁剪需求值。"""
+        value = re.split(r"(?:装箱配置单|装箱配置|配置清单|质保期|质保|售后服务|售后要求|说明打)", text, maxsplit=1)[0]
+        return value.strip(" ；;。")
 
     table_cells = [cell.strip() for cell in normalized.split("|") if cell.strip()]
     if len(table_cells) >= 2:
@@ -372,11 +438,11 @@ def _extract_requirement_pair(fragment: str) -> tuple[str, str] | None:
             val_cell = table_cells[2]
         normalized = f"{key_cell}：{val_cell}"
 
-    match = re.match(r"^(?P<key>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-]{2,30})[：:]\s*(?P<val>.+)$", normalized)
+    match = re.search(r"(?P<key>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-]{2,30})[：:]\s*(?P<val>.+)$", normalized)
     if match:
         key = match.group("key").strip()
         key = re.sub(r"^[★▲■●]\s*", "", key)
-        val = match.group("val").strip(" ；;。")
+        val = _trim_requirement_value(match.group("val"))
         if (
             key
             and val
@@ -388,14 +454,14 @@ def _extract_requirement_pair(fragment: str) -> tuple[str, str] | None:
         ):
             return key, val
 
-    comp_match = re.match(
-        r"^(?P<key>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-]{2,30})\s*(?P<val>(?:≥|≤|>=|<=|不低于|不少于|不高于|不大于|至少|不超过).+)$",
+    comp_match = re.search(
+        r"(?P<key>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-]{2,30})\s*(?P<val>(?:≥|≤|>=|<=|不低于|不少于|不高于|不大于|至少|不超过).+)$",
         normalized,
     )
     if comp_match:
         key = comp_match.group("key").strip()
         key = re.sub(r"^[★▲■●]\s*", "", key)
-        val = comp_match.group("val").strip(" ；;。")
+        val = _trim_requirement_value(comp_match.group("val"))
         if (
             key in _TECH_KEY_EXCLUDES
             or re.fullmatch(r"[（(]?\d+分[）)]?", key)
@@ -405,6 +471,43 @@ def _extract_requirement_pair(fragment: str) -> tuple[str, str] | None:
         ):
             return None
         return key, val
+
+    sentence_match = re.search(
+        r"(?P<key>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-]{2,30}?)[，,]\s*(?P<val>.+)$",
+        normalized,
+    )
+    if sentence_match:
+        key = sentence_match.group("key").strip()
+        val = _trim_requirement_value(sentence_match.group("key") + "，" + sentence_match.group("val"))
+        if (
+            key
+            and val
+            and key not in _TECH_KEY_EXCLUDES
+            and not _contains_non_technical_content(key)
+            and not re.fullmatch(r"[（(]?\d+分[）)]?", key)
+            and not _is_outline_token(key)
+        ):
+            return key, val
+
+    compact = re.sub(r"（[^）]{0,30}）", "", normalized)
+    compact = re.sub(r"(此栏填|备注说明|注[:：]).*$", "", compact).strip()
+    spaced_match = re.match(
+        r"^(?P<key>[A-Za-z0-9\u4e00-\u9fa5()/+.\-]{2,20})\s+(?P<val>[^ ]+(?:\s+[^ ]+){0,4})$",
+        compact,
+    )
+    if spaced_match:
+        key = spaced_match.group("key").strip()
+        val = spaced_match.group("val").strip(" ；;。")
+        if (
+            key
+            and val
+            and key not in _TECH_KEY_EXCLUDES
+            and not _contains_non_technical_content(key)
+            and not re.fullmatch(r"[（(]?\d+分[）)]?", key)
+            and not _is_outline_token(key)
+        ):
+            val = re.sub(r"(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])", "、", val)
+            return key, val
 
     return None
 
@@ -465,12 +568,15 @@ _GENERIC_REQUIREMENT_VALUE_MARKERS = (
 
 
 def _clean_requirement_value(key: str, value: str) -> str:
+    """清理需求值。"""
     text = _safe_text(value, "").strip()
     if not text:
         return ""
 
     text = re.sub(r"^[、，；;:：\s]+", "", text)
     text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"(至少包含|至少|不低于|不少于|不高于|不大于|不超过)\s+", r"\1", text)
+    text = re.sub(r"(?<=\d)\s+(?=[A-Za-z%％℃°])", "", text)
     if not text:
         return ""
 
@@ -487,6 +593,7 @@ def _clean_requirement_value(key: str, value: str) -> str:
 
 
 def _requirement_value_quality(key: str, value: str) -> int:
+    """返回值quality。"""
     text = _clean_requirement_value(key, _safe_text(value, ""))
     if not text:
         return -100
@@ -512,6 +619,7 @@ def _requirement_value_quality(key: str, value: str) -> int:
 
 
 def _prefer_requirement_value(key: str, candidate: str, existing: str) -> bool:
+    """返回需求值。"""
     candidate_score = _requirement_value_quality(key, candidate)
     existing_score = _requirement_value_quality(key, existing)
     if candidate_score != existing_score:
@@ -521,6 +629,7 @@ def _prefer_requirement_value(key: str, candidate: str, existing: str) -> bool:
 
 def _expand_requirement_entry(key: str, value: str) -> list[tuple[str, str]]:
     # 第一阶段：如果是笼统 key，按 ；; 拆分
+    """展开需求entry。"""
     if any(marker in key for marker in _GENERIC_TECH_KEYS) and ("；" in value or ";" in value):
         expanded: list[tuple[str, str]] = []
         for fragment in re.split(r"[；;]", value):
@@ -539,6 +648,7 @@ def _expand_requirement_entry(key: str, value: str) -> list[tuple[str, str]]:
 
 
 def _dedupe_requirement_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """去重需求键值对。"""
     deduped: list[tuple[str, str]] = []
     seen: set[str] = set()
     for key, val in pairs:
@@ -551,10 +661,13 @@ def _dedupe_requirement_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, s
 
 
 def _flatten_requirements(pkg: ProcurementPackage) -> list[tuple[str, str]]:
+    """摊平需求。"""
     items: list[tuple[str, str]] = []
     for key, value in pkg.technical_requirements.items():
         k = _safe_text(str(key), "技术参数")
         raw_value = _as_text(value) or "详见招标文件"
+        if not raw_value:
+            continue
         v = _clean_requirement_value(k, raw_value)
         if not v:
             continue
@@ -574,8 +687,55 @@ def _is_sparse_technical_requirements(pkg: ProcurementPackage) -> bool:
 
 
 def _extract_requirements_from_raw(pkg: ProcurementPackage, tender_raw: str) -> list[tuple[str, str]]:
+    """提取raw中的需求。"""
     if not tender_raw.strip():
         return []
+
+    def _merge_scope_lines(text: str) -> list[str]:
+        """合并范围行。"""
+        merged: list[str] = []
+        current: list[str] = []
+        bullet_pat = re.compile(r"^(?:※?\*?\s*\d+(?:\.\d+){0,5}|[（(]?\d+[）)]|[一二三四五六七八九十]+[、.])(?:\s|$)")
+
+        source_lines = text.splitlines()
+        for idx, raw_line in enumerate(source_lines):
+            normalized = _normalize_requirement_line(raw_line)
+            if _is_scope_noise_line(normalized):
+                continue
+
+            if normalized.startswith("合同包") or normalized.startswith("附表"):
+                continue
+            if _contains_any(normalized, _TECH_SECTION_HINTS) and len(normalized) <= 20:
+                continue
+            if normalized in {"序号", "要求", "备注说明"}:
+                continue
+            if re.fullmatch(r"\d+", normalized):
+                lookahead = " ".join(
+                    _normalize_requirement_line(line)
+                    for line in source_lines[idx + 1:min(len(source_lines), idx + 4)]
+                )
+                if any(token in lookahead for token in ("序号", "要求", "备注说明")):
+                    continue
+
+            if bullet_pat.match(normalized):
+                if current:
+                    merged.append(" ".join(current).strip())
+                current = [normalized]
+                continue
+
+            if not current and not _looks_like_technical_requirement(normalized):
+                continue
+
+            if not current:
+                current = [normalized]
+                continue
+
+            current.append(normalized)
+
+        if current:
+            merged.append(" ".join(current).strip())
+
+        return merged
 
     item_tokens = [token for token in re.split(r"[，,、；;（）()\\s/]+", pkg.item_name) if len(token) >= 2]
     relevant_window = 0
@@ -583,7 +743,7 @@ def _extract_requirements_from_raw(pkg: ProcurementPackage, tender_raw: str) -> 
     pairs: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    for raw_line in tender_raw.splitlines():
+    for raw_line in _merge_scope_lines(tender_raw):
         normalized = _normalize_requirement_line(raw_line)
         if not normalized:
             relevant_window = max(0, relevant_window - 1)
@@ -648,8 +808,17 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
         return []
 
     normalized_val = _as_text(value)
-    if not normalized_val or len(normalized_val) < 4:
-        return [(key, normalized_val or "详见招标文件")]
+    if not normalized_val:
+        return []
+    short_keep_values = {"是", "否", "有", "无", "提供", "具备", "支持"}
+    if (
+        len(normalized_val) < 4
+        and normalized_val != _safe_text(key, "")
+        and normalized_val not in short_keep_values
+        and not any(m in normalized_val for m in _HARD_REQUIREMENT_MARKERS)
+        and not re.search(r"\d", normalized_val)
+    ):
+        return []
 
     # 检测是否含多个参数（用、；分隔，且每段含数值或技术关键词）
     raw_segments = [seg.strip() for seg in re.split(r"[；;]", normalized_val) if seg.strip()]
@@ -793,8 +962,6 @@ def _effective_requirements(pkg: ProcurementPackage, tender_raw: str) -> list[tu
         normalized_val = _clean_requirement_value(key, val)
         if not normalized_val:
             continue
-        cat = _classify_requirement_category(key, val)
-        # 将分类信息嵌入 key 的前缀标记中，方便下游使用
         cleaned.append((key, normalized_val))
     return cleaned
 
@@ -811,6 +978,7 @@ def _classify_requirement_category(key: str, value: str) -> str:
 
 
 def _strip_clause_prefix(text: str) -> str:
+    """剥离条款prefix。"""
     t = _safe_text(text, "")
     t = re.sub(r"^[\s★▲■●◆]+", "", t)
     t = re.sub(r"^(实质性条款|重要条款|一般条款)[:：]\s*", "", t)
@@ -865,6 +1033,15 @@ def _looks_like_pure_document_clause(key: str, value: str) -> bool:
     return False
 
 def _looks_like_explicit_technical_clause(text: str) -> bool:
+    """判断likeexplicit技术条款。"""
+    service_or_compliance_markers = (
+        "售后", "质保", "保修", "维修", "培训", "响应时间", "上门服务",
+        "服务要求", "服务承诺", "维修响应", "故障响应", "工程师培训",
+        "使用培训", "实质性条款", "重要条款", "一般条款",
+    )
+    if any(marker in text for marker in service_or_compliance_markers):
+        return False
+
     technical_terms = (
         "检测原理", "检测方法", "测试项目", "检测项目", "质量要求",
         "检测速度", "分析速度", "样本位", "样本容量", "试剂位",
@@ -919,6 +1096,8 @@ def _classify_clause_category(key: str, value: str) -> ClauseCategory:
         "保修期", "培训服务", "服务要求",
     )):
         return ClauseCategory.service_requirement
+    if key_n in {"升级", "软件升级"}:
+        return ClauseCategory.service_requirement
 
     # 4) 文档/资料类硬路由
     # 4) 文档/资料类硬路由（仅限“纯资料条款”）
@@ -928,7 +1107,7 @@ def _classify_clause_category(key: str, value: str) -> ClauseCategory:
     # 5) 次级硬规则：明显服务词
     if any(tok in text for tok in (
         "维修", "维保", "保修", "巡检", "培训", "响应时间", "上门服务",
-        "技术支持", "备用机", "备件供应", "免费升级服务",
+        "技术支持", "备用机", "备件供应", "免费升级服务", "免费升级", "升级保障",
     )):
         return ClauseCategory.service_requirement
 
@@ -1154,30 +1333,49 @@ def filter_requirements_by_category(
 # ── Scope / section extraction ──
 
 def _markdown_cell(text: str) -> str:
+    """格式化 Markdown 表格单元格内容。"""
     normalized = re.sub(r"\s+", " ", str(text).strip())
     return normalized.replace("|", "/")
 
 
 def _extract_match_tokens(*texts: str) -> list[str]:
+    """提取匹配词。"""
     tokens: list[str] = []
     seen: set[str] = set()
+
+    def _push(candidate: str) -> None:
+        """把有效匹配词加入去重后的结果列表。"""
+        normalized = candidate.strip()
+        if len(normalized) < 2:
+            return
+        if normalized.isdigit():
+            return
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        tokens.append(normalized)
+
     for text in texts:
         raw_tokens = re.split(r"[，,、；;：:（）()【】\\[]\\s/\\\\]+", text)
         for token in raw_tokens:
             normalized = token.strip()
             if len(normalized) < 2:
                 continue
-            if normalized.isdigit():
-                continue
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            tokens.append(normalized)
+            _push(normalized)
+            if len(normalized) >= 12:
+                for fragment in re.split(r"(?:具备|支持|提供|采用|满足|能够|可以|实现|用于|有)", normalized):
+                    fragment = fragment.strip("的")
+                    if 2 <= len(fragment) <= 16:
+                        _push(fragment)
+                suffix_parts = [part.strip() for part in normalized.split("的") if 2 <= len(part.strip()) <= 16]
+                for fragment in suffix_parts[-2:]:
+                    _push(fragment)
     tokens.sort(key=len, reverse=True)
     return tokens
 
 
 def _line_package_ids(text: str) -> set[str]:
+    """返回包件 ID。"""
     package_ids: set[str] = set()
     for match in re.finditer(r"第\s*(\d+)\s*包|包\s*(\d+)|(\d+)\s*包", text):
         pkg_id = next((group for group in match.groups() if group), "")
@@ -1187,6 +1385,7 @@ def _line_package_ids(text: str) -> set[str]:
 
 
 def _extract_section_blocks(text: str, start_hints: tuple[str, ...], exit_hints: tuple[str, ...], max_lines: int = 80) -> list[str]:
+    """提取章节文本块。"""
     lines = text.splitlines()
     if not lines:
         return []
@@ -1231,6 +1430,7 @@ def _extract_package_technical_scope_text(
     tender_raw: str,
     other_package_names: tuple[str, ...] = (),
 ) -> str:
+    """提取包件技术范围文本。"""
     package_scope = _extract_package_scope_text(pkg, tender_raw, other_package_names=other_package_names)
     blocks = _extract_section_blocks(
         package_scope,
@@ -1246,6 +1446,7 @@ def _extract_package_configuration_scope_text(
     tender_raw: str,
     other_package_names: tuple[str, ...] = (),
 ) -> str:
+    """提取包件配置范围文本。"""
     package_scope = _extract_package_scope_text(pkg, tender_raw, other_package_names=other_package_names)
     blocks = _extract_section_blocks(
         package_scope,
@@ -1261,6 +1462,7 @@ def _extract_package_scope_text(
     tender_raw: str,
     other_package_names: tuple[str, ...] = (),
 ) -> str:
+    """提取包件范围文本。"""
     _PACKAGE_SCOPE_EXIT_HINTS = (
         "合同条款",
     )
@@ -1273,48 +1475,69 @@ def _extract_package_scope_text(
         return text
 
     full_item_name = _normalize_requirement_line(pkg.item_name)
+    full_item_name_compact = _compact_scope_text(pkg.item_name)
     item_tokens = [token for token in (full_item_name, *_extract_match_tokens(pkg.item_name)) if token]
+    item_tokens_compact = [token for token in (_compact_scope_text(token) for token in item_tokens) if token]
     other_tokens: list[str] = []
     for name in other_package_names:
         other_tokens.extend(t for t in _extract_match_tokens(name) if len(t) >= 3 and t not in item_tokens)
+    other_tokens_compact = [_compact_scope_text(token) for token in other_tokens if token]
     package_markers = {
         f"包{pkg.package_id}",
         f"第{pkg.package_id}包",
         f"{pkg.package_id}包",
     }
-    package_candidates: list[tuple[int, int]] = []
-    token_candidates: list[tuple[int, int]] = []
+    package_markers_compact = {
+        f"合同包{pkg.package_id}",
+        f"包{pkg.package_id}",
+        f"第{pkg.package_id}包",
+        f"{pkg.package_id}包",
+    }
+    package_candidates: list[tuple[int, int, bool]] = []
+    token_candidates: list[tuple[int, int, bool]] = []
 
     for idx, raw_line in enumerate(lines):
         normalized = _normalize_requirement_line(raw_line)
         if not normalized:
             continue
 
-        mentioned_package_ids = _line_package_ids(normalized)
+        window_text = _scope_window_text(lines, idx, span=12)
+        window_compact = _compact_scope_text(window_text)
+        mentioned_package_ids = _line_package_ids(window_text)
         if (
             pkg.package_id in mentioned_package_ids
             and any(other_id != pkg.package_id for other_id in mentioned_package_ids)
-            and not any(token and token in normalized for token in item_tokens)
+            and not any(token and token in window_compact for token in item_tokens_compact)
         ):
             continue
 
         score = 0
-        has_package_marker = any(marker in normalized for marker in package_markers)
-        if full_item_name and full_item_name in normalized:
+        has_package_marker = any(marker in window_compact for marker in package_markers_compact)
+        has_item_name = bool(full_item_name_compact and full_item_name_compact in window_compact)
+        has_item_token = any(token and token in window_compact for token in item_tokens_compact)
+        if has_item_name:
+            score += 6
+        elif has_item_token:
             score += 4
-        elif any(token and token in normalized for token in item_tokens):
-            score += 3
         if has_package_marker:
+            score += 3
+            if any(window_compact.startswith(marker) for marker in package_markers_compact):
+                score += 3
+        if score and _contains_any(window_text, _TECH_SECTION_HINTS):
+            score += 3
+        if score and _contains_any(window_text, _CONFIG_SECTION_HINTS):
             score += 2
-        lookahead = " ".join(lines[idx:min(len(lines), idx + 12)])
-        if score and _contains_any(lookahead, _TECH_SECTION_HINTS):
-            score += 2
+        if score and any(token in window_text for token in ("售后服务", "售后要求", "技术服务")):
+            score += 1
+        is_continued = "续上页" in window_text
+        if is_continued:
+            score -= 3
 
         if score:
             if has_package_marker:
-                package_candidates.append((score, idx))
+                package_candidates.append((score, idx, is_continued))
             else:
-                token_candidates.append((score, idx))
+                token_candidates.append((score, idx, is_continued))
 
     candidate_indexes = package_candidates or token_candidates
 
@@ -1324,22 +1547,24 @@ def _extract_package_scope_text(
     scopes: list[str] = []
     seen_scopes: set[str] = set()
 
-    scored_candidates = []
-    for score, idx in candidate_indexes:
-        local_window = " ".join(lines[idx:min(len(lines), idx + 8)])
-        if _contains_any(local_window, _TECH_SECTION_HINTS):
-            scored_candidates.append((score, idx))
+    scored_candidates: list[tuple[int, int, bool]] = []
+    for score, idx, is_continued in candidate_indexes:
+        local_window = _scope_window_text(lines, idx, span=8)
+        if _contains_any(local_window, _TECH_SECTION_HINTS) or _contains_any(local_window, _CONFIG_SECTION_HINTS):
+            scored_candidates.append((score, idx, is_continued))
 
     candidate_indexes = scored_candidates or candidate_indexes
-    best_candidates = [max(candidate_indexes, key=lambda item: (item[0], item[1]))]
-    for _, idx in best_candidates:
+    best_candidates = sorted(candidate_indexes, key=lambda item: (-item[0], item[2], item[1]))[:1]
+    for _, idx, _ in best_candidates:
         current_line = _normalize_requirement_line(lines[idx])
+        current_line_compact = _compact_scope_text(_scope_window_text(lines, idx, span=3) or current_line)
         start = idx
-        if not any(marker in current_line for marker in package_markers):
+        if not any(marker in current_line_compact for marker in package_markers_compact):
             while start > 0 and idx - start < _PACKAGE_SCOPE_BEFORE_LINES:
                 previous = _normalize_requirement_line(lines[start - 1])
+                previous_compact = _compact_scope_text(previous)
                 if previous and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", previous) and not any(
-                    marker in previous for marker in package_markers
+                    marker in previous_compact for marker in package_markers_compact
                 ):
                     break
                 start -= 1
@@ -1349,18 +1574,19 @@ def _extract_package_scope_text(
 
         while end < len(lines) and end - idx < _PACKAGE_SCOPE_AFTER_LINES:
             following = _normalize_requirement_line(lines[end])
+            next_window = _scope_window_text(lines, end, span=2)
+            next_window_compact = _compact_scope_text(next_window)
             # 强制遇到下一个“合同包X”标题就停止，避免跨包串入
-            if following and re.search(r"合同包\s*\d+", following):
-                if not any(marker in following for marker in package_markers):
+            if next_window and re.match(r"合同包\s*\d+", next_window):
+                if not any(marker in next_window_compact for marker in package_markers_compact):
                     break
-            if following and re.search(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", following) and not any(
-                marker in following for marker in package_markers
+            if next_window and re.match(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", next_window) and not any(
+                marker in next_window_compact for marker in package_markers_compact
             ):
                 break
 
             if following and other_tokens and any(t in following for t in other_tokens):
                 break
-
             if following and package_forbidden and any(tok in following for tok in package_forbidden):
                 break
 
@@ -1379,11 +1605,13 @@ def _extract_package_scope_text(
 
 
 def _build_loose_match_pattern(text: str) -> str:
+    """构建宽松匹配pattern。"""
     pieces = [re.escape(piece) for piece in re.split(r"\s+", text.strip()) if piece]
     return r"\s*".join(pieces)
 
 
 def _find_requirement_pair_position(text: str, req_key: str, req_val: str) -> tuple[int, str]:
+    """查找需求键值对position。"""
     key_pattern = _build_loose_match_pattern(req_key)
     val_pattern = _build_loose_match_pattern(req_val)
     if not key_pattern or not val_pattern:
@@ -1401,6 +1629,7 @@ def _find_requirement_pair_position(text: str, req_key: str, req_val: str) -> tu
 
 
 def _find_evidence_position(text: str, candidates: list[str]) -> tuple[int, str]:
+    """查找证据position。"""
     idx = -1
     matched = ""
     candidates = [

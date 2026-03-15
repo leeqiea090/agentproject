@@ -114,6 +114,7 @@ def split_text(
     chunk_size: int = 900,
     chunk_overlap: int = 150,
 ) -> list[str]:
+    """按设定窗口切分长文本。"""
     cleaned = text.replace("\r\n", "\n").strip()
     if not cleaned:
         return []

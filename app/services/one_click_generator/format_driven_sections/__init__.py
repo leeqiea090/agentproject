@@ -82,6 +82,7 @@ def build_format_driven_sections(
 
 
 def _detect_procurement_mode(tender, tender_raw: str) -> str:
+    """检测采购模式。"""
     text = " ".join(
         [
             str(getattr(tender, "project_name", "") or ""),

@@ -12,6 +12,7 @@ _MODEL_LOCK = threading.Lock()
 
 
 def _get_model() -> SentenceTransformer:
+    """加载并缓存向量模型实例。"""
     global _MODEL
     if _MODEL is None:
         with _MODEL_LOCK:
@@ -22,6 +23,7 @@ def _get_model() -> SentenceTransformer:
 
 
 def embed_texts(texts: Iterable[str]) -> list[list[float]]:
+    """为多段文本生成向量表示。"""
     text_list = [text for text in texts if text and text.strip()]
     if not text_list:
         return []
@@ -32,5 +34,6 @@ def embed_texts(texts: Iterable[str]) -> list[list[float]]:
 
 
 def embed_query(query: str) -> list[float]:
+    """为检索查询生成向量表示。"""
     vectors = embed_texts([query])
     return vectors[0] if vectors else []

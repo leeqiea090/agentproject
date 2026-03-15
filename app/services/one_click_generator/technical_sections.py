@@ -75,6 +75,7 @@ def _collapse_repeated_nontech_block(
     return "\n".join(lines) if lines else ""
 
 def _canonicalize_clause_text(text: str, *, for_signature: bool = False) -> str:
+    """返回条款文本。"""
     t = _safe_text(text, "")
     t = re.sub(r"^(实质性条款|重要条款|一般条款)[:：]\s*", "", t)
     t = t.replace("★", "").replace("▲", "").replace("■", "")
@@ -105,6 +106,7 @@ def _sanitize_rows_for_section(
     *,
     expected_category: ClauseCategory | None = None,
 ) -> list[dict[str, Any]]:
+    """清洗章节的行。"""
     cleaned: list[dict[str, Any]] = []
     seen: set[str] = set()
     forbidden = _package_forbidden_terms(pkg.item_name)
@@ -163,6 +165,7 @@ def _sanitize_rows_for_section(
 
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -416,6 +419,7 @@ def _build_post_table_narratives(
 
 
 def _default_response_placeholder(section_type: str) -> str:
+    """返回默认响应占位符。"""
     mapping = {
         "service": "承诺按采购文件及厂家服务方案执行，提供送货、安装调试、培训、维保及售后响应服务。",
         "config": "承诺所投配置满足招标要求，随机配置及随机文件与投标型号保持一致。",
@@ -425,6 +429,7 @@ def _default_response_placeholder(section_type: str) -> str:
     return mapping.get(section_type, "承诺按采购文件要求执行。")
 
 def _default_acceptance_method(text: str) -> str:
+    """返回默认验收method。"""
     t = _safe_text(text, "")
     if any(k in t for k in ("到货", "装箱", "外观", "数量")):
         return "到货验收"
@@ -438,6 +443,7 @@ def _default_acceptance_method(text: str) -> str:
 
 
 def _default_document_supply_method(text: str) -> str:
+    """返回默认文档supplymethod。"""
     t = _safe_text(text, "")
     if any(k in t for k in ("随机文件", "说明书", "保修卡", "装箱单")):
         return "随货/另附/电子版"
@@ -448,6 +454,7 @@ def _default_document_supply_method(text: str) -> str:
     return "按采购文件要求提供"
 
 def _smart_default_response(section_type: str, key: str, req: str) -> str:
+    """返回默认smart响应。"""
     text = f"{_safe_text(key, '')} {_safe_text(req, '')}"
     text = text.replace("：", " ").replace(":", " ")
 
@@ -512,6 +519,7 @@ def _normalize_section_response(
     key: str = "",
     req: str = "",
 ) -> str:
+    """归一化章节响应。"""
     text = _safe_text(raw_value, "")
     if not text:
         return _smart_default_response(section_type, key, req)
@@ -531,6 +539,7 @@ def _normalize_section_response(
     return text
 
 def _default_evidence_placeholder(section_type: str) -> str:
+    """返回默认证据占位符。"""
     mapping = {
         "service": "【待补证：售后服务方案/厂家承诺】",
         "config": "【待补证：配置清单/彩页/说明书】",
@@ -541,6 +550,7 @@ def _default_evidence_placeholder(section_type: str) -> str:
 
 
 def _beautify_nontech_key(section_type: str, key: str, req: str) -> str:
+    """美化非技术类条目名称的展示文本。"""
     key_n = _canonicalize_clause_text(key)
     req_n = _canonicalize_clause_text(req)
 
@@ -575,6 +585,7 @@ def _normalize_section_evidence(row: dict[str, Any], section_type: str) -> str:
 
 
 def _rich_pending(message: str) -> str:
+    """生成富底稿场景下的待补占位文本。"""
     return f"【待补：{message}】"
 
 
@@ -584,6 +595,7 @@ def _resolve_rich_commitment_response(
     warranty: str = "",
     evidence_refs: list[Any] | None = None,
 ) -> str:
+    """解析并返回富承诺响应。"""
     text = _safe_text(f"{requirement.param_name} {requirement.raw_text}", "")
     evidence_refs = evidence_refs or []
 
@@ -806,6 +818,7 @@ def _build_package_detail_section(
 
 
 def _gen_technical(*args, **kwargs):
+    """显式禁用旧版技术章节生成入口。"""
     raise RuntimeError(
         "旧结构生成器 _gen_technical 已禁用。请改用 build_format_driven_sections()."
     )
@@ -814,6 +827,7 @@ def _build_appendix_service_placeholder(
     tender: TenderDocument,
     packages: list[ProcurementPackage] | None = None,
 ) -> str:
+    """构建appendix服务占位符。"""
     pkgs = packages if packages is not None else tender.packages
     sections: list[str] = ["## 二、技术服务和售后服务的内容及措施"]
 
@@ -861,6 +875,7 @@ def _build_appendix_service_placeholder(
     return "\n".join(sections).strip()
 
 def _build_product_brochure_checklist(packages: list[ProcurementPackage]) -> str:
+    """构建产品brochurechecklist。"""
     lines = [
         "## 三、产品彩页",
         "| 包号 | 建议文件名 | 核对要点 |",
@@ -874,6 +889,7 @@ def _build_product_brochure_checklist(packages: list[ProcurementPackage]) -> str
 
 
 def _build_energy_cert_checklist(packages: list[ProcurementPackage]) -> str:
+    """构建energycertchecklist。"""
     lines = [
         "## 四、节能/环保/能效认证证书（如适用）",
         "| 包号 | 是否适用 | 建议文件名 | 核对要点 |",
@@ -887,6 +903,7 @@ def _build_energy_cert_checklist(packages: list[ProcurementPackage]) -> str:
 
 
 def _build_quality_report_checklist(packages: list[ProcurementPackage]) -> str:
+    """构建quality报告checklist。"""
     lines = [
         "## 五、检测/质评数据节选",
         "| 包号 | 建议文件名 | 优先内容 | 核对要点 |",
@@ -901,6 +918,7 @@ def _build_quality_report_checklist(packages: list[ProcurementPackage]) -> str:
 
 
 def _gen_appendix(*args, **kwargs):
+    """显式禁用旧版附件章节生成入口。"""
     raise RuntimeError(
         "旧结构生成器 _gen_appendix 已禁用。请改用 build_format_driven_sections()."
     )

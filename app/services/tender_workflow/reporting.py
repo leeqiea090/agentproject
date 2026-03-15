@@ -12,6 +12,7 @@ from app.schemas import TenderDocument
 from app.services.quality_gate import _compute_project_meta_consistency_score
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -23,6 +24,7 @@ for _module in (_common, _classification, _product_facts, _evidence, _materializ
 del _module
 
 def _workflow_api():
+    """动态导入正式工作流聚合模块。"""
     return importlib.import_module("app.services.tender_workflow")
 def _build_regression_report(
     stages: list[dict[str, Any]],
@@ -37,6 +39,7 @@ def _build_regression_report(
     selected_packages: list[str] | None = None,
     tender: TenderDocument | None = None,
 ) -> dict[str, Any]:
+    """构建回归报告。"""
     stage_count = len(stages) + 1
     completed_count = len([stage for stage in stages if stage.get("status") == _STAGE_STATUS_COMPLETED])
     warning_count = len([stage for stage in stages if stage.get("status") == _STAGE_STATUS_WARNING])
@@ -608,6 +611,7 @@ def _build_regression_report(
 
 
 def _retrieve_citations(query: str, preferred_source: str | None = None, top_k: int = _DEFAULT_CITATION_TOP_K) -> list[dict[str, Any]]:
+    """检索可用于工作流报告的引用证据。"""
     if not query.strip():
         return []
 
@@ -637,6 +641,7 @@ def _traceability_hits(
     technical_text: str,
     technical_matches: list[dict[str, Any]],
 ) -> tuple[int, int, list[str]]:
+    """统计阶段结果中的可追溯命中情况。"""
     if not technical_matches:
         return 0, 0, []
 
@@ -668,6 +673,7 @@ def _product_compliance_gaps(
     package_ids: list[str],
     products: dict[str, ProductSpecification],
 ) -> list[str]:
+    """汇总产品符合性缺口。"""
     if not package_ids:
         return []
 
@@ -695,6 +701,7 @@ def _product_compliance_gaps(
 
 
 def _material_coverage(required_materials: list[str], sections: list[BidDocumentSection]) -> tuple[int, int, list[str]]:
+    """计算资料覆盖率指标。"""
     if not required_materials:
         return 0, 0, []
 

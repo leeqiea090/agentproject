@@ -118,6 +118,7 @@ _TEMPLATE_POLLUTION_INFIX_KEYWORDS = (
 )
 
 def _detect_procurement_mode_from_text(full_text: str | None, tender=None) -> str:
+    """检测文本中的采购模式。"""
     text = " ".join(
         [
             full_text or "",
@@ -151,6 +152,7 @@ _REGRESSION_THRESHOLDS = {
 }
 
 def _section_title_text(section: BidDocumentSection) -> str:
+    """返回标题文本。"""
     return (getattr(section, "section_title", "") or "").strip()
 
 
@@ -158,6 +160,7 @@ def _target_packages(
     tender: TenderDocument | None,
     target_package_ids: list[str] | None,
 ):
+    """定位包件。"""
     if tender is None:
         return []
     wanted = {str(pkg_id) for pkg_id in (target_package_ids or []) if str(pkg_id).strip()}
@@ -201,6 +204,7 @@ def _compute_project_meta_consistency_score(
     tender: TenderDocument | None,
     target_package_ids: list[str] | None = None,
 ) -> float:
+    """计算projectmetaconsistencyscore。"""
     if tender is None:
         return 1.0
 
@@ -222,6 +226,7 @@ def _compute_project_meta_consistency_score(
     return sum(1 for ok in checks if ok) / len(checks)
 
 def _req_value_text(req: NormalizedRequirement) -> str:
+    """返回值文本。"""
     raw = (req.raw_text or "").strip()
     if "：" in raw:
         return raw.split("：", 1)[1].strip()
@@ -232,6 +237,7 @@ def _req_value_text(req: NormalizedRequirement) -> str:
 def _count_bad_requirement_values(
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None,
 ) -> int:
+    """返回异常需求值。"""
     if not normalized_reqs:
         return 0
 
@@ -247,6 +253,7 @@ def _count_bad_requirement_values(
 def _count_duplicate_requirement_keys(
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None,
 ) -> int:
+    """统计重复需求键的组数。"""
     if not normalized_reqs:
         return 0
 
@@ -266,6 +273,7 @@ def _count_rendered_forbidden_hits(
     sections: list[BidDocumentSection],
     tender: TenderDocument | None,
 ) -> int:
+    """统计渲染结果中的跨包禁词命中次数。"""
     if tender is None:
         return 0
 
@@ -308,6 +316,7 @@ def _count_rendered_forbidden_hits(
 def _collect_duplicate_requirement_keys(
     normalized_reqs: dict[str, list[NormalizedRequirement]] | None,
 ) -> dict[str, list[str]]:
+    """收集每个包件中的重复需求键。"""
     result: dict[str, list[str]] = {}
     if not normalized_reqs:
         return result
@@ -655,11 +664,13 @@ def _flatten_nested_placeholders(text: str) -> str:
 
 
 def _editable_placeholder(label: str, prefix: str = "待填写") -> str:
+    """生成可编辑草稿占位符。"""
     normalized = re.sub(r"\s+", "", (label or "").strip("：:;；，,。 "))
     return f"【{prefix}：{normalized}】" if normalized else f"【{prefix}】"
 
 
 def _pending_placeholder_repl(match: re.Match[str]) -> str:
+    """把待补类占位符替换成可编辑占位文本。"""
     label = (match.group(1) or "").strip()
     if not label:
         return "【待填写】"
@@ -675,11 +686,13 @@ def _pending_placeholder_repl(match: re.Match[str]) -> str:
 
 
 def _todo_placeholder_repl(match: re.Match[str]) -> str:
+    """把 TODO 占位符替换成可编辑占位文本。"""
     label = (match.group(1) or "").strip()
     return _editable_placeholder(label, "待填写")
 
 
 def _render_editable_draft_content(content: str) -> str:
+    """渲染可编辑草稿内容。"""
     text = content.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\*\*【内部草稿.*?】\*\*\n*", "", text)
     text = re.sub(r"\*\*【待补充底稿.*?】\*\*\n*", "", text)
@@ -893,6 +906,7 @@ def _is_truncated_field(text: str) -> bool:
 
 
 def _check_required_new_structure(full_text: str | None, tender=None) -> list[str]:
+    """检查required新结构。"""
     text = full_text or ""
 
     tender_mode = _detect_procurement_mode_from_text("", tender=tender)
@@ -937,6 +951,7 @@ def _check_required_new_structure(full_text: str | None, tender=None) -> list[st
 
 
 def _check_forbidden_old_structure(full_text: str | None, tender=None) -> list[str]:
+    """检查forbidden旧结构。"""
     text = full_text or ""
 
     tender_mode = _detect_procurement_mode_from_text("", tender=tender)
@@ -1024,6 +1039,7 @@ def _collect_rendered_forbidden_hits(
     sections: list[BidDocumentSection],
     tender: TenderDocument | None,
 ) -> dict[str, list[str]]:
+    """收集渲染结果中的跨包禁词命中详情。"""
     result: dict[str, list[str]] = {}
     if tender is None:
         return result
@@ -1293,6 +1309,7 @@ def compute_regression_metrics(
 
 
 def _check_required_headings(full_text: str) -> list[str]:
+    """检查requiredheadings。"""
     required = [
         "一、响应文件封面格式",
         "四、技术偏离及详细配置明细表",
@@ -1314,6 +1331,7 @@ def _check_required_headings(full_text: str) -> list[str]:
 
 
 def _sanitize_generated_content(section_title: str, content: str) -> tuple[str, list[str]]:
+    """清洗generated内容。"""
     normalized = content.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()
     removed_lines: list[str] = []
     kept: list[str] = []
@@ -1357,6 +1375,7 @@ def _sanitize_generated_content(section_title: str, content: str) -> tuple[str, 
 
 
 def _detect_template_pollution(content: str) -> list[str]:
+    """检测模板pollution。"""
     findings: list[str] = []
     lowered = content.lower()
     if "todo" in lowered or "tbd" in lowered or "lorem ipsum" in lowered:
@@ -1373,6 +1392,7 @@ def _detect_template_pollution(content: str) -> list[str]:
 
 
 def _apply_template_pollution_guard(sections: list[BidDocumentSection]) -> list[BidDocumentSection]:
+    """返回模板pollutionguard。"""
     guarded: list[BidDocumentSection] = []
     for section in sections:
         cleaned, removed = _sanitize_generated_content(section.section_title, section.content)

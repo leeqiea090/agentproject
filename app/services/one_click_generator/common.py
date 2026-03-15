@@ -44,6 +44,7 @@ class BidSectionsValidationError(RuntimeError):
         heal_passes: int = 0,
         message: str | None = None,
     ) -> None:
+        """初始化BidSectionsValidationError。"""
         self.validation_gate = gate
         self.reasons = reasons
         self.heal_passes = heal_passes
@@ -199,10 +200,12 @@ _PENDING_BIDDER_RESPONSE = "待核实（需填入投标产品实参）"
 
 
 def _today() -> str:
+    """返回当前日期字符串。"""
     return datetime.now().strftime("%Y年%m月%d日")
 
 
 def _safe_text(text: str | None, default: str = "详见招标文件") -> str:
+    """安全地返回可用文本。"""
     if text is None:
         return default
     stripped = str(text).strip()
@@ -212,6 +215,7 @@ def _safe_text(text: str | None, default: str = "详见招标文件") -> str:
 
 
 def _normalize_commitment_term(text: str | None, default: str = "按招标文件及合同约定执行") -> str:
+    """归一化承诺类文案。"""
     normalized = _safe_text(text, default)
     if not normalized:
         return default
@@ -225,6 +229,7 @@ def _normalize_commitment_term(text: str | None, default: str = "按招标文件
 
 
 def _as_text(value: Any) -> str:
+    """把输入值整理成可用字符串。"""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -241,10 +246,12 @@ def _as_text(value: Any) -> str:
 
 
 def _fmt_money(amount: float) -> str:
+    """格式化金额显示。"""
     return f"{amount:,.2f}"
 
 
 def _tender_context_text(tender: TenderDocument) -> str:
+    """拼装招标文件上下文文本。"""
     eval_items = " ".join(f"{k}:{v}" for k, v in tender.evaluation_criteria.items())
     package_names = " ".join(pkg.item_name for pkg in tender.packages)
     package_requirements = " ".join(
@@ -267,14 +274,17 @@ def _tender_context_text(tender: TenderDocument) -> str:
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    """判断文本是否包含任一关键词。"""
     return any(keyword in text for keyword in keywords)
 
 
 def _contains_non_technical_content(text: str) -> bool:
+    """判断文本是否混入非技术性内容。"""
     return _contains_any(text, _NON_TECH_KEYS) or _contains_any(text, _NON_TECH_CONTENT_HINTS)
 
 
 def _is_medical_project(tender: TenderDocument) -> bool:
+    """判断是否为医疗类项目。"""
     context = _tender_context_text(tender)
     return _contains_any(
         context,
@@ -283,6 +293,7 @@ def _is_medical_project(tender: TenderDocument) -> bool:
 
 
 def _requires_sme_declaration(tender: TenderDocument) -> bool:
+    """判断是否需要中小企业声明材料。"""
     context = _tender_context_text(tender)
     return _contains_any(
         context,
@@ -291,6 +302,7 @@ def _requires_sme_declaration(tender: TenderDocument) -> bool:
 
 
 def _allow_consortium(tender: TenderDocument) -> bool:
+    """判断项目是否允许联合体投标。"""
     context = _tender_context_text(tender)
     if "不接受联合体" in context:
         return False
@@ -298,11 +310,13 @@ def _allow_consortium(tender: TenderDocument) -> bool:
 
 
 def _has_imported_clues(tender: TenderDocument) -> bool:
+    """判断招标文件是否存在进口采购线索。"""
     context = _tender_context_text(tender)
     return _contains_any(context, ("进口", "原装", "境外"))
 
 
 def _detect_procurement_region(tender: TenderDocument) -> str:
+    """识别采购项目所属地区。"""
     preferred_contexts = [
         _safe_text(tender.purchaser, ""),
         _safe_text(tender.project_name, ""),
@@ -320,6 +334,7 @@ def _detect_procurement_region(tender: TenderDocument) -> str:
 
 
 def _supplier_commitment_title(tender: TenderDocument) -> str:
+    """生成供应商承诺章节标题。"""
     region = _detect_procurement_region(tender)
     return f"{region}政府采购供应商资格承诺函" if region else "政府采购供应商资格承诺函"
 
@@ -328,17 +343,29 @@ def _package_scope(
     tender: TenderDocument,
     packages: list[ProcurementPackage] | None = None,
 ) -> str:
+    """整理包件范围描述。"""
     pkgs = packages if packages is not None else tender.packages
     if not pkgs:
         return "全部包"
     return "、".join(f"包{pkg.package_id}" for pkg in pkgs)
 
 def _infer_package_quantity(pkg: ProcurementPackage, tender_raw: str) -> int:
-    """
-    数量一律以 TenderParser 已经写入的 pkg.quantity 为准。
-    one_click_generator 阶段不再二次从原文猜数量，避免被技术参数里的
-    “3针 / 2次 / 12色 / 40管”等数字误伤，导致不同版本生成结果抖动。
-    """
+    """优先使用包件范围内明确的“数量/设备总台数”，否则回退到结构化数量。"""
+    scope = _extract_package_scope_text(pkg, tender_raw)
+    for pattern in (
+        r"设备总台数\s*[:：;]?\s*(\d+(?:\.\d+)?)\s*台",
+        r"数量\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:台|套|个)?",
+    ):
+        match = re.search(pattern, scope)
+        if not match:
+            continue
+        try:
+            qty = int(float(match.group(1)))
+        except (TypeError, ValueError):
+            qty = 0
+        if qty > 0:
+            return qty
+
     try:
         qty = int(pkg.quantity)
     except (TypeError, ValueError):
@@ -354,6 +381,7 @@ def _package_detail_lines(
     tender_raw: str,
     packages: list[ProcurementPackage] | None = None,
 ) -> str:
+    """构建包件明细行。"""
     pkgs = packages if packages is not None else tender.packages
     if not pkgs:
         return "- 包信息：详见招标文件。"
@@ -377,6 +405,7 @@ def _quote_overview_table(
     tender_raw: str,
     packages: list[ProcurementPackage] | None = None,
 ) -> str:
+    """构建报价概览表。"""
     headers = [
         "| 序号(包号) | 货物名称 | 数量 | 预算金额(元) | 投标报价(元) | 交货期 |",
         "|---|---|---:|---:|---:|---|",

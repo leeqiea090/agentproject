@@ -3,6 +3,7 @@ from __future__ import annotations
 import app.services.tender_workflow.common as _common
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -18,6 +19,7 @@ def _classify_clauses(
     selected_packages: list[str],
     raw_text: str,
 ) -> dict[str, Any]:
+    """分类条款。"""
     required_materials = _ensure_str_list(analysis_result.get("required_materials"))
     scoring_rules = _ensure_str_list(analysis_result.get("scoring_rules"))
     target_packages = selected_packages or [pkg.package_id for pkg in tender.packages]
@@ -138,6 +140,7 @@ def _normalize_requirements(
     selected_packages: list[str],
     raw_text: str,
 ) -> dict[str, Any]:
+    """归一化需求。"""
     target_package_ids = selected_packages or [pkg.package_id for pkg in tender.packages]
     package_map = {pkg.package_id: pkg for pkg in tender.packages}
     target_packages = [package_map[pkg_id] for pkg_id in target_package_ids if pkg_id in package_map]

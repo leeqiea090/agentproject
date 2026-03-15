@@ -76,7 +76,9 @@ def _has_structural_failures(gate) -> bool:
 
 
 def _pack_normalized_result(all_normalized: dict[str, list[NormalizedRequirement]]) -> dict[str, Any]:
+    """打包归一化结果。"""
     def _looks_semantically_thin(value: str) -> bool:
+        """判断semanticallythin。"""
         text = str(value or "").strip()
         if not text:
             return True
@@ -87,6 +89,7 @@ def _pack_normalized_result(all_normalized: dict[str, list[NormalizedRequirement
         return False
 
     def _extract_value(text: str, param_name: str) -> str:
+        """提取值。"""
         normalized = str(text or "").strip()
         if not normalized:
             return ""
@@ -103,6 +106,7 @@ def _pack_normalized_result(all_normalized: dict[str, list[NormalizedRequirement
         return normalized
 
     def _best_normalized_value(req: NormalizedRequirement) -> str:
+        """返回归一化值。"""
         raw_text = str(req.raw_text or "").strip()
         source_text = str(req.source_text or "").strip()
         param_name = str(req.param_name or "").strip()
@@ -124,13 +128,15 @@ def _pack_normalized_result(all_normalized: dict[str, list[NormalizedRequirement
     items: list[dict[str, Any]] = []
     for pkg_id, reqs in all_normalized.items():
         for req in reqs:
-            row = req.model_dump()
+            # 下游大量按字符串比较 category；这里统一输出 JSON 友好的纯值，避免 Enum 文本泄漏。
+            row = req.model_dump(mode="json")
             row["normalized_value"] = _best_normalized_value(req)
             items.append(row)
     return {"technical_requirements": items}
 
 
 def _pack_product_profiles(all_profiles: dict[str, ProductProfile]) -> dict[str, Any]:
+    """打包产品画像。"""
     return {pkg_id: profile.model_dump() for pkg_id, profile in all_profiles.items()}
 
 
@@ -191,6 +197,7 @@ def _infer_material_stage(
 
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -322,6 +329,7 @@ def generate_bid_sections(
         )
 
     # ── Step 3: 包件隔离生成章节 ──
+    # 如果调用方已经给了结构化结果，这里用“本地推导结果 + 外部结果覆写”的方式合并，保证接口兼容。
     normalized_payload = _pack_normalized_result(all_normalized)
     if isinstance(normalized_result, dict):
         normalized_payload = {**normalized_payload, **normalized_result}

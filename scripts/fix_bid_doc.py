@@ -348,23 +348,28 @@ PACKAGES = [
 
 
 def set_block_text(target, lines: list[str]) -> None:
+    """设置文本块文本。"""
     target.text = "\n".join(lines)
 
 
 def format_range(start: int, end: int) -> str:
+    """格式化页码范围字符串。"""
     return str(start) if start == end else f"{start}-{end}"
 
 
 def to_pages(path: Path) -> list[str]:
+    """把文档转换成按分页符切分的文本页列表。"""
     output = subprocess.check_output(["textutil", "-convert", "txt", "-stdout", str(path)])
     return output.decode("utf-8", errors="ignore").split("\f")
 
 
 def find_pages(pages: list[str], pattern: str) -> list[int]:
+    """查找包含指定模式的页码列表。"""
     return [index for index, page in enumerate(pages, 1) if pattern in page]
 
 
 def insert_sections_before_appendix(doc: Document) -> None:
+    """在附表前插入补充章节。"""
     appendix = next(p for p in doc.paragraphs if p.text.strip() == "附一、资格性审查响应对照表")
     heading_style = next(p.style for p in doc.paragraphs if p.text.strip() == "十一、投标人关联单位的说明")
     normal_style = next(p.style for p in doc.paragraphs if p.text.strip().startswith("说明：投标人应当如实披露"))
@@ -408,6 +413,7 @@ def insert_sections_before_appendix(doc: Document) -> None:
 
 
 def update_tables(doc: Document) -> None:
+    """更新表格。"""
     for table, pkg in zip(doc.tables[1:7], PACKAGES):
         set_block_text(table.rows[1].cells[5], pkg["tech_requirements"])
         set_block_text(table.rows[1].cells[6], pkg["response_template"])
@@ -509,6 +515,7 @@ def update_tables(doc: Document) -> None:
 
 
 def update_page_refs(doc: Document) -> None:
+    """更新pagerefs。"""
     doc.save(REVISED)
     pages = to_pages(REVISED)
 
@@ -569,6 +576,7 @@ def update_page_refs(doc: Document) -> None:
 
 
 def main() -> None:
+    """执行文档修复脚本主流程。"""
     doc = Document(str(ORIGINAL))
     update_tables(doc)
     insert_sections_before_appendix(doc)

@@ -115,6 +115,7 @@ class BidEvidenceBinding(BaseModel):
 
     @model_validator(mode="after")
     def _sync_alias_fields(self) -> BidEvidenceBinding:
+        """同步证据绑定对象中的别名字段。"""
         if not self.file_name and self.evidence_file:
             self.file_name = self.evidence_file
         if not self.evidence_file and self.file_name:
@@ -502,6 +503,7 @@ class CompanyProfile(BaseModel):
     legal_representative: str = Field(description="法定代表人")
     address: str = Field(description="详细地址")
     phone: str = Field(description="联系电话")
+    document_date: str = Field(default="", description="投标文件落款日期，如：2025年09月26日")
     licenses: list[CompanyLicense] = Field(default_factory=list, description="资质证照列表")
     staff: list[CompanyStaff] = Field(default_factory=list, description="项目团队人员")
     social_insurance_proof: str = Field(default="", description="社保缴纳证明路径")

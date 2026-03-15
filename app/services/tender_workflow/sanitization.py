@@ -7,6 +7,7 @@ import app.services.tender_workflow.evidence as _evidence
 import app.services.tender_workflow.materialization as _materialization
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -28,6 +29,7 @@ def _build_internal_audit_snapshot(
     hard_validation_result: dict[str, Any] | None,
     sections: list[BidDocumentSection],
 ) -> dict[str, Any]:
+    """构建内部审计快照。"""
     return {
         "ingestion_summary": ingestion_result.get("summary", ""),
         "selected_packages": package_result.get("selected_packages", []),
@@ -63,6 +65,7 @@ def _normalize_pending_sections(
     *,
     add_draft_watermark: bool = False,
 ) -> list[BidDocumentSection]:
+    """归一化待补章节。"""
     normalized: list[BidDocumentSection] = []
     watermark = "**【待补充底稿 — 含未补齐信息，需人工补充后再外发】**\n\n"
     for section in sections:
@@ -104,6 +107,7 @@ def _sanitize_for_external_delivery(
     normalized_result: dict[str, Any] | None = None,
     document_mode: str | None = None,
 ) -> tuple[list[BidDocumentSection], dict[str, Any]]:
+    """清洗for外发。"""
     cleaned_sections = _apply_template_pollution_guard(sections)
     changed_sections: list[str] = []
     placeholder_sections: list[str] = []

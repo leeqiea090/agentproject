@@ -23,6 +23,7 @@ from app.services.tender_workflow import (
 
 
 def _sample_tender() -> TenderDocument:
+    """构造测试用的招标文档样例。"""
     return TenderDocument(
         project_name="医院流式细胞分析仪采购项目",
         project_number="HLJ-2026-018",
@@ -53,6 +54,7 @@ def _sample_tender() -> TenderDocument:
 
 
 def test_classify_clauses_outputs_expected_branch_decisions() -> None:
+    """测试classify条款输出expectedbranchdecisions。"""
     tender = _sample_tender()
     analysis_result = {
         "required_materials": ["营业执照", "授权书", "产品注册证"],
@@ -79,6 +81,7 @@ def test_classify_clauses_outputs_expected_branch_decisions() -> None:
 
 
 def test_build_evidence_bindings_tracks_match_rate() -> None:
+    """测试build证据绑定tracks匹配rate。"""
     tender = _sample_tender()
     analysis_result = {
         "required_materials": ["营业执照", "医疗器械注册证"],
@@ -137,6 +140,7 @@ def test_build_evidence_bindings_tracks_match_rate() -> None:
 
 
 def test_extract_product_facts_and_match_requirements() -> None:
+    """测试extract产品事实and匹配需求。"""
     tender = _sample_tender()
     analysis_result = {
         "required_materials": ["营业执照", "医疗器械注册证"],
@@ -195,6 +199,7 @@ def test_extract_product_facts_and_match_requirements() -> None:
 
 
 def test_match_requirements_to_identity_offered_facts() -> None:
+    """测试匹配需求toidentityoffered事实。"""
     tender = _sample_tender()
     tender.packages[0].technical_requirements = {"原产地": "美国", "生产厂家": "某厂家"}
     analysis_result = {
@@ -245,6 +250,7 @@ def test_match_requirements_to_identity_offered_facts() -> None:
 
 
 def test_sanitize_for_external_delivery_reports_changed_and_placeholder_sections() -> None:
+    """测试外发reportschangedand占位符章节的sanitize。"""
     sections = [
         BidDocumentSection(
             section_title="第二章 符合性承诺",
@@ -269,6 +275,7 @@ def test_sanitize_for_external_delivery_reports_changed_and_placeholder_sections
 
 
 def test_sanitize_for_external_delivery_blocks_when_completion_is_insufficient() -> None:
+    """测试外发文本块whencompletionisinsufficient的sanitize。"""
     sections = [
         BidDocumentSection(
             section_title="第三章 商务及技术部分",
@@ -288,6 +295,7 @@ def test_sanitize_for_external_delivery_blocks_when_completion_is_insufficient()
 
 
 def test_sanitize_for_external_delivery_blocks_when_config_table_is_too_thin() -> None:
+    """测试外发文本块when配置表格istoothin的sanitize。"""
     sections = [
         BidDocumentSection(
             section_title="第三章 商务及技术部分",
@@ -312,6 +320,7 @@ def test_sanitize_for_external_delivery_blocks_when_config_table_is_too_thin() -
 
 
 def test_build_regression_report_can_mark_ready_for_delivery() -> None:
+    """测试交付的build回归报告canmarkready。"""
     stages = [
         {"status": "completed"},
         {"status": "completed"},
@@ -376,6 +385,7 @@ def test_build_regression_report_can_mark_ready_for_delivery() -> None:
 
 
 def test_build_evidence_bindings_exposes_bid_side_pages() -> None:
+    """测试build证据绑定exposes投标sidepages。"""
     tender = _sample_tender()
     product = ProductSpecification(
         product_id="p1",
@@ -421,6 +431,7 @@ def test_build_evidence_bindings_exposes_bid_side_pages() -> None:
 
 
 def test_normalize_requirements_outputs_machine_readable_fields() -> None:
+    """测试normalize需求输出machinereadablefields。"""
     tender = _sample_tender()
     analysis_result = {
         "required_materials": ["营业执照", "医疗器械注册证"],
@@ -451,6 +462,7 @@ def test_normalize_requirements_outputs_machine_readable_fields() -> None:
 
 
 def test_decide_rule_branches_collects_manual_fill_items() -> None:
+    """测试deciderulebranchescollectsmanualfill项。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="c1",
@@ -493,6 +505,7 @@ def test_decide_rule_branches_collects_manual_fill_items() -> None:
 
 
 def test_materialize_sections_injects_company_and_product_values() -> None:
+    """测试materialize章节injects企业and产品值。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="c1",
@@ -544,6 +557,7 @@ def test_materialize_sections_injects_company_and_product_values() -> None:
 
 
 def test_materialize_sections_enriches_qualification_technical_and_appendix_content() -> None:
+    """测试materialize章节enriches资格审查技术andappendix内容。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="c1",
@@ -636,6 +650,7 @@ def test_materialize_sections_enriches_qualification_technical_and_appendix_cont
 
 
 def test_materialize_sections_writes_bidder_evidence_into_mapping_rows() -> None:
+    """测试materialize章节writes投标侧证据into映射行。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="c1",
@@ -707,6 +722,7 @@ def test_materialize_sections_writes_bidder_evidence_into_mapping_rows() -> None
 
 
 def test_materialize_sections_can_fill_truth_from_evidence_binding() -> None:
+    """测试证据binding中的materialize章节canfilltruth。"""
     tender = _sample_tender()
     tender.packages[0].technical_requirements = {"原产地": "美国"}
     product = ProductSpecification(
@@ -765,6 +781,7 @@ def test_materialize_sections_can_fill_truth_from_evidence_binding() -> None:
 
 
 def test_materialize_sections_fills_full_width_critical_placeholders() -> None:
+    """测试materialize章节fillsfullwidthcriticalplaceholders。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="c1",
@@ -815,6 +832,7 @@ def test_materialize_sections_fills_full_width_critical_placeholders() -> None:
 
 
 def test_materialize_sections_rebuilds_coarse_deviation_table_with_evidence_pages() -> None:
+    """测试带证据pages的materialize章节rebuilds粗粒度偏离表。"""
     tender = _sample_tender()
     tender.packages[0].technical_requirements = {
         "激光器": "≥3",
@@ -923,6 +941,7 @@ def test_materialize_sections_rebuilds_coarse_deviation_table_with_evidence_page
 
 
 def test_materialize_sections_rewrites_service_plan_with_package_specific_notes() -> None:
+    """测试带包件specificnotes的materialize章节rewrites服务plan。"""
     tender = TenderDocument(
         project_name="设备采购项目",
         project_number="TP-2026-009",
@@ -1009,6 +1028,7 @@ def test_materialize_sections_rewrites_service_plan_with_package_specific_notes(
 
 
 def test_materialize_sections_fills_review_table_locations_and_evidence_refs() -> None:
+    """测试materialize章节fills评审表格locationsand证据refs。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="c1",
@@ -1077,6 +1097,7 @@ def test_materialize_sections_fills_review_table_locations_and_evidence_refs() -
 
 
 def test_materialize_sections_route_five_column_parameter_table_to_deviation_logic() -> None:
+    """测试materialize章节routefivecolumn参数表格todeviationlogic。"""
     tender = _sample_tender()
     product = ProductSpecification(
         product_id="p1",

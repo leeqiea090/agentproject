@@ -43,6 +43,7 @@ _INVALID_DOWNLOAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n]+')
 
 
 def _is_external_delivery_blocked(outbound_report: dict | None) -> bool:
+    """判断当前外发结果是否被门禁阻断。"""
     return str((outbound_report or {}).get("status", "") or "").strip() == "阻断外发"
 
 
@@ -53,6 +54,7 @@ def _build_external_delivery_view(
     download_url: str = "",
     file_path: str = "",
 ) -> dict:
+    """构建外发结果的展示视图。"""
     if _is_external_delivery_blocked(outbound_report):
         return {
             **outbound_report,
@@ -72,6 +74,7 @@ def _build_external_delivery_view(
 
 
 def _safe_download_filename(stem: str, suffix: str) -> str:
+    """生成安全可用的下载文件名。"""
     sanitized = _INVALID_DOWNLOAD_FILENAME_CHARS.sub("_", str(stem or "").strip())
     sanitized = sanitized.strip(" .")
     if not sanitized:
@@ -88,6 +91,7 @@ def _sections_for_storage_or_response(
     outbound_sections: list[BidDocumentSection],
     outbound_report: dict,
 ) -> list[BidDocumentSection]:
+    """选择用于存储或接口返回的章节列表。"""
     if outbound_sections:
         return outbound_sections
     return internal_sections

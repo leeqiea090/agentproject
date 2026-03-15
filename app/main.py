@@ -29,6 +29,7 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
+    """返回前端首页静态文件。"""
     return FileResponse(_STATIC_DIR / "index.html")
 
 

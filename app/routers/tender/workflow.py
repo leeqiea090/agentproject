@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from app.schemas import (
     BidDocumentSection,
+    DraftLevel,
     ProductSpecification,
     TenderDocument,
     TenderWorkflowRequest,
@@ -48,6 +49,7 @@ from app.routers.tender.common import (
 )
 
 def _resolve_selected_packages(tender_doc: TenderDocument, selected_packages: list[str]) -> list[str]:
+    """根据请求参数确定本次工作流参与的包件列表。"""
     package_ids = {pkg.package_id for pkg in tender_doc.packages}
     if not selected_packages:
         return sorted(package_ids)
@@ -55,6 +57,7 @@ def _resolve_selected_packages(tender_doc: TenderDocument, selected_packages: li
 
 
 def _resolve_raw_text_for_tender(tender_info: dict, parser) -> str:
+    """获取指定招标文件对应的原始文本。"""
     raw_text = str(tender_info.get("raw_text") or "").strip()
     if raw_text:
         return raw_text
@@ -67,6 +70,7 @@ def _resolve_raw_text_for_tender(tender_info: dict, parser) -> str:
 
 
 def _ensure_tender_parsed_for_workflow(tender_id: str, tender_info: dict, parser) -> TenderDocument:
+    """确保工作流运行前已经拿到解析后的招标文档。"""
     parsed_data = tender_info.get("parsed_data")
     if parsed_data:
         if tender_info.get("status") != "parsed":
@@ -94,6 +98,7 @@ def _ensure_tender_parsed_for_workflow(tender_id: str, tender_info: dict, parser
 
 
 def _ensure_tender_indexed_for_workflow(tender_id: str, raw_text: str) -> str | None:
+    """确保招标原文已经写入工作流知识库索引。"""
     text = (raw_text or "").strip()
     if not text:
         return None
@@ -124,6 +129,7 @@ def _workflow_stage(
     data: dict | None = None,
     issues: list[str] | None = None,
 ) -> dict:
+    """组装单个工作流阶段的标准输出结构。"""
     return {
         "stage_code": stage_code,
         "stage_name": stage_name,
@@ -158,10 +164,12 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
     llm = get_chat_model()
     parser = create_tender_parser(llm)
     was_preparsed = bool(tender_info.get("parsed_data")) and tender_info.get("status") == "parsed"
+    # 在流程入口统一补齐解析结果、原文和知识库索引，后续阶段只消费标准化输入。
     tender_doc = _ensure_tender_parsed_for_workflow(req.tender_id, tender_info, parser)
     raw_text = _resolve_raw_text_for_tender(tender_info, parser)
     kb_source = _ensure_tender_indexed_for_workflow(req.tender_id, raw_text)
 
+    # 先把用户输入裁剪成“本次真正参与处理”的包件和产品映射，避免后续阶段再做重复过滤。
     selected_packages = _resolve_selected_packages(tender_doc, req.selected_packages)
     company = company_storage.get(req.company_profile_id) if req.company_profile_id else None
 
@@ -177,6 +185,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
     workflow_agent = TenderWorkflowAgent(llm)
     stages: list[dict] = []
 
+    # 这两步先写入可直接观测的静态阶段信息，后面再进入模型和规则协同的重流程。
     ingestion_dict = _build_document_ingestion_view(
         raw_text=raw_text,
         file_path=tender_info.get("file_path"),
@@ -381,6 +390,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
 
     generation_stage_status = "blocked"
     generation_stage_issues: list[str] = []
+    # 只有资料校验和规则决策都允许时，才继续生成正文；否则直接返回阻断原因。
     if should_continue:
         company_for_docx = company or _PLACEHOLDER_COMPANY
         # 保证下载接口可读取公司信息
@@ -450,6 +460,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
         )
     )
 
+    # 正文生成后再执行二次校验、外发清洗和最终文档输出，避免对半成品做无效落盘。
     if sections:
         hard_validation_dict = workflow_agent.step6_validate_consistency(
             analysis_result=analysis_dict,
@@ -501,7 +512,13 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
         company_for_docx = company or _PLACEHOLDER_COMPANY
         output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
         if req.generate_docx and not _is_external_delivery_blocked(sanitize_stage_data):
-            build_bid_docx(sanitized_sections, tender_doc, company_for_docx, output_file)
+            build_bid_docx(
+                sanitized_sections,
+                tender_doc,
+                company_for_docx,
+                output_file,
+                draft_level=DraftLevel.external_ready,
+            )
             file_path = str(output_file)
         else:
             file_path = ""
@@ -673,6 +690,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
 
 @router.get("/workflow/{workflow_id}", response_model=TenderWorkflowResponse, summary="查询十层流程结果")
 async def get_tender_workflow_result(workflow_id: str):
+    """查询已执行工作流的结果详情。"""
     if workflow_id not in workflow_storage:
         raise HTTPException(status_code=404, detail="流程结果不存在")
     return TenderWorkflowResponse(**workflow_storage[workflow_id])

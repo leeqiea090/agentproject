@@ -22,6 +22,7 @@ _ALLOWED_META_TYPES = (str, int, float, bool)
 
 
 def _normalize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """归一化metadata。"""
     if not metadata:
         return {}
 
@@ -37,6 +38,7 @@ def _normalize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _resolve_db_path() -> Path:
+    """解析并返回数据库路径。"""
     settings = get_settings()
     configured = Path(settings.vector_db_path)
 
@@ -47,6 +49,7 @@ def _resolve_db_path() -> Path:
 
 
 def _initialize_schema(connection: sqlite3.Connection) -> None:
+    """初始化知识库 SQLite 表结构。"""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS kb_chunks (
@@ -70,6 +73,7 @@ def _initialize_schema(connection: sqlite3.Connection) -> None:
 
 
 def _get_connection() -> sqlite3.Connection:
+    """获取连接。"""
     global _DB_CONN, _DB_PATH
 
     if _DB_CONN is None:
@@ -95,6 +99,7 @@ def ingest_text_to_kb(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
 ) -> dict[str, Any]:
+    """写入文本to知识库。"""
     settings = get_settings()
     chunk_size = chunk_size or settings.default_chunk_size
     chunk_overlap = chunk_overlap if chunk_overlap is not None else settings.default_chunk_overlap
@@ -151,6 +156,7 @@ def ingest_text_to_kb(
 
 
 def _cosine_similarity(query_vec: np.ndarray, doc_vec: np.ndarray) -> float:
+    """计算查询向量与文档向量的余弦相似度。"""
     query_norm = np.linalg.norm(query_vec)
     doc_norm = np.linalg.norm(doc_vec)
     if query_norm == 0 or doc_norm == 0:
@@ -159,6 +165,7 @@ def _cosine_similarity(query_vec: np.ndarray, doc_vec: np.ndarray) -> float:
 
 
 def search_knowledge(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    """按向量相似度检索知识库条目。"""
     settings = get_settings()
     k = max(1, min(top_k, 20)) if top_k else settings.default_top_k
 
@@ -205,6 +212,7 @@ def search_knowledge(query: str, top_k: int = 5) -> list[dict[str, Any]]:
 
 
 def knowledge_base_stats() -> dict[str, Any]:
+    """返回base统计。"""
     conn = _get_connection()
     row = conn.execute("SELECT COUNT(1) AS cnt FROM kb_chunks").fetchone()
     count = int(row["cnt"]) if row else 0

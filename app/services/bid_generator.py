@@ -120,6 +120,7 @@ def build_writer_contexts(
 
 
 def _as_text(value: Any) -> str:
+    """把输入值整理成可用字符串。"""
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, (int, float)):
@@ -132,6 +133,7 @@ def _as_text(value: Any) -> str:
 
 
 def _sanitize_model_output(section_title: str, content: str) -> str:
+    """清洗模型输出中的噪声和提示词污染。"""
     normalized = content.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()
     lines: list[str] = []
     for line in normalized.split("\n"):
@@ -158,11 +160,13 @@ def _sanitize_model_output(section_title: str, content: str) -> str:
 
 
 def _markdown_cell(text: Any) -> str:
+    """格式化 Markdown 表格单元格内容。"""
     normalized = re.sub(r"\s+", " ", _as_text(text))
     return normalized.replace("|", "/")
 
 
 def _build_requirement_response_value(req_text: str, matched_spec_value: str, *, product: ProductSpecification | None = None) -> str:
+    """生成需求项的默认响应值。"""
     if matched_spec_value:
         return matched_spec_value
 
@@ -182,6 +186,7 @@ def _build_requirement_response_value(req_text: str, matched_spec_value: str, *,
 
 
 def _first_numeric_value(value: str) -> float | None:
+    """提取文本中的首个数值。"""
     match = re.search(r"-?\d+(?:\.\d+)?", _as_text(value))
     if not match:
         return None
@@ -192,6 +197,7 @@ def _first_numeric_value(value: str) -> float | None:
 
 
 def _evaluate_deviation_status(req_text: str, matched_spec_value: str) -> str:
+    """评估响应内容与需求之间的偏离状态。"""
     requirement = _as_text(req_text)
     response = _as_text(matched_spec_value)
     if not response:
@@ -217,6 +223,7 @@ def _evaluate_deviation_status(req_text: str, matched_spec_value: str) -> str:
 
 
 def _ensure_compliance_branch_blocks(content: str, allow_consortium: bool, requires_sme: bool) -> str:
+    """补齐符合性章节中的分支选择块。"""
     result = content.strip()
     if "联合体投标声明（分支选择）" not in result:
         branch_b_hint = "分支B适用时须附联合体协议书。" if allow_consortium else "分支B本项目不适用。"

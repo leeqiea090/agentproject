@@ -102,12 +102,14 @@ def kb_stats_tool() -> str:
 
 
 def _constraints_to_text(constraints: list[str]) -> str:
+    """把约束条件列表整理成可供提示词使用的文本。"""
     if not constraints:
         return "无"
     return "\n".join(f"- {item}" for item in constraints)
 
 
 def _supervisor_node(state: TeamState) -> dict[str, Any]:
+    """执行协调节点的决策逻辑。"""
     turns = state.get("turns", 0) + 1
     settings = get_settings()
 
@@ -196,6 +198,7 @@ def _supervisor_node(state: TeamState) -> dict[str, Any]:
 
 
 def _researcher_node(state: TeamState) -> dict[str, Any]:
+    """执行调研节点的检索与整理逻辑。"""
     top_k = state.get("top_k") or get_settings().default_top_k
     research_notes = run_with_tools(
         system_prompt=RESEARCHER_PROMPT,
@@ -217,6 +220,7 @@ def _researcher_node(state: TeamState) -> dict[str, Any]:
 
 
 def _writer_node(state: TeamState) -> dict[str, Any]:
+    """执行撰写节点的成稿逻辑。"""
     draft = run_completion(
         system_prompt=WRITER_PROMPT,
         user_prompt=(
@@ -236,6 +240,7 @@ def _writer_node(state: TeamState) -> dict[str, Any]:
 
 
 def _reviewer_node(state: TeamState) -> dict[str, Any]:
+    """执行审核节点的复核逻辑。"""
     review_notes = run_completion(
         system_prompt=REVIEWER_PROMPT,
         user_prompt=(
@@ -254,6 +259,7 @@ def _reviewer_node(state: TeamState) -> dict[str, Any]:
 
 
 def _route_from_supervisor(state: TeamState) -> str:
+    """根据协调节点决策选择下一跳路由。"""
     next_agent = state.get("next_agent", "finish")
     if next_agent in {"researcher", "writer", "reviewer"}:
         return next_agent
@@ -261,6 +267,7 @@ def _route_from_supervisor(state: TeamState) -> str:
 
 
 def build_team_graph():
+    """构建多智能体协作图。"""
     graph_builder = StateGraph(TeamState)
 
     graph_builder.add_node("supervisor", _supervisor_node)
@@ -292,6 +299,7 @@ _GRAPH_LOCK = threading.Lock()
 
 
 def get_team_graph():
+    """返回缓存后的多智能体协作图。"""
     global _GRAPH
     if _GRAPH is None:
         with _GRAPH_LOCK:
@@ -306,6 +314,7 @@ def run_agent_team(
     output_format: str = "",
     top_k: int | None = None,
 ) -> dict[str, Any]:
+    """运行整套多智能体协作流程。"""
     settings = get_settings()
     initial_state: TeamState = {
         "goal": goal,

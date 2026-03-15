@@ -6,6 +6,7 @@ from app.services.quality_gate import compute_regression_metrics, compute_valida
 
 
 def _sample_tender() -> TenderDocument:
+    """构造测试用的招标文档样例。"""
     return TenderDocument(
         project_name="检验设备采购项目",
         project_number="XJ-2026-001",
@@ -31,6 +32,7 @@ def _sample_tender() -> TenderDocument:
 
 
 def test_split_to_blocks_separates_table_cells_and_marks_noise_rows() -> None:
+    """测试切分to文本块separates表格cellsandmarks噪声行。"""
     text = (
         "包1 全自动电泳仪\n"
         "第三章 技术要求\n"
@@ -82,6 +84,7 @@ def test_split_to_blocks_separates_table_cells_and_marks_noise_rows() -> None:
 
 
 def test_validation_gate_flags_project_meta_anomaly() -> None:
+    """测试校验门禁flagsprojectmetaanomaly。"""
     tender = _sample_tender()
     sections = [
         BidDocumentSection(
@@ -103,6 +106,7 @@ def test_validation_gate_flags_project_meta_anomaly() -> None:
 
 
 def test_regression_metrics_include_project_meta_consistency_score() -> None:
+    """测试回归指标includeprojectmetaconsistencyscore。"""
     tender = _sample_tender()
     sections = [
         BidDocumentSection(
@@ -127,6 +131,7 @@ def test_regression_metrics_include_project_meta_consistency_score() -> None:
 
 
 def test_regression_metrics_warn_when_project_meta_is_inconsistent() -> None:
+    """测试回归指标warnwhenprojectmetaisinconsistent。"""
     tender = _sample_tender()
     sections = [
         BidDocumentSection(
@@ -147,6 +152,7 @@ def test_regression_metrics_warn_when_project_meta_is_inconsistent() -> None:
 
 
 def test_bid_evidence_binding_reserves_evidence_alias_fields() -> None:
+    """测试投标证据bindingreserves证据aliasfields。"""
     binding = BidEvidenceBinding(
         package_id="1",
         requirement_id="pkg1-req-001",
@@ -163,6 +169,7 @@ def test_bid_evidence_binding_reserves_evidence_alias_fields() -> None:
 
 
 def test_validation_gate_ignores_project_meta_when_counting_multi_package_forbidden_terms() -> None:
+    """测试校验门禁ignoresprojectmetawhencountingmulti包件forbiddenterms。"""
     tender = TenderDocument(
         project_name="手术用头架、X射线血液辐照设备(二次)",
         project_number="CS-2026-002",

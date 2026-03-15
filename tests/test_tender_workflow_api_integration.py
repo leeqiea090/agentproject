@@ -24,6 +24,7 @@ from app.routers import tender as tender_api
 
 
 def _sample_tender() -> TenderDocument:
+    """构造测试用的招标文档样例。"""
     return TenderDocument(
         project_name="医院流式细胞分析仪采购项目",
         project_number="HLJ-2026-018",
@@ -48,6 +49,7 @@ def _sample_tender() -> TenderDocument:
 
 
 def _fake_llm_call(llm, system_prompt: str, user_prompt: str) -> str:  # noqa: ANN001
+    """模拟不同阶段的 LLM 返回结果。"""
     if "招标解析Agent" in system_prompt:
         return (
             '{'
@@ -76,6 +78,7 @@ def _fake_pipeline_result(
     *,
     blocked: bool = False,
 ) -> SimpleNamespace:
+    """返回pipeline结果。"""
     gate = ValidationGate()
     if blocked:
         gate = ValidationGate(placeholder_count=99)
@@ -90,6 +93,7 @@ def _fake_pipeline_result(
 
 
 def test_root_serves_static_index() -> None:
+    """测试rootservesstatic首页。"""
     client = TestClient(app)
 
     response = client.get("/")
@@ -99,6 +103,7 @@ def test_root_serves_static_index() -> None:
 
 
 def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
+    """测试工作流runAPIreturnstenstagesanddual输出。"""
     tender = _sample_tender()
     raw_text = (
         "包1 进口流式细胞分析仪\n"
@@ -229,6 +234,7 @@ def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
 
 
 def test_bid_generate_api_uses_same_deep_materialization() -> None:
+    """测试投标生成APIusessamedeep实装。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="company-2",
@@ -308,6 +314,7 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
     ]
 
     def _fake_build_bid_docx(sections, tender_doc, company, output_file):  # noqa: ANN001
+        """构建fake投标DOCX。"""
         output_file.write_bytes(b"fake-docx")
 
     client = TestClient(app)
@@ -378,6 +385,7 @@ def test_bid_generate_api_uses_same_deep_materialization() -> None:
 
 
 def test_bid_generate_api_does_not_expose_external_draft_when_blocked() -> None:
+    """测试投标生成APIdoesnotexpose外发草稿when阻断状态。"""
     tender = _sample_tender()
     company = CompanyProfile(
         company_id="company-blocked",
@@ -465,6 +473,7 @@ def test_bid_generate_api_does_not_expose_external_draft_when_blocked() -> None:
 
 
 def test_bid_download_prefers_existing_generated_docx(tmp_path: Path) -> None:
+    """测试投标下载prefers现有generatedDOCX。"""
     tender = _sample_tender()
     tender.project_name = "检验科购置全自动电泳仪等设备"
     output_file = tmp_path / "bid-download.docx"

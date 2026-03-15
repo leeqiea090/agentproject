@@ -4,6 +4,7 @@ import app.services.tender_workflow.common as _common
 import app.services.tender_workflow.classification as _classification
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -218,6 +219,7 @@ def _extract_product_facts(
     products: dict[str, ProductSpecification],
     selected_packages: list[str],
 ) -> dict[str, Any]:
+    """提取产品事实。"""
     target_package_ids = selected_packages or [pkg.package_id for pkg in tender.packages]
     package_map = {pkg.package_id: pkg for pkg in tender.packages}
     package_facts: list[dict[str, Any]] = []
@@ -255,6 +257,7 @@ def _extract_product_facts(
             fact_type: str,
             match_keys: tuple[str, ...] = (),
         ) -> None:
+            """追加offered事实。"""
             normalized = _safe_text(value)
             if not normalized:
                 return
@@ -270,6 +273,7 @@ def _extract_product_facts(
             )
 
         def _append_identity(name: str, value: str, source: str = "产品档案") -> None:
+            """追加identity。"""
             normalized = _safe_text(value)
             if not normalized:
                 return
@@ -301,6 +305,7 @@ def _extract_product_facts(
             )
 
         def _append_evidence(name: str, value: str) -> None:
+            """追加证据。"""
             normalized = _safe_text(value)
             if not normalized:
                 return
@@ -561,6 +566,7 @@ def _match_requirements_to_product_facts(
     company: CompanyProfile | None,
     products: dict[str, ProductSpecification],
 ) -> dict[str, Any]:
+    """把需求项与产品事实进行匹配。"""
     product_fact_map = {
         _safe_text(item.get("package_id")): item
         for item in product_fact_result.get("packages", [])
@@ -664,6 +670,7 @@ def _decide_rule_branches(
     products: dict[str, ProductSpecification],
     clause_result: dict[str, Any],
 ) -> dict[str, Any]:
+    """根据资料完备度决定后续规则分支。"""
     context = _workflow_context_text(tender)
     branch_decisions = list(clause_result.get("branch_decisions", []))
     target_packages = selected_packages or [pkg.package_id for pkg in tender.packages]
@@ -676,6 +683,7 @@ def _decide_rule_branches(
     blocking_fill_items: list[str] = []
 
     def _register_gap(item: str, *, blocking: bool = False) -> None:
+        """登记待补资料或事实缺口。"""
         if item not in manual_fill_items:
             manual_fill_items.append(item)
         if blocking and item not in blocking_fill_items:

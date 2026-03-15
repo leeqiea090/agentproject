@@ -1,15 +1,39 @@
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from typing import Any
+
+from app.schemas import (
+    BidDocumentSection,
+    CompanyProfile,
+    ProcurementPackage,
+    ProductSpecification,
+    TenderDocument,
+)
+from app.services.tender_workflow.common import (
+    _MIN_PROVEN_COMPLETION_RATE,
+    _PLACEHOLDER_FILL_ORDER,
+    _PLACEHOLDER_PATTERNS,
+    _UNRESOLVED_DELIVERY_MARKERS,
+    _contains_any,
+    _dedupe_texts,
+    _evaluate_requirement_response,
+    _extract_fact_value_from_quote,
+    _lookup_package_fact_value,
+    _lookup_product_spec_value,
+    _parameter_name_matches,
+    _safe_text,
+)
+from app.services.tender_workflow.product_facts import _build_product_profile
 
 import app.services.tender_workflow.common as _common
 import app.services.tender_workflow.classification as _classification
 import app.services.tender_workflow.product_facts as _product_facts
 import app.services.tender_workflow.evidence as _evidence
-_lookup_product_spec_value = _common._lookup_product_spec_value
-_parameter_name_matches = _common._parameter_name_matches
-_extract_fact_value_from_quote = _common._extract_fact_value_from_quote
+
+
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -20,10 +44,12 @@ for _module in (_common, _classification, _product_facts, _evidence,):
 
 del _module
 def _fmt_money(amount: float) -> str:
+    """格式化金额显示。"""
     return f"{amount:,.2f}"
 
 
 def _authorized_representative(company: CompanyProfile | None) -> str:
+    """解析可用于落款的授权代表姓名。"""
     if company is None:
         return "[授权代表]"
     if company.staff:
@@ -34,6 +60,7 @@ def _authorized_representative(company: CompanyProfile | None) -> str:
 
 
 def _derive_brand(product: ProductSpecification) -> str:
+    """推断产品品牌展示文本。"""
     manufacturer = _safe_text(product.manufacturer)
     if manufacturer:
         return manufacturer
@@ -44,12 +71,14 @@ def _product_for_package(
     package_id: str | None,
     products: dict[str, ProductSpecification],
 ) -> ProductSpecification | None:
+    """按包号获取对应产品。"""
     if not package_id:
         return None
     return products.get(str(package_id))
 
 
 def _fallback_single_product(products: dict[str, ProductSpecification]) -> ProductSpecification | None:
+    """在仅有一个产品时返回兜底产品。"""
     if len(products) == 1:
         return next(iter(products.values()))
     return None
@@ -60,21 +89,26 @@ def _resolve_materialized_response_value(
     product: ProductSpecification | None,
     match: dict[str, Any] | None,
     parameter_name: str,
+    package_facts: dict[str, Any] | None = None,
 ) -> str:
-    # 1) 优先拿产品规格中的明确值
+    """解析并返回实装响应值。"""
     if product is not None:
         response_value = _lookup_product_spec_value(product, parameter_name)
         if response_value:
             return response_value
 
-    # 2) 再拿证据绑定里已经提取好的事实值
     if match:
         for key in ("response_value", "matched_fact_value"):
             value = _safe_text(match.get(key), "")
             if value and value.lower() not in {"none", "null", "nan"}:
                 return value
 
-        # 3) 最后尝试从证据原文片段里抽值
+    if package_facts:
+        fact_value, _, _ = _lookup_package_fact_value(package_facts, parameter_name)
+        if fact_value:
+            return _safe_text(fact_value)
+
+    if match:
         for quote_key in ("matched_fact_quote", "bidder_evidence_quote"):
             quote = _safe_text(match.get(quote_key), "")
             if not quote:
@@ -83,23 +117,7 @@ def _resolve_materialized_response_value(
             if value:
                 return value
 
-    # 4) 技术表里拿不到事实值，就返回空，不再伪造“满足要求”
     return ""
-
-
-
-def _parameter_name_matches(left: str, right: str) -> bool:
-    left_text = _safe_text(left)
-    right_text = _safe_text(right)
-    if not left_text or not right_text:
-        return False
-    if left_text == right_text or left_text in right_text or right_text in left_text:
-        return True
-    left_tokens = _parameter_name_tokens(left_text)
-    right_tokens = _parameter_name_tokens(right_text)
-    if not left_tokens or not right_tokens:
-        return False
-    return all(token in right_text for token in left_tokens[:3]) or all(token in left_text for token in right_tokens[:3])
 
 
 
@@ -108,6 +126,7 @@ def _package_technical_matches(
     evidence_result: dict[str, Any] | None,
     package_id: str | None,
 ) -> list[dict[str, Any]]:
+    """筛选指定包件的技术匹配结果。"""
     if not evidence_result:
         return []
     normalized_package_id = _safe_text(package_id)
@@ -123,6 +142,7 @@ def _package_technical_matches(
 
 
 def _compose_binding_sources(match: dict[str, Any] | None) -> str:
+    """组合bindingsources。"""
     if not match:
         return "招标原文 / 待补投标方证据"
 
@@ -144,6 +164,7 @@ def _compose_binding_quote(
     fallback_requirement_quote: str = "",
     fallback_response_value: str = "",
 ) -> str:
+    """组合binding报价。"""
     requirement_quote = _safe_text(
         match.get("requirement_source_excerpt") if match else "",
         fallback_requirement_quote or f"{parameter_name}：{requirement_value}",
@@ -172,6 +193,7 @@ def _compose_binding_quote(
 
 
 def _section_has_unresolved_delivery_content(content: str) -> bool:
+    """判断是否存在章节unresolved交付内容。"""
     return any(pattern in content for pattern in _PLACEHOLDER_PATTERNS) or any(
         marker in content for marker in _UNRESOLVED_DELIVERY_MARKERS
     )
@@ -181,6 +203,7 @@ def _resolve_materialized_deviation_status(
     match: dict[str, Any] | None,
     evaluation: dict[str, Any],
 ) -> str:
+    """解析并返回materializeddeviation状态。"""
     evaluation_status = _safe_text(evaluation.get("deviation_status"), "待核实")
     if evaluation_status == "有偏离":
         return "有偏离"
@@ -196,12 +219,14 @@ def _resolve_materialized_deviation_status(
 
 
 def _company_credit_date(company: CompanyProfile | None) -> str:
+    """返回credit日期。"""
     if company is None or company.credit_check_time is None:
         return ""
     return company.credit_check_time.strftime("%Y-%m-%d")
 
 
 def _format_license_lines(company: CompanyProfile | None) -> list[str]:
+    """格式化资质行。"""
     if company is None or not company.licenses:
         return []
     return [
@@ -211,6 +236,7 @@ def _format_license_lines(company: CompanyProfile | None) -> list[str]:
 
 
 def _format_staff_lines(company: CompanyProfile | None) -> list[str]:
+    """格式化人员信息行。"""
     if company is None or not company.staff:
         return []
     return [
@@ -223,6 +249,7 @@ def _build_qualification_enrichment_block(
     company: CompanyProfile | None,
     products: dict[str, ProductSpecification],
 ) -> str:
+    """构建资格审查enrichment文本块。"""
     if company is None and not products:
         return ""
 
@@ -274,6 +301,7 @@ def _build_technical_enrichment_block(
     tender: TenderDocument,
     products: dict[str, ProductSpecification],
 ) -> str:
+    """构建技术enrichment文本块。"""
     package_map = {pkg.package_id: pkg for pkg in tender.packages}
     blocks: list[str] = []
     for pkg_id, product in products.items():
@@ -310,6 +338,7 @@ def _build_appendix_enrichment_block(
     tender: TenderDocument,
     products: dict[str, ProductSpecification],
 ) -> str:
+    """构建appendixenrichment文本块。"""
     package_map = {pkg.package_id: pkg for pkg in tender.packages}
     lines = ["## 六、附件资料实填摘要"]
     has_content = False
@@ -341,17 +370,30 @@ def _build_appendix_enrichment_block(
     return "\n".join(lines) if has_content else ""
 
 
-def _today_cn_date() -> str:
-    return datetime.now().strftime("%Y年%m月%d日")
+def _document_date_text(
+    company: CompanyProfile | None,
+    *,
+    placeholder: str = "【待填写：日期】",
+) -> str:
+    """返回日期文本。"""
+    if company is None:
+        return placeholder
+
+    text = _safe_text(getattr(company, "document_date", ""), "")
+    if not text or "待填写" in text or "待补充" in text:
+        return placeholder
+    return text
 
 
 def _staff_position(company: CompanyProfile | None) -> str:
+    """推断授权人员的岗位名称。"""
     if company is None or not company.staff:
         return ""
     return _safe_text(company.staff[0].position, "")
 
 
 def _product_identity_placeholder_text(product: ProductSpecification | None) -> str:
+    """返回identity占位符文本。"""
     if product is None:
         return "【待填写：品牌/型号，产地】"
     model = _safe_text(product.model or product.product_name, "")
@@ -366,6 +408,7 @@ def _apply_structured_placeholders(
     company: CompanyProfile | None,
     product: ProductSpecification | None,
 ) -> str:
+    """按结构化资料替换章节中的占位符。"""
     auth_rep = _authorized_representative(company)
     position = _staff_position(company)
     replacements = {
@@ -385,10 +428,10 @@ def _apply_structured_placeholders(
         "【待填写：品牌/型号】": _safe_text((product.model or product.product_name) if product else "", "【待填写：品牌/型号】"),
         "【待填写：投标型号】": _safe_text((product.model or product.product_name) if product else "", "【待填写：投标型号】"),
         "【待填写：品牌】": _derive_brand(product) if product else "【待填写：品牌】",
-        "【待填写：日期】": _today_cn_date(),
-        "【待填写：年 月 日】": _today_cn_date(),
-        "【待填写：磋商日期】": _today_cn_date(),
-        "【待填写：谈判日期】": _today_cn_date(),
+        "【待填写：日期】": _document_date_text(company, placeholder="【待填写：日期】"),
+        "【待填写：年 月 日】": _document_date_text(company, placeholder="【待填写：年 月 日】"),
+        "【待填写：磋商日期】": _document_date_text(company, placeholder="【待填写：磋商日期】"),
+        "【待填写：谈判日期】": _document_date_text(company, placeholder="【待填写：谈判日期】"),
     }
     for placeholder, value in replacements.items():
         if value:
@@ -400,11 +443,13 @@ def _target_packages_for_materialization(
     tender: TenderDocument,
     products: dict[str, ProductSpecification],
 ) -> list[ProcurementPackage]:
+    """定位实装的包件。"""
     selected = [pkg for pkg in tender.packages if not products or pkg.package_id in products]
     return selected or list(tender.packages)
 
 
 def _coarse_technical_section(content: str) -> bool:
+    """返回技术章节。"""
     markers = (
         "详见采购文件技术要求",
         "【待填写：逐条响应参数/配置/证据】",
@@ -417,6 +462,7 @@ def _coarse_technical_section(content: str) -> bool:
 
 
 def _product_profile_for_materialization(product: ProductSpecification | None) -> dict[str, Any]:
+    """整理实装阶段使用的产品画像字典。"""
     if product is None:
         return {
             "config_items": [],
@@ -431,6 +477,7 @@ def _fallback_requirement_rows(
     pkg: ProcurementPackage,
     product: ProductSpecification | None,
 ) -> list[dict[str, Any]]:
+    """返回需求行。"""
     rows: list[dict[str, Any]] = []
     for key, value in (pkg.technical_requirements or {}).items():
         rows.append(
@@ -455,6 +502,7 @@ def _ordered_package_matches(
     product: ProductSpecification | None,
     evidence_result: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    """按展示顺序整理包件匹配结果。"""
     matches = _package_technical_matches(evidence_result, pkg.package_id)
     if not matches:
         return _fallback_requirement_rows(pkg, product)
@@ -478,6 +526,7 @@ def _resolve_match_evidence_page(
     match: dict[str, Any] | None,
     parameter_name: str,
 ) -> str:
+    """解析并返回匹配证据page。"""
     page = None
     if match:
         page = match.get("bid_evidence_page") or match.get("tender_source_page")
@@ -495,6 +544,7 @@ def _resolve_match_evidence_page(
 def _resolve_match_evidence_label(
     match: dict[str, Any] | None,
 ) -> str:
+    """解析并返回匹配证据标签。"""
     if not match:
         return "待补充投标方证据"
     for key in ("bid_evidence_file", "bidder_evidence_source", "matched_fact_source", "bid_evidence_type"):
@@ -509,6 +559,7 @@ def _build_materialized_technical_section(
     products: dict[str, ProductSpecification],
     evidence_result: dict[str, Any] | None,
 ) -> str:
+    """构建materialized技术章节。"""
     parts: list[str] = []
     for pkg in _target_packages_for_materialization(tender, products):
         product = _product_for_package(pkg.package_id, products) or _fallback_single_product(products)
@@ -609,6 +660,7 @@ def _build_materialized_service_section(
     tender: TenderDocument,
     products: dict[str, ProductSpecification],
 ) -> str:
+    """构建materialized服务章节。"""
     parts: list[str] = []
     for pkg in _target_packages_for_materialization(tender, products):
         product = _product_for_package(pkg.package_id, products) or _fallback_single_product(products)
@@ -659,7 +711,7 @@ def _build_materialized_service_section(
                 "",
             ]
         )
-    parts.extend(["供应商全称：【待填写：投标人名称】", f"日期：{_today_cn_date()}"])
+    parts.extend(["供应商全称：【待填写：投标人名称】", "日期：【待填写：日期】"])
     return "\n".join(parts).strip()
 
 
@@ -669,6 +721,7 @@ def _maybe_rebuild_section_content(
     products: dict[str, ProductSpecification],
     evidence_result: dict[str, Any] | None = None,
 ) -> str:
+    """返回rebuild章节内容。"""
     title = _safe_text(section.section_title)
     content = _safe_text(section.content)
     if "技术偏离及详细配置明细表" in title or "技术偏离及详细配置明细表" in content:
@@ -685,6 +738,7 @@ def _find_review_match(
     item_name: str,
     requirement: str = "",
 ) -> dict[str, Any] | None:
+    """查找评审匹配。"""
     haystack = _safe_text(f"{item_name} {requirement}")
     if not haystack:
         return None
@@ -698,6 +752,7 @@ def _find_review_match(
 
 
 def _resolve_review_location(item_name: str, requirement: str, package_id: str | None) -> str:
+    """解析并返回评审location。"""
     haystack = _safe_text(f"{item_name} {requirement}")
     if any(token in haystack for token in ("营业执照", "资格承诺", "授权书", "法定代表人", "授权代表", "信用", "社保")):
         return "第一章 资格性证明文件"
@@ -718,6 +773,7 @@ def _resolve_review_evidence(
     products: dict[str, ProductSpecification],
     evidence_result: dict[str, Any] | None,
 ) -> str:
+    """解析并返回评审证据。"""
     location = _resolve_review_location(item_name, requirement, package_id)
     haystack = _safe_text(f"{item_name} {requirement}")
     product = _product_for_package(package_id, products) or _fallback_single_product(products)
@@ -756,6 +812,7 @@ def _replace_placeholder_line(
     company: CompanyProfile | None,
     products: dict[str, ProductSpecification],
 ) -> str:
+    """返回占位符行。"""
     if "（此处留空" not in raw_line and "(此处留空" not in raw_line:
         return raw_line
 
@@ -794,6 +851,7 @@ def _replace_placeholder_line(
 
 
 def _detect_table_mode(cells: list[str]) -> str:
+    """检测表格模式。"""
     joined = "|".join(cells)
     if all(
         header in joined
@@ -807,7 +865,7 @@ def _detect_table_mode(cells: list[str]) -> str:
     if "投标产品响应参数" in joined:
         return "deviation"
     if "技术参数项" in joined and "响应情况" in joined:
-        return "main_parameter"
+        return "deviation"
     if "技术参数项" in joined and "证据来源" in joined and "应用位置" in joined:
         return "evidence_mapping"
     if "校验项" in joined and "证据载体" in joined and "校验状态" in joined:
@@ -827,6 +885,7 @@ def _detect_table_mode(cells: list[str]) -> str:
 
 
 def _find_table_column(cells: list[str], keywords: tuple[str, ...]) -> int:
+    """查找表格column。"""
     for idx, cell in enumerate(cells):
         normalized = _safe_text(cell)
         if normalized and any(keyword in normalized for keyword in keywords):
@@ -835,6 +894,7 @@ def _find_table_column(cells: list[str], keywords: tuple[str, ...]) -> int:
 
 
 def _extract_heading_package_id(heading: str) -> str | None:
+    """提取heading包件id。"""
     normalized_heading = _safe_text(heading)
     if not normalized_heading:
         return None
@@ -852,6 +912,7 @@ def _resolve_row_package_id(
     tender: TenderDocument,
     products: dict[str, ProductSpecification],
 ) -> str | None:
+    """解析并返回行包件id。"""
     if current_package_id and current_package_id in products:
         return current_package_id
 
@@ -865,6 +926,7 @@ def _resolve_row_package_id(
     return current_package_id
 
 def _parameter_match_score(left: str, right: str) -> float:
+    """计算参数匹配的优先级分数。"""
     left_text = _safe_text(left, "")
     right_text = _safe_text(right, "")
     if not left_text or not right_text:
@@ -893,6 +955,7 @@ def _find_technical_match(
     package_id: str | None,
     parameter_name: str,
 ) -> dict[str, Any] | None:
+    """查找技术匹配。"""
     if not evidence_result:
         return None
 
@@ -940,6 +1003,7 @@ def _materialize_section_content(
     products: dict[str, ProductSpecification],
     evidence_result: dict[str, Any] | None = None,
 ) -> tuple[BidDocumentSection, bool]:
+    """实装章节内容。"""
     content = section.content
     fallback_product = _fallback_single_product(products)
     replacements = {
@@ -1118,41 +1182,41 @@ def _materialize_section_content(
                     line = "| " + " | ".join(cells) + " |"
                     changed = True
 
-                elif current_table_mode == "main_parameter" and len(cells) >= 5:
-                    current_table_mode = "deviation"
-                    parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
-                    requirement_idx = _find_table_column(current_table_header, ("采购文件技术要求", "采购文件要求", "招标要求", "招标技术参数要求"))
-                    response_idx = _find_table_column(current_table_header, ("响应文件响应情况", "投标产品响应参数", "响应情况", "实际响应值"))
-                    deviation_idx = _find_table_column(current_table_header, ("偏离说明", "偏离情况"))
-                    parameter_cell = _safe_text(cells[parameter_idx]) if 0 <= parameter_idx < len(cells) else _safe_text(cells[1])
-                    if requirement_idx >= 0 and requirement_idx != parameter_idx:
-                        parameter_name = parameter_cell.split("：", 1)[0].strip()
-                        requirement_value = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else parameter_cell
-                    else:
-                        parameter_name = parameter_cell.split("：", 1)[0].strip()
-                        requirement_value = parameter_cell
-                    match = _find_technical_match(evidence_result, row_package_id, parameter_name)
-                    response_value = _resolve_materialized_response_value(product, match, parameter_name)
-                    evaluation = _evaluate_requirement_response(requirement_value, response_value)
-                    is_proven = bool(match and match.get("proven"))
-                    if 0 <= response_idx < len(cells):
-                        cells[response_idx] = response_value or "【待填写：实际响应值】"
-                    elif len(cells) >= 4:
-                        cells[3] = response_value or "【待填写：实际响应值】"
-                    if 0 <= deviation_idx < len(cells):
-                        cells[deviation_idx] = (
-                            _resolve_materialized_deviation_status(match, evaluation)
-                            if response_value and is_proven
-                            else "【待填写：无偏离/正偏离/负偏离】"
-                        )
-                    elif len(cells) >= 5:
-                        cells[4] = (
-                            _resolve_materialized_deviation_status(match, evaluation)
-                            if response_value and is_proven
-                            else "【待填写：无偏离/正偏离/负偏离】"
-                        )
-                    line = "| " + " | ".join(cells) + " |"
-                    changed = True
+                # elif current_table_mode == "main_parameter" and len(cells) >= 5:
+                #     current_table_mode = "deviation"
+                #     parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
+                #     requirement_idx = _find_table_column(current_table_header, ("采购文件技术要求", "采购文件要求", "招标要求", "招标技术参数要求"))
+                #     response_idx = _find_table_column(current_table_header, ("响应文件响应情况", "投标产品响应参数", "响应情况", "实际响应值"))
+                #     deviation_idx = _find_table_column(current_table_header, ("偏离说明", "偏离情况"))
+                #     parameter_cell = _safe_text(cells[parameter_idx]) if 0 <= parameter_idx < len(cells) else _safe_text(cells[1])
+                #     if requirement_idx >= 0 and requirement_idx != parameter_idx:
+                #         parameter_name = parameter_cell.split("：", 1)[0].strip()
+                #         requirement_value = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else parameter_cell
+                #     else:
+                #         parameter_name = parameter_cell.split("：", 1)[0].strip()
+                #         requirement_value = parameter_cell
+                #     match = _find_technical_match(evidence_result, row_package_id, parameter_name)
+                #     response_value = _resolve_materialized_response_value(product, match, parameter_name)
+                #     evaluation = _evaluate_requirement_response(requirement_value, response_value)
+                #     is_proven = bool(match and match.get("proven"))
+                #     if 0 <= response_idx < len(cells):
+                #         cells[response_idx] = response_value or "【待填写：实际响应值】"
+                #     elif len(cells) >= 4:
+                #         cells[3] = response_value or "【待填写：实际响应值】"
+                #     if 0 <= deviation_idx < len(cells):
+                #         cells[deviation_idx] = (
+                #             _resolve_materialized_deviation_status(match, evaluation)
+                #             if response_value and is_proven
+                #             else "【待填写：无偏离/正偏离/负偏离】"
+                #         )
+                #     elif len(cells) >= 5:
+                #         cells[4] = (
+                #             _resolve_materialized_deviation_status(match, evaluation)
+                #             if response_value and is_proven
+                #             else "【待填写：无偏离/正偏离/负偏离】"
+                #         )
+                #     line = "| " + " | ".join(cells) + " |"
+                #     changed = True
                 elif current_table_mode == "evidence_mapping" and len(cells) >= 5:
                     parameter_idx = _find_table_column(current_table_header, ("技术参数项", "参数项"))
                     source_idx = _find_table_column(current_table_header, ("证据来源",))
@@ -1323,13 +1387,24 @@ def _materialize_section_content(
     return section.model_copy(update={"content": enriched_content}), changed
 
 
+def _profile_for_package(
+    package_id: str | None,
+    product_profiles: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """按包号获取对应产品画像。"""
+    if not package_id or not product_profiles:
+        return None
+    return product_profiles.get(str(package_id))
+
 def _materialize_sections(
     sections: list[BidDocumentSection],
     tender: TenderDocument,
     company: CompanyProfile | None,
     products: dict[str, ProductSpecification],
     evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[BidDocumentSection], dict[str, Any]]:
+    """实装章节。"""
     materialized: list[BidDocumentSection] = []
     changed_sections: list[str] = []
     for section in sections:

@@ -22,6 +22,7 @@ router = APIRouter(prefix="/kb", tags=["知识库"])
 
 
 def _decode_text_bytes(payload: bytes) -> str:
+    """把上传文件的字节内容解码成文本。"""
     for encoding in ("utf-8", "utf-8-sig", "gb18030", "gbk"):
         try:
             return payload.decode(encoding)
@@ -31,6 +32,7 @@ def _decode_text_bytes(payload: bytes) -> str:
 
 
 def _extract_text_from_file(filename: str, payload: bytes) -> str:
+    """按文件类型提取可入库的文本内容。"""
     suffix = Path(filename).suffix.lower()
 
     if suffix == ".pdf":
@@ -47,6 +49,7 @@ def _extract_text_from_file(filename: str, payload: bytes) -> str:
 
 @router.post("/text", response_model=IngestResponse, summary="导入纯文本", description="将一段文本分块后写入知识库")
 def ingest_text(req: IngestTextRequest):
+    """接收纯文本并写入知识库。"""
     result = ingest_text_to_kb(
         text=req.text,
         source=req.source,
@@ -64,6 +67,7 @@ async def ingest_file(
     chunk_size: int | None = Query(default=None, ge=200, le=3000),
     chunk_overlap: int | None = Query(default=None, ge=0, le=800),
 ):
+    """接收上传文件并解析后写入知识库。"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="上传的文件必须包含文件名。")
 
@@ -92,6 +96,7 @@ async def ingest_file(
 
 @router.post("/search", response_model=SearchResponse, summary="语义检索", description="在知识库中进行语义相似度检索，返回最相关的文本片段")
 def search(req: SearchRequest):
+    """执行知识库检索接口。"""
     hits = search_knowledge(query=req.query, top_k=req.top_k)
     return SearchResponse(
         query=req.query,
@@ -101,4 +106,5 @@ def search(req: SearchRequest):
 
 @router.get("/stats", response_model=KnowledgeBaseStatsResponse, summary="知识库统计", description="查看知识库的集合名称、存储路径及文档块总数")
 def stats():
+    """返回知识库统计信息。"""
     return KnowledgeBaseStatsResponse(**knowledge_base_stats())

@@ -143,6 +143,7 @@ def _is_generic_value(value: str) -> bool:
 
 
 def _llm_call(llm: ChatOpenAI, system_prompt: str, user_prompt: str) -> str:
+    """执行一次正式工作流使用的模型调用。"""
     response = llm.invoke([SystemMessage(system_prompt), HumanMessage(user_prompt)])
     content = response.content
     if isinstance(content, list):
@@ -155,6 +156,7 @@ def _llm_call(llm: ChatOpenAI, system_prompt: str, user_prompt: str) -> str:
 
 
 def _extract_json(text: str) -> dict[str, Any]:
+    """提取JSON。"""
     raw = text.strip()
     if raw.startswith("```json"):
         raw = raw[7:]
@@ -167,6 +169,7 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 def _ensure_str_list(value: Any) -> list[str]:
+    """确保strlist就绪，必要时自动补齐。"""
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str) and value.strip():
@@ -182,6 +185,7 @@ def _stage_record(
     data: dict[str, Any] | None = None,
     issues: list[str] | None = None,
 ) -> dict[str, Any]:
+    """组装统一格式的工作流阶段记录。"""
     return {
         "stage_code": stage_code,
         "stage_name": stage_name,
@@ -193,6 +197,7 @@ def _stage_record(
 
 
 def _to_int_or_none(value: Any) -> int | None:
+    """尝试把值转换成整数，失败时返回空。"""
     try:
         if value is None:
             return None
@@ -202,6 +207,7 @@ def _to_int_or_none(value: Any) -> int | None:
 
 
 def _prepare_citations(hits: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    """整理引用。"""
     citations: list[dict[str, Any]] = []
     seen: set[tuple[str, int | None, str]] = set()
 
@@ -251,14 +257,17 @@ def _prepare_citations(hits: list[dict[str, Any]], limit: int = 5) -> list[dict[
 
 
 def _fmt_money(amount: float) -> str:
+    """格式化金额显示。"""
     return f"{amount:,.2f}"
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    """判断文本是否包含任一关键词。"""
     return any(keyword in text for keyword in keywords)
 
 
 def _safe_text(value: Any, default: str = "") -> str:
+    """安全地返回可用文本。"""
     if value is None:
         return default
     text = str(value).strip()
@@ -266,6 +275,7 @@ def _safe_text(value: Any, default: str = "") -> str:
 
 
 def _dedupe_texts(values: list[str]) -> list[str]:
+    """去重多段文本。"""
     deduped: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -278,6 +288,7 @@ def _dedupe_texts(values: list[str]) -> list[str]:
 
 
 def _fact_match_keys(*values: str) -> list[str]:
+    """整理产品事实匹配用的候选键。"""
     keys: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -290,6 +301,7 @@ def _fact_match_keys(*values: str) -> list[str]:
 
 
 def _parameter_name_tokens(value: str) -> list[str]:
+    """切分参数名称中的有效匹配词。"""
     return [
         token
         for token in re.split(r"[，,、；;：:（）()\\[\\]\\s/]+", _safe_text(value))
@@ -298,6 +310,7 @@ def _parameter_name_tokens(value: str) -> list[str]:
 
 
 def _parameter_name_matches(left: str, right: str) -> bool:
+    """判断两个参数名称是否可以视为同义匹配。"""
     left_text = _safe_text(left)
     right_text = _safe_text(right)
     if not left_text or not right_text:
@@ -312,6 +325,7 @@ def _parameter_name_matches(left: str, right: str) -> bool:
 
 
 def _extract_fact_value_from_quote(quote: str, fact_name: str = "") -> str:
+    """提取报价中的事实值。"""
     normalized_quote = _safe_text(quote)
     normalized_fact_name = _safe_text(fact_name)
     if not normalized_quote:
@@ -330,6 +344,7 @@ def _extract_fact_value_from_quote(quote: str, fact_name: str = "") -> str:
 
 
 def _fact_matches_parameter(fact: dict[str, Any], parameter_name: str) -> bool:
+    """判断产品事实是否命中指定参数。"""
     normalized_parameter = _safe_text(parameter_name)
     if not normalized_parameter:
         return False
@@ -353,6 +368,7 @@ def _lookup_package_fact_value(
     package_facts: dict[str, Any],
     parameter_name: str,
 ) -> tuple[str, str, str]:
+    """查找包件事实值。"""
     if not package_facts:
         return "", "", ""
 
@@ -378,6 +394,7 @@ def _lookup_package_fact_value(
 
 
 def _lookup_product_spec_value(product: ProductSpecification, parameter_name: str) -> str:
+    """查找产品spec值。"""
     normalized = _safe_text(parameter_name)
     if not normalized:
         return ""
@@ -412,6 +429,7 @@ def _resolve_bidder_evidence(
     products: dict[str, ProductSpecification],
     selected_packages: list[str],
 ) -> tuple[bool, str, str]:
+    """解析并返回投标侧证据内容。"""
     normalized = _safe_text(requirement)
 
     if company and _contains_any(normalized, ("营业执照", "许可证", "资质")):
@@ -521,6 +539,7 @@ def _resolve_bidder_evidence(
 
 
 def _fact_matches_requirement_text(fact: dict[str, Any], requirement_text: str) -> bool:
+    """返回matches需求文本。"""
     normalized_requirement = _safe_text(requirement_text)
     if not normalized_requirement:
         return False
@@ -538,6 +557,7 @@ def _fact_matches_requirement_text(fact: dict[str, Any], requirement_text: str) 
 
 
 def _truncate_text(text: str, limit: int = _TEXT_SECTION_MAX_CHARS) -> str:
+    """返回文本。"""
     normalized = re.sub(r"\s+", " ", _safe_text(text))
     if len(normalized) <= limit:
         return normalized
@@ -545,6 +565,7 @@ def _truncate_text(text: str, limit: int = _TEXT_SECTION_MAX_CHARS) -> str:
 
 
 def _load_document_units(file_path: str | Path | None) -> tuple[str, list[dict[str, Any]]]:
+    """加载文档units。"""
     if not file_path:
         return "", []
 
@@ -618,6 +639,7 @@ def _build_document_ingestion_view(
     file_path: str | Path | None,
     tender_id: str,
 ) -> dict[str, Any]:
+    """构建文档接入视图。"""
     try:
         source_format, units = _load_document_units(file_path)
     except Exception as exc:  # noqa: BLE001
@@ -687,6 +709,7 @@ def _build_package_segmentation_view(
     raw_text: str,
     selected_packages: list[str],
 ) -> dict[str, Any]:
+    """构建包件切分视图。"""
     target_package_ids = selected_packages or [pkg.package_id for pkg in tender.packages]
     package_views: list[dict[str, Any]] = []
 
@@ -722,6 +745,7 @@ def _build_package_segmentation_view(
 
 
 def _parse_threshold(value: str) -> tuple[str, str, str]:
+    """解析阈值。"""
     normalized = _safe_text(value)
     for comparator, pattern in _COMPARATOR_PATTERNS:
         match = re.search(pattern, normalized)
@@ -733,6 +757,7 @@ def _parse_threshold(value: str) -> tuple[str, str, str]:
 
 
 def _first_numeric_value(value: str) -> float | None:
+    """提取文本中的首个数值。"""
     match = re.search(r"-?\d+(?:\.\d+)?", _safe_text(value))
     if not match:
         return None
@@ -743,6 +768,7 @@ def _first_numeric_value(value: str) -> float | None:
 
 
 def _compare_numeric_requirement(comparator: str, threshold: float, response_value: float) -> bool | None:
+    """返回数值需求。"""
     if comparator in {"≥", ">=", "不少于", "不低于", "至少"}:
         return response_value >= threshold
     if comparator in {"≤", "<=", "不高于", "不大于"}:
@@ -751,6 +777,7 @@ def _compare_numeric_requirement(comparator: str, threshold: float, response_val
 
 
 def _evaluate_requirement_response(requirement_value: str, response_value: str) -> dict[str, Any]:
+    """评估响应内容对需求的满足程度。"""
     normalized_requirement = _safe_text(requirement_value)
     normalized_response = _safe_text(response_value)
     if not normalized_response:
@@ -801,6 +828,7 @@ def _evaluate_requirement_response(requirement_value: str, response_value: str) 
 
 
 def _looks_material_requirement(text: str) -> bool:
+    """判断资料需求。"""
     normalized = _safe_text(text)
     return any(
         token in normalized
@@ -809,6 +837,7 @@ def _looks_material_requirement(text: str) -> bool:
 
 
 def _qualification_requirement_type(item: str) -> str:
+    """识别资格审查条目的类别。"""
     normalized = _safe_text(item)
     if _contains_any(normalized, ("执照", "许可证", "注册证", "备案凭证", "证书")):
         return "license"
@@ -822,6 +851,7 @@ def _qualification_requirement_type(item: str) -> str:
 
 
 def _workflow_context_text(tender: TenderDocument) -> str:
+    """返回context文本。"""
     parts = [
         tender.project_name,
         tender.project_number,
@@ -837,6 +867,7 @@ def _workflow_context_text(tender: TenderDocument) -> str:
 
 
 def _snippet_around(text: str, keyword: str, radius: int = 56) -> str:
+    """截取锚点附近的上下文片段。"""
     if not text.strip() or not keyword.strip():
         return ""
 
@@ -855,6 +886,7 @@ def _snippet_around(text: str, keyword: str, radius: int = 56) -> str:
 
 
 def _extract_quoteable_segment(text: str, keyword: str) -> str:
+    """提取quoteablesegment。"""
     if not text.strip() or not keyword.strip():
         return ""
 
@@ -886,9 +918,11 @@ def _extract_quoteable_segment(text: str, keyword: str) -> str:
 
 
 def _evidence_candidates(item: str) -> list[str]:
+    """整理证据候选列表。"""
     candidates: list[str] = []
 
     def _append(candidate: str) -> None:
+        """追加append。"""
         normalized = candidate.strip()
         if len(normalized) < 2:
             return
@@ -910,6 +944,7 @@ def _evidence_candidates(item: str) -> list[str]:
 
 
 def _locate_evidence_snippet(text: str, item: str) -> str:
+    """返回证据片段。"""
     for candidate in _evidence_candidates(item):
         snippet = _extract_quoteable_segment(text, candidate)
         if snippet:
@@ -923,6 +958,7 @@ def _branch_decision(
     basis: str,
     clause_type: str,
 ) -> dict[str, str]:
+    """生成规则分支决策记录。"""
     return {
         "decision_name": decision_name,
         "decision": decision,
@@ -937,16 +973,20 @@ _CONFIG_KEYWORDS = ("配置", "配件", "附件", "选配", "标配", "随机", 
 
 
 def _is_service_clause(text: str) -> bool:
+    """判断服务条款。"""
     return any(kw in text for kw in _SERVICE_KEYWORDS)
 
 
 def _is_acceptance_clause(text: str) -> bool:
+    """判断验收条款。"""
     return any(kw in text for kw in _ACCEPTANCE_KEYWORDS)
 
 
 def _is_config_clause(text: str) -> bool:
+    """判断配置条款。"""
     return any(kw in text for kw in _CONFIG_KEYWORDS)
 
 
 def _is_service_or_acceptance_clause(text: str) -> bool:
+    """判断服务or验收条款。"""
     return _is_service_clause(text) or _is_acceptance_clause(text) or _is_config_clause(text)

@@ -5,6 +5,7 @@ from .common import *  # noqa: F401,F403
 
 
 def _title_semantic_key(title: str) -> str:
+    """提取标题的语义匹配键。"""
     t = _normalized_title_key(title)
     t = (
         t.replace("“", "")
@@ -19,6 +20,7 @@ def _title_semantic_key(title: str) -> str:
 
 
 def _title_matches_any(title: str, candidates: list[str]) -> bool:
+    """判断标题是否命中任一候选标题。"""
     src = _title_semantic_key(title)
     for c in candidates:
         ck = _title_semantic_key(c)
@@ -26,6 +28,7 @@ def _title_matches_any(title: str, candidates: list[str]) -> bool:
             return True
     return False
 def _normalized_title_key(title: str) -> str:
+    """返回标题键。"""
     s = re.sub(r"\s+", "", title or "")
     s = s.replace("（", "(").replace("）", ")").replace("．", ".")
     s = s.replace("（格式）", "").replace("(格式)", "")
@@ -33,6 +36,7 @@ def _normalized_title_key(title: str) -> str:
 
 
 def _dedupe_zb_entries(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """去重ZB 格式entries。"""
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
     for title, raw in entries:
@@ -45,6 +49,7 @@ def _dedupe_zb_entries(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 def _looks_like_safe_zb_template_title(title: str) -> bool:
+    """判断like安全ZB 格式模板标题。"""
     s = _normalized_title_key(title)
     if not s:
         return False
@@ -86,6 +91,7 @@ def _looks_like_safe_zb_template_title(title: str) -> bool:
 
 
 def _strip_leading_compound_index(text: str) -> str:
+    """剥离leadingcompound首页。"""
     s = _clean_text(text or "")
     if not s:
         return ""
@@ -93,6 +99,7 @@ def _strip_leading_compound_index(text: str) -> str:
 
 
 def _extract_invalid_clauses(text: str) -> list[str]:
+    """提取无效条款。"""
     s = _strip_leading_compound_index(_clean_text(text or ""))
     if not s:
         return []
@@ -149,6 +156,7 @@ def _extract_invalid_clauses(text: str) -> list[str]:
 
 
 def _looks_like_invalid_reason(text: str) -> bool:
+    """判断like无效reason。"""
     s = _clean_text(text or "")
     if not s or len(s) < 8:
         return False
@@ -159,6 +167,7 @@ def _looks_like_invalid_reason(text: str) -> bool:
 
 
 def _extract_invalid_candidate_sentences(tender_raw: str) -> list[str]:
+    """提取无效candidatesentences。"""
     text = tender_raw or ""
     if not text:
         return []
@@ -196,6 +205,7 @@ def _extract_invalid_candidate_sentences(tender_raw: str) -> list[str]:
 
 
 def _is_headerish_review_text(text: str) -> bool:
+    """判断headerish评审文本。"""
     s = re.sub(r"\s+", "", text or "")
     if not s:
         return True
@@ -224,6 +234,7 @@ def _is_headerish_review_text(text: str) -> bool:
 
 
 def _split_compound_fields(text: str) -> list[str]:
+    """切分compoundfields。"""
     s = _clean_text(text or "")
     if not s:
         return []
@@ -238,6 +249,7 @@ def _split_compound_fields(text: str) -> list[str]:
 
 
 def _looks_like_detailed_review_item(text: str) -> bool:
+    """判断like详细评审项。"""
     s = _clean_text(text or "")
     if not s:
         return False
@@ -276,6 +288,7 @@ def _looks_like_detailed_review_item(text: str) -> bool:
 
 
 def _looks_like_detailed_review_rule(text: str) -> bool:
+    """判断like详细评审rule。"""
     s = _clean_text(text or "")
     if not s:
         return False
@@ -299,6 +312,7 @@ def _looks_like_detailed_review_rule(text: str) -> bool:
 
 
 def _normalize_detailed_review_pair(item_name: str, rule: str) -> tuple[str, str] | None:
+    """归一化详细评审键值对。"""
     item_name = _clean_text(item_name or "")
     rule = _clean_text(rule or "")
     parts = _split_compound_fields(item_name)
@@ -324,6 +338,7 @@ def _normalize_detailed_review_pair(item_name: str, rule: str) -> tuple[str, str
 
 
 def _pick_review_item_rule(item: dict) -> tuple[str, str] | None:
+    """挑选评审项rule。"""
     raw_left = _clean_text(
         item.get("review_item")
         or item.get("审查项")
@@ -368,6 +383,7 @@ def _pick_review_item_rule(item: dict) -> tuple[str, str] | None:
 
 
 def _normalize_delivery_requirement_text(text: str) -> str:
+    """归一化交付需求文本。"""
     s = _clean_text(text or "")
     if not s:
         return ""
@@ -377,6 +393,7 @@ def _normalize_delivery_requirement_text(text: str) -> str:
 
 
 def _build_delivery_commitment_text(packages: list, tender_raw: str) -> str:
+    """构建交付承诺文本。"""
     if not packages:
         return "确保交货期限满足招标文件要求"
 
@@ -388,6 +405,7 @@ def _build_delivery_commitment_text(packages: list, tender_raw: str) -> str:
         normalized.append((str(getattr(pkg, "package_id", "") or "【待填写】"), raw))
 
     def _render_single_requirement(requirement: str) -> str:
+        """渲染single需求。"""
         if requirement == "招标文件要求":
             return "确保交货期限满足招标文件要求"
         if requirement.endswith("交货"):
@@ -420,6 +438,7 @@ def _build_delivery_commitment_text(packages: list, tender_raw: str) -> str:
 
 
 def _dedupe_keep_order(items: list[str]) -> list[str]:
+    """去重keeporder。"""
     seen: set[str] = set()
     out: list[str] = []
     for item in items:
@@ -433,6 +452,7 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
 
 
 def _collect_zb_service_requirement_points(tender_raw: str) -> dict[str, list[str]]:
+    """提取 ZB 原文中的服务与验收要点。"""
     blocks = [
         _extract_anchor_block(
             tender_raw,
@@ -494,17 +514,20 @@ def _collect_zb_service_requirement_points(tender_raw: str) -> dict[str, list[st
 
 
 def _project_goods_name(packages: list) -> str:
+    """汇总项目货物名称。"""
     names = _dedupe_keep_order([getattr(pkg, "item_name", "") or "" for pkg in (packages or [])])
     return "、".join(names) if names else "【待填写：货物名称】"
 
 
 def _single_package_id(packages: list) -> str:
+    """在单包场景下返回唯一包号。"""
     if len(packages or []) == 1:
         return str(getattr(packages[0], "package_id", "") or "")
     return ""
 
 
 def _autofill_zb_raw_template(title: str, raw_block: str, tender, packages: list, tender_raw: str) -> str:
+    """返回ZB 格式raw模板。"""
     raw = (raw_block or "").strip()
     if not raw:
         return ""
@@ -562,6 +585,7 @@ def _autofill_zb_raw_template(title: str, raw_block: str, tender, packages: list
 
 
 def _is_title_only_zb_template(raw_block: str) -> bool:
+    """判断标题onlyZB 格式模板。"""
     lines = [line.strip() for line in (raw_block or "").splitlines() if line.strip()]
     if not lines:
         return True
@@ -572,6 +596,7 @@ def _is_title_only_zb_template(raw_block: str) -> bool:
 
 
 def _zb_template_guidance_text(title: str) -> str:
+    """返回模板guidance文本。"""
     compact = re.sub(r"\s+", "", title or "")
     if "身份证正反面复印件" in compact:
         return "本页用于粘贴对应身份证正反面复印件，并加盖投标人公章。"
@@ -591,6 +616,7 @@ def _zb_template_guidance_text(title: str) -> str:
 
 
 def _is_zb_tech_block_start(line: str) -> bool:
+    """判断ZB 格式tech文本块start。"""
     s = _clean_text(line or "")
     if not s or s.startswith("|"):
         return False
@@ -601,6 +627,7 @@ def _is_zb_tech_block_start(line: str) -> bool:
 
 
 def _extract_zb_technical_scope_block(tender_raw: str) -> str:
+    """提取ZB 格式技术范围文本块。"""
     lines = [line.rstrip() for line in (tender_raw or "").splitlines()]
     if not lines:
         return ""
@@ -657,6 +684,7 @@ def _extract_zb_technical_scope_block(tender_raw: str) -> str:
         return ""
 
     def _score(block: str) -> tuple[int, int]:
+        """为技术块候选文本计算优先级分数。"""
         numbered = len(re.findall(r"(?:^|\n)[★▲]?\s*\d+(?:\.\d+){1,}[、.]?\s*", block))
         stars = block.count("★") * 4 + block.count("▲") * 2
         return numbered + stars, len(block)
@@ -665,6 +693,7 @@ def _extract_zb_technical_scope_block(tender_raw: str) -> str:
 
 
 def _extract_zb_atomic_technical_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
+    """提取ZB 格式原子技术行。"""
     block = _extract_zb_technical_scope_block(tender_raw)
     if not block:
         return []
@@ -722,6 +751,7 @@ def _extract_zb_atomic_technical_rows(pkg, tender_raw: str) -> list[tuple[str, s
 
 
 def _extract_zb_rows_from_pkg_requirements(pkg) -> list[tuple[str, str]]:
+    """提取包件需求中的ZB 格式行。"""
     requirements = getattr(pkg, "technical_requirements", None) or {}
     if not requirements:
         return []
@@ -742,6 +772,7 @@ def _extract_zb_rows_from_pkg_requirements(pkg) -> list[tuple[str, str]]:
 
 
 def _build_zb_service_section(tender, tender_raw: str = "", package_index: int = 1) -> str:
+    """构建ZB 格式服务章节。"""
     project_name = getattr(tender, "project_name", "") or "本项目"
     packages = list(getattr(tender, "packages", None) or [])
     delivery_requirement = _build_delivery_commitment_text(packages, tender_raw)
@@ -873,6 +904,7 @@ def _build_zb_service_section(tender, tender_raw: str = "", package_index: int =
 
 
 def _normalize_procurement_terms_for_zb(text: str) -> str:
+    """归一化ZB 格式的采购terms。"""
     if not text:
         return text
     text = text.replace("谈判文件", "招标文件")
@@ -883,6 +915,7 @@ def _normalize_procurement_terms_for_zb(text: str) -> str:
 
 
 def _build_zb_technical_response_table(tender, pkg, tender_raw: str, raw_block: str = "") -> str:
+    """构建ZB 格式技术响应表。"""
     headers = _extract_table_headers_from_raw_block(raw_block) or [
         "招标文件条目号",
         "招标文件采购需求的内容与数值",
@@ -937,11 +970,13 @@ def _build_zb_technical_response_table(tender, pkg, tender_raw: str, raw_block: 
 
 
 def _title_has_any(title: str, keywords: tuple[str, ...]) -> bool:
+    """判断是否存在标题any。"""
     s = re.sub(r"\s+", "", title or "")
     return any(k in s for k in keywords)
 
 
 def _is_bad_zb_template_title(title: str) -> bool:
+    """判断异常ZB 格式模板标题。"""
     s = re.sub(r"\s+", "", title or "")
     if not s:
         return True
@@ -963,6 +998,7 @@ def _is_bad_zb_template_title(title: str) -> bool:
 
 
 def _zb_default_entries() -> list[tuple[str, str]]:
+    """返回默认ZB 格式entries。"""
     return [
         ("一、投标函", ""),
         ("二、开标一览表", ""),
@@ -980,6 +1016,7 @@ def _zb_default_entries() -> list[tuple[str, str]]:
 
 
 def _build_zb_bid_letter(tender) -> str:
+    """构建ZB 格式投标letter。"""
     project_name = getattr(tender, "project_name", "") or "【待填写：项目名称】"
     project_no = getattr(tender, "project_no", "") or "【待填写：项目编号】"
 
@@ -1013,6 +1050,7 @@ def _build_zb_bid_letter(tender) -> str:
 
 
 def _zb_required_template_titles() -> list[str]:
+    """返回required模板标题。"""
     return [
         "格式 3投标分项报价表（格式）",
         "格式 4.投标保证金说明函（格式）",
@@ -1026,6 +1064,7 @@ def _zb_required_template_titles() -> list[str]:
     ]
 
 def _get_zb_template_entries(tender) -> list[tuple[str, str]]:
+    """获取ZB 格式模板entries。"""
     templates = getattr(tender, "response_section_templates", []) or []
     entries: list[tuple[str, str]] = []
 
@@ -1051,6 +1090,7 @@ def _get_zb_template_entries(tender) -> list[tuple[str, str]]:
 
 
 def _zb_render_template_content(title: str, raw_block: str, tender, packages: list, tender_raw: str) -> str:
+    """渲染ZB 格式模板内容。"""
     raw = _autofill_zb_raw_template(title, raw_block, tender, packages, tender_raw)
     if not raw:
         return ""
@@ -1064,9 +1104,10 @@ def _zb_render_template_content(title: str, raw_block: str, tender, packages: li
             return f"{raw}\n\n{_zb_template_guidance_text(title)}"
         return f"{raw}\n\n{_zb_template_guidance_text(title)}"
 
-    return f"{raw}\n\n【按招标文件原格式填写；无内容处填写“无”，不得删改实质性条款。】"
+    return raw.strip()
 
 def _build_zb_quote_summary_table(tender, packages, tender_raw: str) -> str:
+    """构建ZB 格式报价汇总表。"""
     headers = ["包号", "货物名称", "数量", "投标报价（元）", "交货期", "交货地点"]
     rows: list[list[str]] = []
 
@@ -1090,6 +1131,7 @@ def _build_zb_quote_summary_table(tender, packages, tender_raw: str) -> str:
 
 
 def _suggest_zb_detailed_response_location(item_name: str, rule: str = "") -> str:
+    """生成建议ZB 格式详细响应location。"""
     haystack = _clean_text(f"{item_name} {rule}")
     if any(token in haystack for token in ("评标价格", "价格", "报价")):
         return "二、开标一览表；三、投标分项报价表；中小企业声明函（如适用）"
@@ -1111,6 +1153,7 @@ def _suggest_zb_detailed_response_location(item_name: str, rule: str = "") -> st
 
 
 def _suggest_zb_detailed_response_note(item_name: str, rule: str = "") -> str:
+    """生成建议ZB 格式详细响应备注。"""
     haystack = _clean_text(f"{item_name} {rule}")
     if any(token in haystack for token in ("技术规格", "技术参数", "技术要求", "响应程度")):
         return "按格式8逐条响应技术参数，并在格式9补齐证明材料页码。"
@@ -1128,6 +1171,7 @@ def _suggest_zb_detailed_response_note(item_name: str, rule: str = "") -> str:
 
 
 def _suggest_zb_qualification_response(item_name: str, requirement: str = "") -> str:
+    """生成建议ZB 格式资格审查响应。"""
     haystack = _clean_text(f"{item_name} {requirement}")
     if any(token in haystack for token in ("营业执照", "境内注册")):
         return "格式7.投标人一般情况表后附营业执照复印件"
@@ -1153,6 +1197,7 @@ def _suggest_zb_qualification_response(item_name: str, requirement: str = "") ->
 
 
 def _suggest_zb_compliance_response(item_name: str, requirement: str = "") -> str:
+    """生成建议ZB 格式符合性审查响应。"""
     haystack = _clean_text(f"{item_name} {requirement}")
     if "投标人名称" in haystack:
         return "格式1投标函；格式7投标人一般情况表"
@@ -1171,6 +1216,7 @@ def _suggest_zb_compliance_response(item_name: str, requirement: str = "") -> st
     return "对应章节及后附证明材料"
 
 def _build_zb_detailed_review_section(tender, tender_raw: str = "", package_index: int = 1) -> str:
+    """构建ZB 格式详细评审章节。"""
     tpl = getattr(tender, "detailed_review_table", None)
     headers, tpl_rows = _tpl_rows_with_headers(tpl)
 
@@ -1219,6 +1265,7 @@ def _build_zb_detailed_review_section(tender, tender_raw: str = "", package_inde
     return "详细评审响应对照表\n" + _render_table_with_headers(headers, rows)
 
 def _build_zb_itemized_quote_table(tender, packages, tender_raw: str) -> str:
+    """构建ZB 格式itemized报价表格。"""
     headers = ["包号", "货物名称", "数量", "单价（元）", "总价（元）", "备注"]
     rows: list[list[str]] = []
 
@@ -1243,6 +1290,7 @@ def _build_zb_itemized_quote_table(tender, packages, tender_raw: str) -> str:
 
 
 def _build_zb_business_deviation_table(tender, packages, tender_raw: str) -> str:
+    """构建ZB 格式business偏离表。"""
     headers = ["序号", "商务条款", "招标文件要求", "响应情况", "偏离说明"]
     ct = getattr(tender, "commercial_terms", None)
 
@@ -1259,6 +1307,7 @@ def _build_zb_business_deviation_table(tender, packages, tender_raw: str) -> str
 
 
 def _build_zb_bid_bond_letter(tender) -> str:
+    """构建ZB 格式投标bondletter。"""
     agency_name = (
         getattr(tender, "agency", "")
         or getattr(tender, "purchaser", "")
@@ -1282,6 +1331,7 @@ def _build_zb_bid_bond_letter(tender) -> str:
 """.strip()
 
 def _tpl_header_titles(tpl) -> list[str]:
+    """返回模板中的表头标题列表。"""
     cols = getattr(tpl, "columns", None) or []
     out = []
     for c in cols:
@@ -1292,6 +1342,7 @@ def _tpl_header_titles(tpl) -> list[str]:
 
 
 def _tpl_rows_with_headers(tpl) -> tuple[list[str], list[list[str]]]:
+    """返回带表头的行。"""
     headers = _tpl_header_titles(tpl)
     columns = list(getattr(tpl, "columns", None) or [])
     raw_rows = list(getattr(tpl, "rows", None) or [])
@@ -1329,6 +1380,7 @@ def _tpl_rows_with_headers(tpl) -> tuple[list[str], list[list[str]]]:
 
 
 def _extract_table_headers_from_raw_block(raw_block: str) -> list[str]:
+    """提取raw文本块中的表格表头。"""
     for line in (raw_block or "").splitlines():
         stripped = line.strip()
         if not stripped.startswith("|"):
@@ -1341,22 +1393,26 @@ def _extract_table_headers_from_raw_block(raw_block: str) -> list[str]:
 
 
 def _norm_title(s: str) -> str:
+    """规范化标题。"""
     return "".join(str(s or "").split())
 
 
 def _same_headers(actual: list[str], expected: list[str]) -> bool:
+    """判断两组表头是否完全一致。"""
     if len(actual) != len(expected):
         return False
     return [_norm_title(x) for x in actual] == [_norm_title(x) for x in expected]
 
 
 def _render_table_with_headers(headers: list[str], rows: list[list[str]]) -> str:
+    """渲染带表头的表格。"""
     return _md_table(headers, rows)
 
 
 
 
 def _build_zb_general_info_table(tender) -> str:
+    """构建ZB 格式generalinfo表格。"""
     headers = ["项目", "内容"]
     rows = [
         ["投标人全称", "【待填写】"],
@@ -1378,6 +1434,7 @@ def _build_zb_general_info_table(tender) -> str:
 
 
 def _build_zb_performance_table(tender) -> str:
+    """构建ZB 格式performance表格。"""
     headers = ["序号", "项目名称", "用户单位", "供货内容", "签订时间", "合同金额", "证明材料页码"]
     rows = [["1", "【待填写】", "【待填写】", "【待填写】", "【待填写】", "【待填写】", "【待填写】"]]
     return "\n".join([
@@ -1388,6 +1445,7 @@ def _build_zb_performance_table(tender) -> str:
 
 
 def _build_zb_manufacturer_authorization(tender, packages) -> str:
+    """构建ZB 格式厂家authorization。"""
     goods = "、".join(getattr(p, "item_name", "") or "【待填写：货物名称】" for p in (packages or [])) or "【待填写：货物名称】"
     return f"""
 7.12制造商授权书（格式自拟）
@@ -1404,6 +1462,7 @@ def _build_zb_manufacturer_authorization(tender, packages) -> str:
 
 
 def _build_zb_other_technical_docs_section(tender, packages, tender_raw: str) -> str:
+    """构建ZB 格式other技术docs章节。"""
     pkg = packages[0] if packages else None
     goods = getattr(pkg, "item_name", "【待填写：货物名称】") if pkg else "【待填写：货物名称】"
     return "\n".join([
@@ -1422,6 +1481,7 @@ def _build_zb_other_technical_docs_section(tender, packages, tender_raw: str) ->
     ])
 
 def _build_zb_section_content(title: str, raw_block: str, tender, tender_raw: str, packages: list) -> str:
+    """构建ZB 格式章节内容。"""
     raw = (raw_block or "").strip()
 
     if _title_has_any(title, ("资格性审查",)):
@@ -1518,6 +1578,7 @@ def _build_zb_section_content(title: str, raw_block: str, tender, tender_raw: st
     return "【待按招标文件第六章原格式填写本章节内容】"
 
 def _clean_invalid_reason_text(text: str) -> str:
+    """清理无效reason文本。"""
     cleaned = _clean_text(text or "")
     cleaned = re.sub(r"^\d+\.\d+\s*", "", cleaned)
     cleaned = re.sub(r"^[（(]?\d+[）)]\s*", "", cleaned)
@@ -1525,6 +1586,7 @@ def _clean_invalid_reason_text(text: str) -> str:
 
 
 def _normalize_invalid_item_key(text: str) -> str:
+    """归一化无效项键。"""
     s = re.sub(r"\s+", "", text or "")
     s = re.sub(r"[，,。；;、“”\"'（）()《》<>【】\[\]]", "", s)
     s = s.replace("无效响应", "无效投标")
@@ -1535,6 +1597,7 @@ def _normalize_invalid_item_key(text: str) -> str:
 
 
 def _append_invalid_item(items: list[str], item: str | None) -> None:
+    """追加无效项。"""
     if not item:
         return
     key = _normalize_invalid_item_key(item)
@@ -1548,6 +1611,7 @@ def _append_invalid_item(items: list[str], item: str | None) -> None:
 
 
 def _standardize_invalid_reason(text: str) -> str | None:
+    """规范化无效投标原因表述。"""
     s = _clean_invalid_reason_text(text)
     if not s:
         return None
@@ -1606,6 +1670,7 @@ def _standardize_invalid_reason(text: str) -> str | None:
 
 
 def _extract_zb_invalid_items(text: str) -> list[str]:
+    """提取ZB 格式无效项。"""
     source = text or ""
     items: list[str] = []
 
@@ -1655,6 +1720,7 @@ def _extract_zb_invalid_items(text: str) -> list[str]:
 
 
 def _build_zb_invalid_bid_checklist(tender, tender_raw: str = "") -> str:
+    """构建ZB 格式无效投标checklist。"""
     text = tender_raw or getattr(tender, "source_text", "") or ""
     rows = [
         [str(i), item, "【待填写：符合/不符合】", "【待填写】"]
@@ -1666,6 +1732,7 @@ def _build_zb_invalid_bid_checklist(tender, tender_raw: str = "") -> str:
     )
 
 def _build_zb_compliance_review_section(tender, tender_raw: str = "", package_index: int = 1) -> str:
+    """构建ZB 格式符合性审查章节。"""
     tpl = getattr(tender, "compliance_review_table", None)
     headers, tpl_rows = _tpl_rows_with_headers(tpl)
 
@@ -1708,6 +1775,7 @@ def _build_zb_compliance_review_section(tender, tender_raw: str = "", package_in
     return "符合性审查响应对照表\n" + _render_table_with_headers(headers, rows)
 
 def _build_zb_qualification_review_section(tender, tender_raw: str = "", package_index: int = 1) -> str:
+    """构建ZB 格式资格审查章节。"""
     tpl = getattr(tender, "qualification_review_table", None)
     headers, tpl_rows = _tpl_rows_with_headers(tpl)
 
@@ -1766,6 +1834,7 @@ def _build_zb_sections(
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
 ) -> list:
+    """构建ZB 格式章节。"""
     _ = (products, normalized_result, evidence_result, product_profiles)
     packages = active_packages or tender.packages
     entries = _get_zb_template_entries(tender)
@@ -1799,6 +1868,7 @@ def _build_zb_sections(
     existing_titles = [title for title, _ in entries]
 
     def _has_any(*keywords: str) -> bool:
+        """判断是否存在any。"""
         return any(_title_has_any(title, tuple(keywords)) for title in existing_titles)
 
     sections: list[BidDocumentSection] = []

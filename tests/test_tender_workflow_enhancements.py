@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from app.schemas import BidDocumentSection, CommercialTerms, ProcurementPackage, ProductSpecification, TenderDocument
-from app.services.tender_workflow import _prepare_citations, _second_validation
+from app.schemas import BidDocumentSection, CommercialTerms, CompanyProfile, ProcurementPackage, ProductSpecification, TenderDocument
+from app.services.tender_workflow import _materialize_sections, _prepare_citations, _second_validation
 
 
 def _section(title: str, content: str) -> BidDocumentSection:
+    """返回章节。"""
     return BidDocumentSection(section_title=title, content=content, attachments=[])
 
 
 def test_prepare_citations_normalizes_and_deduplicates() -> None:
+    """测试prepare引用normalizesanddeduplicates。"""
     long_text = "A" * 400
     hits = [
         {
@@ -31,7 +33,61 @@ def test_prepare_citations_normalizes_and_deduplicates() -> None:
     assert citations[0]["quote"].endswith("...")
 
 
+def test_materialize_sections_keeps_date_placeholder_without_explicit_document_date() -> None:
+    """测试materialize章节keeps日期占位符withoutexplicit文档日期。"""
+    tender = TenderDocument(
+        project_name="示例项目",
+        project_number="TP-2026-009",
+        budget=100.0,
+        purchaser="某医院",
+        agency="某代理机构",
+        procurement_type="竞争性谈判",
+        packages=[
+            ProcurementPackage(
+                package_id="1",
+                item_name="流式细胞仪",
+                quantity=1,
+                budget=100.0,
+                technical_requirements={},
+                delivery_time="30日内交货",
+                delivery_place="采购人指定地点",
+            )
+        ],
+        commercial_terms=CommercialTerms(),
+        evaluation_criteria={},
+        special_requirements="",
+    )
+    company = CompanyProfile(
+        company_id="c1",
+        name="某投标单位",
+        legal_representative="张三",
+        address="长春市某路1号",
+        phone="13800000000",
+    )
+    sections = [
+        BidDocumentSection(
+            section_title="一、响应文件封面格式",
+            content="谈判日期：【待填写：日期】\n日期：【待填写：年 月 日】",
+            attachments=[],
+        )
+    ]
+
+    materialized, _ = _materialize_sections(
+        sections=sections,
+        tender=tender,
+        company=company,
+        products={},
+        evidence_result=None,
+    )
+    content = materialized[0].content
+
+    assert "2026年" not in content
+    assert "谈判日期：【待填写：日期】" in content
+    assert "日期：【待填写：年 月 日】" in content
+
+
 def test_second_validation_detects_missing_items_and_placeholders() -> None:
+    """测试第二校验detectsmissing项andplaceholders。"""
     analysis_result = {
         "required_materials": [
             "营业执照",
@@ -62,6 +118,7 @@ def test_second_validation_detects_missing_items_and_placeholders() -> None:
 
 
 def test_second_validation_passes_when_content_and_citations_are_complete() -> None:
+    """测试第二校验passeswhen内容and引用arecomplete。"""
     analysis_result = {
         "required_materials": [
             "营业执照",
@@ -115,6 +172,7 @@ def test_second_validation_passes_when_content_and_citations_are_complete() -> N
 
 
 def test_second_validation_detects_package_leakage_and_model_gaps() -> None:
+    """测试第二校验detects包件leakageand模型gaps。"""
     tender = TenderDocument(
         project_name="医院流式细胞分析仪采购项目",
         project_number="HLJ-2026-018",
@@ -187,6 +245,7 @@ def test_second_validation_detects_package_leakage_and_model_gaps() -> None:
 
 
 def test_second_validation_blocks_unproven_no_deviation_rows() -> None:
+    """测试第二校验文本块unprovennodeviation行。"""
     analysis_result = {
         "required_materials": ["营业执照", "技术偏离表"],
         "citations": [{"source": "tender::demo", "chunk_index": 1, "score": 0.9, "quote": "摘要"}],
@@ -230,6 +289,7 @@ def test_second_validation_blocks_unproven_no_deviation_rows() -> None:
 
 
 def test_second_validation_rejects_mapping_table_with_only_tender_excerpt() -> None:
+    """测试带only招标文件摘录的第二校验rejects映射表格。"""
     analysis_result = {
         "required_materials": ["营业执照", "技术偏离表"],
         "citations": [{"source": "tender::demo", "chunk_index": 1, "score": 0.9, "quote": "摘要"}],

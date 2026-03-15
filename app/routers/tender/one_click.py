@@ -8,7 +8,7 @@ import uuid
 from fastapi import BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from app.schemas import OneClickJobStartResponse, OneClickJobStatusResponse
+from app.schemas import DraftLevel, OneClickJobStartResponse, OneClickJobStatusResponse
 from app.services.docx_builder import build_bid_docx
 from app.services.llm import get_chat_model
 from app.services.one_click_generator import generate_bid_sections
@@ -38,6 +38,17 @@ _ONE_CLICK_STEP_LABELS = {
     "error": "处理失败",
 }
 
+
+def _one_click_doc_label(draft_level: DraftLevel | str | None) -> str:
+    """生成一键成稿文档的展示标签。"""
+    level = draft_level.value if isinstance(draft_level, DraftLevel) else str(draft_level or "").strip()
+    return "投标底稿" if level == DraftLevel.internal_draft.value else "投标文件"
+
+
+def _one_click_output_path(job_id: str, draft_level: DraftLevel | str | None):
+    """计算一键成稿结果文件的输出路径。"""
+    return BID_OUTPUT_DIR / f"{job_id}_{_one_click_doc_label(draft_level)}.docx"
+
 def _set_one_click_job_status(
     job_id: str,
     *,
@@ -49,6 +60,7 @@ def _set_one_click_job_status(
     download_url: str = "",
     error: str = "",
 ) -> None:
+    """更新一键成稿任务的状态记录。"""
     one_click_job_storage[job_id] = {
         "job_id": job_id,
         "status": status,
@@ -64,6 +76,7 @@ def _set_one_click_job_status(
 
 
 def _run_one_click_generation(job_id: str, save_path: Path) -> None:
+    """执行后台一键成稿流程并写出结果文件。"""
     try:
         _set_one_click_job_status(
             job_id,
@@ -120,12 +133,19 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             message="正在输出 Word 文档…",
             progress=90,
         )
-        output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
-        build_bid_docx(sections, tender_doc, _PLACEHOLDER_COMPANY, output_file)
+        doc_label = _one_click_doc_label(gen_result.draft_level)
+        output_file = _one_click_output_path(job_id, gen_result.draft_level)
+        build_bid_docx(
+            sections,
+            tender_doc,
+            _PLACEHOLDER_COMPANY,
+            output_file,
+            draft_level=gen_result.draft_level,
+        )
         if not output_file.exists() or output_file.stat().st_size == 0:
             raise RuntimeError("Word 文件生成失败，输出文件为空")
 
-        filename = _safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx")
+        filename = _safe_download_filename(f"{doc_label}_{tender_doc.project_name}", ".docx")
         download_url = f"/api/tender/one-click/download/{job_id}"
         logger.info("一键生成任务完成: %s -> %s", job_id, output_file)
         is_external_ready = gen_result.validation_gate.passes_external_gate()
@@ -134,9 +154,9 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             status="completed",
             step_code="completed",
             message=(
-                "投标文件已生成完成，可直接下载。"
+                f"{doc_label}已生成完成，可直接下载。"
                 if is_external_ready
-                else "骨架底稿已生成，可下载补录；如需成熟响应稿，请改走 workflow 并上传产品/证据资料。"
+                else "投标底稿已生成，可下载补录；如需成熟响应稿，请改走 workflow 并上传产品/证据资料。"
             ),
             progress=100,
             filename=filename,
@@ -145,6 +165,7 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
         one_click_job_storage[job_id]["validation_gate"] = gen_result.validation_gate.model_dump()
         one_click_job_storage[job_id]["regression_metrics"] = gen_result.regression_metrics.model_dump()
         one_click_job_storage[job_id]["draft_level"] = gen_result.draft_level.value
+        one_click_job_storage[job_id]["output_file"] = str(output_file)
     except Exception as exc:  # noqa: BLE001
         logger.error("一键生成后台任务失败：%s", exc, exc_info=True)
         _set_one_click_job_status(
@@ -216,8 +237,15 @@ async def one_click_generate(file: UploadFile = File(...)):
         )
 
         # 5. 构建 Word 文档
-        output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
-        build_bid_docx(sections, tender_doc, _PLACEHOLDER_COMPANY, output_file)
+        doc_label = _one_click_doc_label(gen_result.draft_level)
+        output_file = _one_click_output_path(job_id, gen_result.draft_level)
+        build_bid_docx(
+            sections,
+            tender_doc,
+            _PLACEHOLDER_COMPANY,
+            output_file,
+            draft_level=gen_result.draft_level,
+        )
 
         logger.info("投标文件生成成功：%s", output_file)
 
@@ -225,7 +253,7 @@ async def one_click_generate(file: UploadFile = File(...)):
         return FileResponse(
             output_file,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=_safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx"),
+            filename=_safe_download_filename(f"{doc_label}_{tender_doc.project_name}", ".docx"),
         )
 
     except BidSectionsValidationError as exc:
@@ -244,6 +272,7 @@ async def one_click_generate(file: UploadFile = File(...)):
 
 @router.post("/one-click/start", response_model=OneClickJobStartResponse, summary="启动一键生成底稿任务")
 async def start_one_click_generate(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """异步启动一键成稿任务。"""
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
@@ -274,6 +303,7 @@ async def start_one_click_generate(background_tasks: BackgroundTasks, file: Uplo
 
 @router.get("/one-click/status/{job_id}", response_model=OneClickJobStatusResponse, summary="查询一键生成任务状态")
 async def get_one_click_job_status(job_id: str):
+    """查询一键成稿任务状态。"""
     job_info = one_click_job_storage.get(job_id)
     if not job_info:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -282,14 +312,22 @@ async def get_one_click_job_status(job_id: str):
 
 @router.get("/one-click/download/{job_id}", summary="下载一键生成结果")
 async def download_one_click_result(job_id: str):
+    """下载一键成稿生成的文件。"""
     job_info = one_click_job_storage.get(job_id)
     if not job_info:
         raise HTTPException(status_code=404, detail="任务不存在")
     if job_info.get("status") != "completed":
         raise HTTPException(status_code=409, detail="任务尚未完成")
 
-    output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
-    if not output_file.exists():
+    output_file_str = str(job_info.get("output_file") or "").strip()
+    output_file = Path(output_file_str) if output_file_str else None
+    if output_file is None or not output_file.exists():
+        for candidate_level in (job_info.get("draft_level"), DraftLevel.internal_draft.value, DraftLevel.external_ready.value):
+            candidate = _one_click_output_path(job_id, candidate_level)
+            if candidate.exists():
+                output_file = candidate
+                break
+    if output_file is None or not output_file.exists():
         raise HTTPException(status_code=404, detail="生成文件不存在")
 
     return FileResponse(

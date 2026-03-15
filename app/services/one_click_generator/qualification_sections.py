@@ -24,6 +24,7 @@ from app.services.one_click_generator.common import (
 )
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -34,6 +35,7 @@ for _module in (_common, _table_builders,):
 
 del _module
 def _build_qualification_license_block(tender: TenderDocument) -> str:
+    """构建资格审查资质文本块。"""
     lines = [
         "### 证照/注册文件台账",
         "| 材料项 | 对应主体 | 是否适用 | 建议文件名 | 核对要点 |",
@@ -70,6 +72,7 @@ def _build_review_response_table(
     title: str,
     rows: list[tuple[str, str]],
 ) -> str:
+    """构建评审响应表。"""
     lines = [
         f"## {title}",
         "| 序号 | 审查项 | 招标文件要求 | 响应情况 | 对应材料/页码 |",
@@ -82,6 +85,7 @@ def _build_review_response_table(
     return "\n".join(lines)
 
 def _build_enterprise_declaration_block(tender: TenderDocument, today: str) -> str:
+    """构建enterprisedeclaration文本块。"""
     _ = tender
     return f"""## 八、企业类型声明/证明材料
 | 选项 | 是否适用 | 处理方式 | 需附材料 |
@@ -101,6 +105,7 @@ def _build_enterprise_declaration_block(tender: TenderDocument, today: str) -> s
 日期：{today}"""
 
 def _build_social_insurance_checklist() -> str:
+    """构建社保保险checklist。"""
     return "\n".join([
         "### 社保/保险证明清单",
         "| 材料项 | 建议期间 | 建议文件名 | 备注 |",
@@ -112,6 +117,7 @@ def _build_social_insurance_checklist() -> str:
     ])
 
 def _gen_qualification_review_section() -> BidDocumentSection:
+    """返回资格审查章节。"""
     rows = [
         ("独立承担民事责任能力", "提供营业执照或对应主体资格证明文件"),
         ("授权书", "法定代表人/单位负责人授权书签字并加盖公章"),
@@ -121,6 +127,7 @@ def _gen_qualification_review_section() -> BidDocumentSection:
     return BidDocumentSection(section_title="资格性审查响应对照表", content=content)
 
 def _gen_compliance_review_section() -> BidDocumentSection:
+    """返回符合性审查章节。"""
     rows = [
         ("投标报价", "只能有一个有效报价且不超过预算/最高限价"),
         ("投标文件规范性、符合性", "签署、盖章、格式、文字、目录等符合要求"),
@@ -134,6 +141,7 @@ def _gen_compliance_review_section() -> BidDocumentSection:
 
 
 def _build_invalid_bid_checklist() -> str:
+    """构建无效投标checklist。"""
     items = [
         "任意一条不满足采购文件★号条款要求。",
         "单项产品五条及以上不满足非★号条款要求。",
@@ -157,6 +165,7 @@ def _build_invalid_bid_checklist() -> str:
     return "\n".join(lines)
 
 def _build_supplier_commitment_followup(tender: TenderDocument) -> str:
+    """构建supplier承诺followup。"""
     title = _supplier_commitment_title(tender)
     return "\n".join([
         "### 资格材料路径说明",
@@ -169,6 +178,7 @@ def _build_supplier_commitment_followup(tender: TenderDocument) -> str:
     ])
 
 def _build_public_record_checklist() -> str:
+    """构建公共记录checklist。"""
     return "\n".join([
         "### 查询/截图清单",
         "| 平台 | 查询主体 | 建议保留内容 | 建议文件名 |",
@@ -181,6 +191,7 @@ def _build_public_record_checklist() -> str:
     ])
 
 def _build_consortium_declaration_block(tender: TenderDocument, today: str) -> str:
+    """构建联合体declaration文本块。"""
     allows = _allow_consortium(tender)
     if not allows:
         return f"""## 四、联合体投标声明
@@ -205,6 +216,7 @@ def _build_detail_quote_table(
     tender_raw: str,
     packages: list[ProcurementPackage] | None = None,
 ) -> str:
+    """构建明细报价表格。"""
     lines = [
         "| 序号 | 货物名称 | 规格型号 | 生产厂家 | 品牌 | 单价(元) | 数量 | 总价(元) |",
         "|---:|---|---|---|---|---:|---|---:|",
@@ -232,11 +244,13 @@ def _build_detail_quote_table(
 
 
 def _gen_qualification(*args, **kwargs):
+    """生成资格审查章节对象。"""
     raise RuntimeError(
         "旧结构生成器 _gen_qualification 已禁用。请改用 build_format_driven_sections()."
     )
 
 def _gen_compliance(*args, **kwargs):
+    """生成符合性审查章节对象。"""
     raise RuntimeError(
         "旧结构生成器 _gen_compliance 已禁用。请改用 build_format_driven_sections()."
     )

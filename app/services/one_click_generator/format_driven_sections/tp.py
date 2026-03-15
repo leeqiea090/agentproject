@@ -1,13 +1,16 @@
 """竞争性谈判格式驱动章节生成。"""
 from __future__ import annotations
 
-from .common import *  # noqa: F401,F403
+import re
+
+from app.schemas import BidDocumentSection
 from app.services.one_click_generator.config_tables import _build_configuration_table
 from app.services.one_click_generator.response_tables import (
     _build_deviation_table,
     _build_requirement_rows,
     _has_real_bidder_response,
 )
+from .common import _clean_text, _md_table
 
 _TP_APPENDIX_TITLES = [
     "附一、资格性审查响应对照表",
@@ -76,8 +79,20 @@ _TP_SERVICE_EXCLUDE_KEYWORDS = (
     "参数阈值",
 )
 
+def _slice_service_tail(text: str) -> str:
+    """截取服务tail。"""
+    normalized = _clean_text(text)
+    if not normalized:
+        return ""
+    markers = ("维修", "维保", "保修", "响应", "培训", "安装", "调试", "验收", "售后", "巡检", "升级", "维护")
+    positions = [normalized.find(m) for m in markers if normalized.find(m) >= 0]
+    if not positions:
+        return normalized
+    return normalized[min(positions):].strip()
+
 
 def _is_tp_service_or_acceptance_clause(text: str) -> bool:
+    """判断TP 格式服务or验收条款。"""
     normalized = _clean_text(text)
     if not normalized:
         return False
@@ -89,10 +104,12 @@ def _is_tp_service_or_acceptance_clause(text: str) -> bool:
 
 
 def _norm_header(text: str) -> str:
+    """规范化表头文本。"""
     return "".join(str(text or "").split())
 
 
 def _tidy_extracted_text(text: str) -> str:
+    """清理抽取后的文本。"""
     value = _clean_text(text)
     if not value:
         return ""
@@ -104,12 +121,14 @@ def _tidy_extracted_text(text: str) -> str:
 
 
 def _tpl_header_titles(tpl) -> list[str]:
+    """返回模板中的表头标题列表。"""
     columns = list(getattr(tpl, "columns", None) or [])
     headers = [_clean_text(getattr(col, "title", "")) for col in columns]
     return [header for header in headers if header]
 
 
 def _select_tp_headers(tender, attr_name: str, fallback_headers: list[str]) -> list[str]:
+    """选择TP 格式表头。"""
     tpl = getattr(tender, attr_name, None)
     headers = _tpl_header_titles(tpl)
     if len(headers) >= 2:
@@ -130,6 +149,7 @@ def _render_tp_row(
     invalid_item: str = "",
     self_check_placeholder: str = "【待填写：符合/不符合】",
 ) -> list[str]:
+    """渲染TP 格式行。"""
     row: list[str] = []
     for header in headers:
         norm = _norm_header(header)
@@ -161,6 +181,7 @@ def _render_tp_row(
 
 
 def _normalize_dense_text(text: str) -> str:
+    """归一化紧凑文本，便于匹配。"""
     text = text or ""
     text = re.sub(r"-\s*第\s*\d+\s*页\s*-", " ", text)
     text = re.sub(r"\s+", " ", text)
@@ -168,6 +189,7 @@ def _normalize_dense_text(text: str) -> str:
 
 
 def _dedupe_consecutive_lines(lines: list[str]) -> list[str]:
+    """去除连续重复的文本行。"""
     result: list[str] = []
     previous = ""
     for raw in lines:
@@ -180,6 +202,7 @@ def _dedupe_consecutive_lines(lines: list[str]) -> list[str]:
 
 
 def _looks_like_tp_title_fragment(line: str, title: str) -> bool:
+    """判断likeTP 格式标题fragment。"""
     compact = _clean_text(line)
     if not compact:
         return False
@@ -201,6 +224,7 @@ def _looks_like_tp_title_fragment(line: str, title: str) -> bool:
 
 
 def _clean_tp_template_block(block: str, title: str) -> str:
+    """清理TP 格式模板文本块。"""
     body = re.sub(r"-\s*第\s*\d+\s*页\s*-", "", block or "").strip()
     if not body:
         return ""
@@ -225,6 +249,7 @@ def _clean_tp_template_block(block: str, title: str) -> str:
 
 
 def _extract_tp_format_block(tender_raw: str) -> str:
+    """提取TP 格式格式块。"""
     text = tender_raw or ""
     if not text:
         return ""
@@ -240,6 +265,7 @@ def _extract_tp_format_block(tender_raw: str) -> str:
 
 
 def _extract_tp_template_blocks(tender_raw: str) -> dict[str, str]:
+    """提取TP 格式模板文本块。"""
     block = _extract_tp_format_block(tender_raw)
     if not block:
         return {}
@@ -265,11 +291,13 @@ def _extract_tp_template_blocks(tender_raw: str) -> dict[str, str]:
 
 
 def _build_tp_template_section(tender_raw: str, title: str, fallback: str) -> str:
+    """构建TP 格式模板章节。"""
     blocks = _extract_tp_template_blocks(tender_raw)
     return blocks.get(title, fallback).strip()
 
 
 def _extract_tp_review_block(tender_raw: str, anchor_patterns: list[str], stop_patterns: list[str]) -> str:
+    """提取TP 格式评审块。"""
     text = _normalize_dense_text(tender_raw)
     if not text:
         return ""
@@ -295,6 +323,7 @@ def _extract_tp_review_block(tender_raw: str, anchor_patterns: list[str], stop_p
 
 
 def _extract_tp_contract_package_block(block: str, package_id: str) -> str:
+    """提取TP 格式contract包件文本块。"""
     text = block or ""
     if not text:
         return ""
@@ -312,6 +341,7 @@ def _extract_tp_contract_package_block(block: str, package_id: str) -> str:
 
 
 def _extract_tp_named_segments(text: str, markers: list[str]) -> list[tuple[str, str]]:
+    """提取TP 格式namedsegments。"""
     block = text or ""
     hits: list[tuple[str, int]] = []
     cursor = 0
@@ -331,6 +361,7 @@ def _extract_tp_named_segments(text: str, markers: list[str]) -> list[tuple[str,
 
 
 def _extract_tp_qualification_commitment_template(tender_raw: str) -> str:
+    """提取TP 格式资格审查承诺模板。"""
     match = re.search(
         r"四、资格承诺函(.*?)(?:五、技术偏离及详细配置明细表|五、技术偏离)",
         tender_raw or "",
@@ -355,6 +386,7 @@ def _extract_tp_qualification_commitment_template(tender_raw: str) -> str:
 
 
 def _build_tp_quote_summary_table(tender, packages, tender_raw: str) -> str:
+    """构建TP 格式报价汇总表。"""
     lines = [
         f"项目名称：{tender.project_name}",
         f"项目编号：{tender.project_number}",
@@ -387,6 +419,7 @@ def _build_tp_combined_deviation_detail_table(
     evidence_result: dict | None = None,
     product_profile: dict | None = None,
 ) -> str:
+    """构建TP 格式combineddeviation明细表格。"""
     requirement_rows, total_requirements = _build_requirement_rows(
         pkg,
         tender_raw,
@@ -439,6 +472,7 @@ def _structured_tp_service_points(
     evidence_result: dict | None = None,
     product_profile: dict | None = None,
 ) -> list[str]:
+    """从结构化需求中组装 TP 服务要点。"""
     if not normalized_result:
         return []
     rows, _ = _build_requirement_rows(
@@ -466,6 +500,13 @@ def _structured_tp_service_points(
             points.append(f"{key}：{requirement}；我方响应：{response}".strip("："))
         else:
             points.append(f"{key}：{requirement}".strip("："))
+        combined = _slice_service_tail(f"{key} {requirement}".strip())
+        if not combined:
+            continue
+        if not _is_tp_service_or_acceptance_clause(combined):
+            continue
+        if _looks_like_pure_technical_clause(combined):
+            continue
     return points
 
 
@@ -478,6 +519,7 @@ def _build_tp_service_plan_section(
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
 ) -> str:
+    """构建TP 格式服务plan章节。"""
     parts: list[str] = []
 
     for pkg in packages:
@@ -536,6 +578,7 @@ def _build_tp_service_plan_section(
 
 
 def _suggest_tp_qualification_response(item_name: str, requirement: str = "") -> str:
+    """生成建议TP 格式资格审查响应。"""
     haystack = _tidy_extracted_text(f"{item_name} {requirement}")
     if any(token in haystack for token in ("中华人民共和国政府采购法》第二十二条", "营业执照", "主体资格")):
         return "四、资格承诺函；营业执照或主体资格证明文件"
@@ -551,6 +594,7 @@ def _suggest_tp_qualification_response(item_name: str, requirement: str = "") ->
 
 
 def _suggest_tp_compliance_response(item_name: str, requirement: str = "") -> str:
+    """生成建议TP 格式符合性审查响应。"""
     haystack = _tidy_extracted_text(f"{item_name} {requirement}")
     if "投标报价" in haystack:
         return "二、报价书；三、报价一览表"
@@ -568,6 +612,7 @@ def _suggest_tp_compliance_response(item_name: str, requirement: str = "") -> st
 
 
 def _suggest_tp_detailed_response_location(item_name: str, requirement: str = "") -> str:
+    """生成建议TP 格式详细响应location。"""
     haystack = _tidy_extracted_text(f"{item_name} {requirement}")
     if any(token in haystack for token in ("技术参数", "配置", "装箱", "核心性能", "品牌", "型号", "规格")):
         return "五、技术偏离及详细配置明细表"
@@ -587,6 +632,7 @@ def _suggest_tp_detailed_response_location(item_name: str, requirement: str = ""
 
 
 def _suggest_tp_detailed_response_note(item_name: str, requirement: str = "") -> str:
+    """生成建议TP 格式详细响应备注。"""
     haystack = _tidy_extracted_text(f"{item_name} {requirement}")
     if any(token in haystack for token in ("技术参数", "配置", "装箱", "核心性能")):
         return "逐条填写品牌、型号、规格、配置、响应值及偏离情况，不得仅写“响应/完全响应”。"
@@ -606,6 +652,7 @@ def _suggest_tp_detailed_response_note(item_name: str, requirement: str = "") ->
 
 
 def _extract_tp_qualification_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
+    """提取TP 格式资格审查行。"""
     block = _extract_tp_review_block(
         tender_raw,
         anchor_patterns=[r"表一资格性审查表[:：]?\s*表一资格性审查表[:：]?", r"表一资格性审查表[:：]?"],
@@ -661,6 +708,7 @@ def _extract_tp_qualification_rows(pkg, tender_raw: str) -> list[tuple[str, str]
 
 
 def _build_tp_qualification_review_section(tender, packages, tender_raw: str) -> str:
+    """构建TP 格式资格审查章节。"""
     headers = _select_tp_headers(
         tender,
         "qualification_review_table",
@@ -689,6 +737,7 @@ def _build_tp_qualification_review_section(tender, packages, tender_raw: str) ->
 
 
 def _extract_tp_compliance_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
+    """提取TP 格式符合性审查行。"""
     block = _extract_tp_review_block(
         tender_raw,
         anchor_patterns=[r"表二符合性审查表[:：]?\s*表二符合性审查表[:：]?", r"表二符合性审查表[:：]?"],
@@ -718,6 +767,7 @@ def _extract_tp_compliance_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
 
 
 def _build_tp_compliance_review_section(tender, packages, tender_raw: str) -> str:
+    """构建TP 格式符合性审查章节。"""
     headers = _select_tp_headers(
         tender,
         "compliance_review_table",
@@ -746,6 +796,7 @@ def _build_tp_compliance_review_section(tender, packages, tender_raw: str) -> st
 
 
 def _build_tp_detailed_review_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
+    """构建TP 格式详细评审行。"""
     delivery_time = _extract_tp_delivery_time(pkg, tender_raw)
     delivery_place = _extract_tp_delivery_place(pkg, tender_raw)
     service_points = _extract_tp_service_points(pkg, tender_raw)
@@ -784,6 +835,7 @@ def _build_tp_detailed_review_rows(pkg, tender_raw: str) -> list[tuple[str, str]
 
 
 def _build_tp_detailed_review_section(tender, packages, tender_raw: str) -> str:
+    """构建TP 格式详细评审章节。"""
     headers = _select_tp_headers(
         tender,
         "detailed_review_table",
@@ -814,6 +866,7 @@ def _build_tp_detailed_review_section(tender, packages, tender_raw: str) -> str:
 
 
 def _extract_tp_invalid_items(tender_raw: str) -> list[str]:
+    """提取TP 格式无效项。"""
     text = _normalize_dense_text(tender_raw)
     if not text:
         return []
@@ -872,6 +925,7 @@ def _extract_tp_invalid_items(tender_raw: str) -> list[str]:
 
 
 def _build_tp_invalid_bid_checklist(tender, tender_raw: str) -> str:
+    """构建TP 格式无效投标checklist。"""
     headers = _select_tp_headers(tender, "invalid_bid_table", ["序号", "无效情形", "自检结果", "备注"])
     items = _extract_tp_invalid_items(tender_raw) or [
         "投标人未按招标文件要求参加远程开标会的。",
@@ -909,6 +963,7 @@ def _build_tp_invalid_bid_checklist(tender, tender_raw: str) -> str:
 
 
 def _extract_tp_summary_rows(tender_raw: str) -> list[dict]:
+    """提取TP 格式汇总行。"""
     rows = []
     pattern = re.compile(
         r"(?P<pkg>\d+)\s+(?P<name>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+详见采购文件\s+(?P<budget>[0-9,]+(?:\.\d+)?)",
@@ -927,6 +982,7 @@ def _extract_tp_summary_rows(tender_raw: str) -> list[dict]:
 
 
 def _find_tp_summary_row(tender_raw: str, package_id: str) -> dict | None:
+    """查找TP 格式汇总行。"""
     for row in _extract_tp_summary_rows(tender_raw):
         if row["package_id"] == str(package_id):
             return row
@@ -934,6 +990,7 @@ def _find_tp_summary_row(tender_raw: str, package_id: str) -> dict | None:
 
 
 def _extract_tp_package_quantity(pkg, tender_raw: str) -> str:
+    """提取TP 格式包件数量。"""
     block = _find_tp_package_block(tender_raw, pkg.package_id)
     match = re.search(r"数量\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*台", block)
     if match:
@@ -950,6 +1007,7 @@ def _extract_tp_package_quantity(pkg, tender_raw: str) -> str:
 
 
 def _extract_tp_package_budget(pkg, tender_raw: str) -> str:
+    """提取TP 格式包件预算。"""
     row = _find_tp_summary_row(tender_raw, pkg.package_id)
     if row and row.get("budget"):
         try:
@@ -967,6 +1025,7 @@ def _extract_tp_package_budget(pkg, tender_raw: str) -> str:
 
 
 def _extract_tp_delivery_time(pkg, tender_raw: str) -> str:
+    """提取TP 格式交付时间。"""
     block = _find_tp_package_block(tender_raw, pkg.package_id)
     for raw_line in block.splitlines():
         line = _tidy_extracted_text(raw_line)
@@ -990,6 +1049,7 @@ def _extract_tp_delivery_time(pkg, tender_raw: str) -> str:
 
 
 def _extract_tp_delivery_place(pkg, tender_raw: str) -> str:
+    """提取TP 格式交付地点。"""
     block = _find_tp_package_block(tender_raw, pkg.package_id)
     for raw_line in block.splitlines():
         line = _tidy_extracted_text(raw_line)
@@ -1001,6 +1061,7 @@ def _extract_tp_delivery_place(pkg, tender_raw: str) -> str:
 
 
 def _extract_tp_requirements_chapter(tender_raw: str) -> str:
+    """提取TP 格式需求chapter。"""
     match = re.search(
         r"第二章\s*采购人需求(.*?)(?=第三章\s*供应商须知|第三章|第[三四五六七八九十]+章|$)",
         tender_raw or "",
@@ -1010,6 +1071,7 @@ def _extract_tp_requirements_chapter(tender_raw: str) -> str:
 
 
 def _find_tp_package_block(tender_raw: str, package_id: str) -> str:
+    """查找TP 格式包件文本块。"""
     scope = _extract_tp_requirements_chapter(tender_raw)
     all_pkg = list(re.finditer(r"合同包\s*\d+\s*[（(]", scope))
     start_pat = re.compile(rf"合同包\s*{re.escape(str(package_id))}\s*[（(]")
@@ -1029,6 +1091,7 @@ def _find_tp_package_block(tender_raw: str, package_id: str) -> str:
 
 
 def _extract_tp_detail_rows(block: str, pkg) -> list[dict]:
+    """提取TP 格式明细行。"""
     _ = pkg
     rows = []
     match = re.search(r"四、装箱配置单[：:]?(.*?)(?:五、质保|六、售后服务要求|七、)", block, re.S)
@@ -1044,6 +1107,7 @@ def _extract_tp_detail_rows(block: str, pkg) -> list[dict]:
     return rows
 
 def _looks_like_pure_technical_clause(text: str) -> bool:
+    """判断likepure技术条款。"""
     normalized = _clean_text(text)
     if not normalized:
         return False
@@ -1064,6 +1128,7 @@ def _looks_like_pure_technical_clause(text: str) -> bool:
 
 
 def _extract_tp_requirement_rows(block: str, pkg) -> list[dict]:
+    """提取TP 格式需求行。"""
     _ = pkg
     rows = []
     match = re.search(r"三、技术参数[：:]?(.*?)(?:四、装箱配置单|五、质保|六、售后服务要求)", block, re.S)
@@ -1084,6 +1149,7 @@ def _extract_tp_requirement_rows(block: str, pkg) -> list[dict]:
 
 
 def _extract_tp_service_points(pkg, tender_raw: str) -> list[str]:
+    """提取TP 格式服务要点。"""
     block = _find_tp_package_block(tender_raw, pkg.package_id)
     if not block:
         return []
@@ -1131,6 +1197,7 @@ def _build_tp_sections(
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
 ) -> list:
+    """构建TP 格式章节。"""
     packages = active_packages or tender.packages
     sections = []
 

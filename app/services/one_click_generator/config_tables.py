@@ -30,12 +30,14 @@ from app.services.requirement_processor import (
     _extract_package_configuration_scope_text,
     _markdown_cell,
     _normalize_requirement_line,
+    _package_forbidden_terms,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def _normalize_main_param_note(raw_value: Any, has_real_response: bool) -> str:
+    """归一化主参数备注文本。"""
     text = _safe_text(raw_value, "")
     bad_values = {"", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充"}
     if text in bad_values or "待填写" in text:
@@ -43,6 +45,7 @@ def _normalize_main_param_note(raw_value: Any, has_real_response: bool) -> str:
     return text
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -86,6 +89,34 @@ def _config_dedup_tokens(name: str) -> set[str]:
     return {t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", name.strip()) if len(t) >= 2}
 
 
+def _normalize_config_item_name(name: str) -> str:
+    """归一化配置项名称。"""
+    normalized = _safe_text(name, "")
+    normalized = re.sub(r"^[★▲■●\s]+", "", normalized)
+    normalized = re.sub(r"^(?:配置|配件)\s*[:：]?\s*", "", normalized)
+    normalized = re.sub(r"^配置\s*\d+\s*", "", normalized)
+    normalized = re.sub(r"^[（(]?\d+(?:\.\d+)?[）)]?\s*", "", normalized)
+    return normalized.strip(" ：:;；,，。")
+
+
+def _is_noise_config_item(name: str, remark: str = "") -> bool:
+    """判断配置项是否属于噪声项。"""
+    normalized = _normalize_config_item_name(name)
+    if not normalized:
+        return True
+    if normalized in {"设备总台数", "总台数", "如有多个配置请另行加行", "序号", "要求", "备注说明"}:
+        return True
+    if re.fullmatch(r"配置\s*\d+", normalized):
+        return True
+    if "第" in normalized and "页" in normalized:
+        return True
+    if "另行加行" in normalized:
+        return True
+    if remark and "总台数" in remark:
+        return True
+    return False
+
+
 def _extract_configuration_items(
     pkg: ProcurementPackage,
     tender_raw: str,
@@ -106,7 +137,7 @@ def _extract_configuration_items(
     _seen_names: set[str] = set()
 
     for req in structured_config:
-        name = _safe_text(req.get("param_name") or req.get("parameter_name"), "")
+        name = _normalize_config_item_name(_safe_text(req.get("param_name") or req.get("parameter_name"), ""))
         if not name or name in _seen_names:
             continue
         _seen_names.add(name)
@@ -115,6 +146,8 @@ def _extract_configuration_items(
         if not qty or not qty.replace(".", "").isdigit():
             qty = "1"
         remark = _classify_config_item(name)
+        if _is_noise_config_item(name, remark):
+            continue
         parsed_items.append((name, unit, qty, remark))
 
     # ── 兜底：关键词匹配提取（仅在结构化结果不足时）──
@@ -133,11 +166,11 @@ def _extract_configuration_items(
                 normalized,
             )
             if match:
-                name = match.group("name").strip(" ：:")
+                name = _normalize_config_item_name(match.group("name").strip(" ：:"))
                 qty = match.group("qty")
                 unit = match.group("unit") or "项"
             else:
-                name = normalized.strip(" ：:")
+                name = _normalize_config_item_name(normalized.strip(" ：:"))
                 qty = "1"
                 unit = "项"
 
@@ -145,6 +178,8 @@ def _extract_configuration_items(
                 continue
 
             remark = _classify_config_item(name)
+            if _is_noise_config_item(name, remark):
+                continue
             parsed_items.append((name, unit, qty, remark))
 
     config_scope = _extract_package_configuration_scope_text(pkg, tender_raw)
@@ -180,11 +215,11 @@ def _extract_configuration_items(
                     normalized,
                 )
                 if match:
-                    name = match.group("name").strip(" ：:")
+                    name = _normalize_config_item_name(match.group("name").strip(" ：:"))
                     qty = match.group("qty")
                     unit = match.group("unit")
                 else:
-                    name = normalized.strip(" ：:")
+                    name = _normalize_config_item_name(normalized.strip(" ：:"))
                     qty = "1"
                     unit = "项"
 
@@ -192,13 +227,51 @@ def _extract_configuration_items(
                     continue
 
                 remark = _classify_config_item(name)
+                if _is_noise_config_item(name, remark):
+                    continue
                 parsed_items.append((name, unit, qty, remark))
 
+        flat_scope = " ".join(
+            _normalize_requirement_line(line)
+            for line in config_scope.splitlines()
+            if _normalize_requirement_line(line)
+        )
+        flat_scope = re.sub(
+            rf"设备总台数\s*[:：;]?\s*\d+(?:\.\d+)?\s*(?:{unit_pattern})",
+            " ",
+            flat_scope,
+        )
+        flat_scope = re.sub(r"如有多个配置请另行加行。?", " ", flat_scope)
+        flat_scope = re.sub(r"配置\s*\d+\s*[:：]?", " ", flat_scope)
+        flat_scope = re.sub(
+            rf"(?P<name>[A-Za-z0-9\u4e00-\u9fa5（）()/+.\-\s]{{2,40}}?)\s*(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>{unit_pattern})",
+            lambda match: (
+                f"{_normalize_config_item_name(match.group('name'))}|{match.group('qty')}|{match.group('unit')}||"
+            ),
+            flat_scope,
+        )
+        for token in [part for part in flat_scope.split("||") if part.strip()]:
+            pieces = [part.strip() for part in token.split("|") if part.strip()]
+            if len(pieces) != 3:
+                continue
+            name, qty, unit = pieces
+            remark = _classify_config_item(name)
+            if _is_noise_config_item(name, remark):
+                continue
+            parsed_items.append((name, unit, qty, remark))
+
     # 智能去重：基于 token Jaccard 相似度而非简单子串匹配
+    parsed_items.sort(
+        key=lambda item: (
+            item[1] == "项",
+            item[2] in {"", "1"} and item[1] == "项",
+            -len(item[0]),
+        )
+    )
     deduped: list[tuple[str, str, str, str]] = []
     deduped_token_sets: list[set[str]] = []
     for item in parsed_items:
-        norm_name = re.sub(r"[\s，,。；;：:]+$", "", item[0]).strip()
+        norm_name = _normalize_config_item_name(re.sub(r"[\s，,。；;：:]+$", "", item[0]).strip())
         if not norm_name:
             continue
         item_tokens = _config_dedup_tokens(norm_name)
@@ -214,7 +287,7 @@ def _extract_configuration_items(
                 break
         if is_dup:
             continue
-        deduped.append(item)
+        deduped.append((norm_name, item[1], item[2], item[3]))
         deduped_token_sets.append(item_tokens)
 
     # Config pollution cleaning — remove non-config items that leaked through boundary detection
@@ -358,7 +431,11 @@ def _profile_config_items(product_profile: dict[str, Any] | None) -> list[tuple[
     # 从 technical_specs 补充可能的配置项（如果 config_items 不够丰富）
     tech_specs = product_profile.get("technical_specs") or {}
     existing_names = {item[0].strip() for item in parsed}
-    _CONFIG_HINT_KEYS = ("配置", "配备", "含", "包含", "包括", "标配", "选配", "附件")
+    _CONFIG_HINT_KEYS = (
+        "配置", "配备", "含", "包含", "包括", "标配", "选配", "附件",
+        "主机", "模块", "工作站", "软件", "显示器", "打印机", "数据线",
+        "电源线", "支架", "台车", "说明书", "合格证", "保修卡", "装箱单",
+    )
     for key, val in tech_specs.items():
         val_str = str(val)
         if any(hint in key for hint in _CONFIG_HINT_KEYS) or any(hint in val_str for hint in _CONFIG_HINT_KEYS):
@@ -381,6 +458,7 @@ def _profile_config_items(product_profile: dict[str, Any] | None) -> list[tuple[
     return _clean_config_items(parsed)
 
 def _is_main_device_item(name: str, pkg: ProcurementPackage, product: Any = None) -> bool:
+    """判断配置项是否属于主设备。"""
     text = _as_text(name).strip()
     if not text:
         return False
@@ -493,6 +571,7 @@ def _is_standard_config(name: str) -> bool:
 
 
 def _infer_config_usage(name: str) -> str:
+    """推断配置项的用途。"""
     n = name.strip()
 
     if any(k in n for k in ("主机", "整机", "检测主机", "分析主机", "检测单元", "核心模块")):
@@ -517,6 +596,7 @@ def _infer_config_usage(name: str) -> str:
 
 
 def _infer_config_role(name: str, product_name: str) -> str:
+    """推断配置项在方案中的角色。"""
     n = name.strip()
 
     if any(k in n for k in ("显示器",)):
@@ -551,7 +631,9 @@ def _build_main_parameter_table(
     evidence_result: dict[str, Any] | None = None,
     product_profile: dict[str, Any] | None = None,
 ) -> str:
+    """构建主参数表。"""
     def _guess_source_hint(text: str) -> str:
+        """推断来源提示文本。"""
         t = _safe_text(text, "")
         if any(k in t for k in ("注册证", "备案凭证", "说明书", "标签", "授权文件")):
             return "注册证/备案凭证/说明书/标签/授权文件"
@@ -562,6 +644,7 @@ def _build_main_parameter_table(
         return "产品说明书/彩页/厂家参数表"
 
     def _has_real_evidence(row: dict[str, Any]) -> bool:
+        """判断是否存在有效证据。"""
         return bool(_safe_text(row.get("bidder_evidence"), "")) or bool(
             _safe_text(row.get("bidder_evidence_source"), "")
         ) or bool(_safe_text(row.get("evidence_ref"), ""))
@@ -694,6 +777,7 @@ def _build_response_checklist_table(
     total_requirements: int,
     requirement_rows: list[dict[str, Any]] | None = None,
 ) -> str:
+    """构建响应核对表。"""
     real_response_count = 0
     high_mapping_count = 0
     weak_mapping_count = 0
@@ -758,6 +842,7 @@ def _build_evidence_mapping_table(
     requirement_rows: list[dict[str, Any]],
     total_requirements: int,
 ) -> str:
+    """构建证据映射表。"""
     lines = [
         "### （四）技术条款证据映射表",
         "| 序号 | 技术参数项 | 映射状态 | 证据来源 | 原文片段 | 应用位置 |",

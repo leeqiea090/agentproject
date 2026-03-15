@@ -5,6 +5,7 @@ import app.services.tender_workflow.classification as _classification
 import app.services.tender_workflow.product_facts as _product_facts
 
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -245,6 +246,7 @@ def _resolve_bidder_evidence(
     products: dict[str, ProductSpecification],
     selected_packages: list[str],
 ) -> tuple[bool, str, str]:
+    """解析并返回投标侧证据内容。"""
     normalized = _safe_text(requirement)
 
     if company and _contains_any(normalized, ("营业执照", "许可证", "资质")):
@@ -364,6 +366,7 @@ def _build_evidence_bindings(
     normalized_result: dict[str, Any] | None = None,
     product_fact_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """构建证据绑定。"""
     products = products or {}
     selected_package_ids = selected_packages or [pkg.package_id for pkg in tender.packages]
     normalized_result = normalized_result or {}

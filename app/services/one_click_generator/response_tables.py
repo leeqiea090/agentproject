@@ -34,7 +34,20 @@ _STRUCTURED_NUMERIC_VALUE_PATTERN = re.compile(
 )
 _EMPTYISH_TEXT_VALUES = {"", "none", "null", "nan", "n/a"}
 
+
+def _normalized_requirement_category(value: Any) -> str:
+    """把枚举或枚举字符串统一收敛成裸分类值。"""
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        value = getattr(value, "value")
+    text = _safe_text(value, "")
+    if text.startswith("ClauseCategory."):
+        return text.split(".", 1)[1].strip()
+    return text
+
 def __reexport_all(module) -> None:
+    """将指定模块的公开成员重新导出到当前命名空间。"""
     for name, value in vars(module).items():
         if name.startswith("__"):
             continue
@@ -45,6 +58,7 @@ for _module in (_common, _evidence_binder, _requirement_processor,):
 
 del _module
 def _build_response_commitment(req_key: str, req_val: str) -> str:
+    """构建响应承诺。"""
     key = _markdown_cell(req_key)
     value = _markdown_cell(req_val)
     if any(marker in value for marker in _HARD_REQUIREMENT_MARKERS):
@@ -53,6 +67,7 @@ def _build_response_commitment(req_key: str, req_val: str) -> str:
 
 
 def _format_payment_execution_line(payment: str) -> str:
+    """格式化付款执行行。"""
     if payment == "按招标文件及合同约定执行":
         return "6. 商务执行：付款方式按招标文件及合同约定执行。"
     return f"6. 商务执行：付款方式按“{payment}”执行。"
@@ -245,7 +260,7 @@ def _structured_requirements_for_package(
         if _safe_text(requirement.get("package_id"), "") != package_id:
             continue
         # 始终排除 noise 类别
-        req_category = _safe_text(requirement.get("category"), "")
+        req_category = _normalized_requirement_category(requirement.get("category"))
         if req_category == "noise":
             continue
         if category_filter:
@@ -259,6 +274,7 @@ def _structured_match_indexes(
     evidence_result: dict[str, Any] | None,
     package_id: str,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """建立结构化匹配结果的按 ID 和参数名索引。"""
     by_id: dict[str, dict[str, Any]] = {}
     by_param: dict[str, dict[str, Any]] = {}
     if not evidence_result:
@@ -282,6 +298,7 @@ def _lookup_profile_response_value(
     product_profile: dict[str, Any] | None,
     parameter_name: str,
 ) -> str:
+    """查找画像响应值。"""
     if not product_profile or not parameter_name:
         return ""
 
@@ -333,6 +350,7 @@ def _format_structured_bidder_evidence(
     req_key: str,
     response: str,
 ) -> tuple[str, str, Any]:
+    """格式化structured投标侧证据。"""
     if not match:
         return "", "", None
 
@@ -358,6 +376,7 @@ def _format_structured_bidder_evidence(
 
 
 def _is_usable_requirement_value(value: str) -> bool:
+    """判断可用需求值。"""
     text = _safe_text(value, "")
     if not text:
         return True
@@ -367,6 +386,7 @@ def _is_usable_requirement_value(value: str) -> bool:
 
 
 def _normalized_optional_text(value: Any, default: str = "") -> str:
+    """返回可选文本。"""
     if value is None:
         return default
     text = str(value).strip()
@@ -387,6 +407,7 @@ _SOFT_RESPONSE_MARKERS = (
 )
 
 def _response_kind(value: Any) -> str:
+    """判断响应值属于待补、软响应还是实值类型。"""
     text = _normalized_optional_text(value, "")
     if not text:
         return "pending"
@@ -417,6 +438,7 @@ def _response_kind(value: Any) -> str:
 
 
 def _has_real_bidder_response(value: Any) -> bool:
+    """判断是否存在有效投标侧响应。"""
     return _response_kind(value) == "real"
 
 def _mapping_confidence_for_row(
@@ -425,6 +447,7 @@ def _mapping_confidence_for_row(
     req_val: str,
     tender_quote: str,
 ) -> str:
+    """返回行的置信度。"""
     quote = _as_text(tender_quote)
     if not quote:
         return "none"
@@ -481,6 +504,7 @@ def _row_is_usable_for_package(
     tender_quote: str = "",
     bidder_quote: str = "",
 ) -> bool:
+    """判断包件的行可用。"""
     if _is_bad_requirement_name(req_key):
         return False
     if not _is_usable_requirement_value(req_val):
@@ -523,6 +547,133 @@ def _resolve_structured_response(
     return _PENDING_BIDDER_RESPONSE
 
 
+_GENERIC_STRUCTURED_ROW_KEYS = {
+    "技术参数",
+    "技术参数与性能要求",
+    "技术要求",
+    "性能要求",
+    "参数要求",
+    "技术指标",
+}
+_FALLBACK_TECHNICAL_CATEGORIES = {
+    "technical_requirement",
+    "config_requirement",
+}
+
+
+def _requirement_row_signature(row: dict[str, Any]) -> str:
+    """为需求行构造去重签名。"""
+    key = _safe_text(row.get("key") or row.get("param_name"), "")
+    requirement = _safe_text(row.get("requirement") or row.get("value"), "")
+    return f"{key}::{requirement}"
+
+
+def _is_coarse_structured_row(row: dict[str, Any]) -> bool:
+    """识别只有总括标题、没有原子参数颗粒度的结构化行。"""
+    key = _safe_text(row.get("key") or row.get("param_name"), "")
+    requirement = _safe_text(row.get("requirement") or row.get("value"), "")
+    if key in _GENERIC_STRUCTURED_ROW_KEYS:
+        return True
+    return bool(re.match(r"^(?:\d+(?:\.\d+)*)\s+", requirement))
+
+
+def _merge_requirement_rows(
+    primary_rows: list[dict[str, Any]],
+    fallback_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """合并结构化与原文兜底行，优先保留结构化精细行。"""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in [*primary_rows, *fallback_rows]:
+        signature = _requirement_row_signature(row)
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        merged.append(row)
+    return merged
+
+
+def _fallback_requirement_category(req_key: str, req_val: str) -> str:
+    """对原文兜底行重新分类，避免服务/合规条款混入技术表。"""
+    return _normalized_requirement_category(_classify_clause_category(req_key, req_val))
+
+
+def _fallback_requirement_matches_category(req_category: str, category_filter: str | None) -> bool:
+    """判断原文兜底行是否应该进入当前表格。"""
+    if not req_category or req_category == "noise":
+        return False
+    if category_filter:
+        return req_category == category_filter
+    return req_category in _FALLBACK_TECHNICAL_CATEGORIES
+
+
+def _build_fallback_requirement_rows(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    product: Any = None,
+    *,
+    category_filter: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """直接基于包范围原文回退生成需求行。"""
+    requirements = _effective_requirements(pkg, tender_raw)
+    package_scoped_raw = _extract_package_technical_scope_text(pkg, tender_raw)
+    rows: list[dict[str, Any]] = []
+
+    for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
+        req_category = _fallback_requirement_category(req_key, req_val)
+        if not _fallback_requirement_matches_category(req_category, category_filter):
+            continue
+        if (
+            any(token in req_key for token in ("装箱配置", "配置清单", "标准配置"))
+            and any(marker in req_val for marker in ("详见招标文件", "详见采购文件", "按招标文件", "按采购文件"))
+        ):
+            continue
+        source, quote, mapped = _extract_evidence_snippet(package_scoped_raw, req_key, req_val, tender_raw)
+        response = _build_response_value(req_val, req_key=req_key, product=product)
+        has_real_response = _has_real_bidder_response(response)
+
+        bidder_evidence = ""
+        bidder_source = ""
+        if has_real_response and product is not None:
+            bidder_source = "产品参数库"
+            bidder_evidence = f"{req_key}：{response}"
+
+        if not _row_is_usable_for_package(
+                pkg,
+                req_key,
+                req_val,
+                tender_quote=quote,
+                bidder_quote=bidder_evidence,
+        ):
+            continue
+
+        mapping_confidence = _mapping_confidence_for_row(pkg, req_key, req_val, quote)
+
+        rows.append(
+            {
+                "requirement_id": "",
+                "key": req_key,
+                "requirement": req_val,
+                "response": response,
+                "category": req_category,
+                "package_id": pkg.package_id,
+                "evidence_source": source or "招标原文",
+                "evidence_quote": quote,
+                "mapping_confidence": mapping_confidence,
+                "mapped": mapping_confidence == "high",
+                "has_real_response": has_real_response,
+                "bidder_evidence": bidder_evidence,
+                "bidder_evidence_source": bidder_source,
+                "bidder_evidence_page": None,
+                "source_page": None,
+                "tender_quote": quote,
+                "deviation_status": "待核实",
+            }
+        )
+
+    return rows, len(requirements)
+
+
 def _build_requirement_rows(
     pkg: ProcurementPackage,
     tender_raw: str,
@@ -535,6 +686,7 @@ def _build_requirement_rows(
     tender_bindings: dict[str, Any] | None = None,
     bid_bindings: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
+    """构建需求行。"""
     structured_requirements = _structured_requirements_for_package(
         normalized_result, pkg.package_id, category_filter=category_filter,
     )
@@ -542,7 +694,7 @@ def _build_requirement_rows(
         match_by_id, match_by_param = _structured_match_indexes(evidence_result, pkg.package_id)
         rows: list[dict[str, Any]] = []
         for requirement in structured_requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
-            req_category = _safe_text(requirement.get("category"), "technical_requirement")
+            req_category = _normalized_requirement_category(requirement.get("category")) or "technical_requirement"
             req_key = _safe_text(
                 requirement.get("param_name") or requirement.get("parameter_name"),
                 "",
@@ -660,64 +812,36 @@ def _build_requirement_rows(
                     ),
                 }
             )
-        return rows, len(structured_requirements)
+        total_structured = len(structured_requirements)
+        if category_filter is None:
+            trimmed_rows = [row for row in rows if not _is_coarse_structured_row(row)]
+            need_raw_enrichment = (
+                len(trimmed_rows) != len(rows)
+                or len(trimmed_rows) < 6
+                or len(trimmed_rows) + 2 < total_structured
+            )
+            if need_raw_enrichment:
+                fallback_rows, fallback_total = _build_fallback_requirement_rows(
+                    pkg,
+                    tender_raw,
+                    product=product,
+                    category_filter=category_filter,
+                )
+                if fallback_rows:
+                    rows = _merge_requirement_rows(trimmed_rows, fallback_rows)
+                    return rows, max(total_structured, fallback_total, len(rows))
+            rows = trimmed_rows or rows
+        return rows, total_structured
 
-    requirements = _effective_requirements(pkg, tender_raw)
-    package_scoped_raw = _extract_package_technical_scope_text(pkg, tender_raw)
-    rows: list[dict[str, Any]] = []
-
-    for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
-        if (
-            any(token in req_key for token in ("装箱配置", "配置清单", "标准配置"))
-            and any(marker in req_val for marker in ("详见招标文件", "详见采购文件", "按招标文件", "按采购文件"))
-        ):
-            continue
-        source, quote, mapped = _extract_evidence_snippet(package_scoped_raw, req_key, req_val, tender_raw)
-        response = _build_response_value(req_val, req_key=req_key, product=product)
-        has_real_response = _has_real_bidder_response(response)
-
-        bidder_evidence = ""
-        bidder_source = ""
-        if has_real_response and product is not None:
-            bidder_source = "产品参数库"
-            bidder_evidence = f"{req_key}：{response}"
-
-        if not _row_is_usable_for_package(
-                pkg,
-                req_key,
-                req_val,
-                tender_quote=quote,
-                bidder_quote=bidder_evidence,
-        ):
-            continue
-
-        mapping_confidence = _mapping_confidence_for_row(pkg, req_key, req_val, quote)
-
-        rows.append(
-            {
-                "requirement_id": "",
-                "key": req_key,
-                "requirement": req_val,
-                "response": response,
-                "category": category_filter or "technical_requirement",
-                "package_id": pkg.package_id,
-                "evidence_source": source or "招标原文",
-                "evidence_quote": quote,
-                "mapping_confidence": mapping_confidence,
-                "mapped": mapping_confidence == "high",
-                "has_real_response": has_real_response,
-                "bidder_evidence": bidder_evidence,
-                "bidder_evidence_source": bidder_source,
-                "bidder_evidence_page": None,
-                "source_page": None,
-                "tender_quote": quote,
-                "deviation_status": "待核实",
-            }
-        )
-
-    return rows, len(requirements)
+    return _build_fallback_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        category_filter=category_filter,
+    )
 
 def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
+    """返回证据标签。"""
     text = f"{_as_text(req_key)} {_as_text(requirement)}"
 
     if any(k in text for k in ("注册证", "备案凭证", "合格证", "说明书", "标签", "授权文件")):
@@ -735,6 +859,7 @@ def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
     return "【待补证：说明书/彩页/厂家参数表】"
 
 def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
+    """归一化deviation状态。"""
     text = _normalized_optional_text(raw_value, "")
     if not has_real:
         return "【待填写：无偏离/正偏离/负偏离】"
@@ -747,6 +872,7 @@ def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
 
 
 def _display_bidder_response(raw_value: Any) -> str:
+    """格式化投标侧响应展示文本。"""
     text = _normalized_optional_text(raw_value, "")
     if not text:
         return "【待填写：实际响应值】"
@@ -763,6 +889,7 @@ def _display_bidder_response(raw_value: Any) -> str:
     return text
 
 def _display_model_cell(model_text: str, row_index: int) -> str:
+    """返回模型单元格。"""
     model_text = _safe_text(model_text, "")
     if model_text:
         return model_text if row_index == 1 else "同上"
@@ -775,13 +902,17 @@ def _build_deviation_table(
     total_requirements,
     product=None,
 ) -> str:
+    """构建偏离表。"""
     def _safe(v):
+        """安全地处理安全。"""
         return _normalized_optional_text(v, "")
 
     def _md(v):
+        """清理并转义 Markdown 单元格内容。"""
         return _safe(v).replace("|", "/")
 
     def _normalize_dev(raw_value, has_real=False):
+        """归一化dev。"""
         return _normalize_deviation_status(raw_value, has_real=has_real)
 
     p_model = ""

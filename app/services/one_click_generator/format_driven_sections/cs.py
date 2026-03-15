@@ -51,10 +51,12 @@ _CS_DETAILED_LABELS = [
 
 
 def _norm_header(text: str) -> str:
+    """规范化表头文本。"""
     return "".join(str(text or "").split())
 
 
 def _tidy_extracted_text(text: str) -> str:
+    """清理抽取后的文本。"""
     value = _clean_text(text)
     if not value:
         return ""
@@ -66,6 +68,7 @@ def _tidy_extracted_text(text: str) -> str:
 
 
 def _tpl_header_titles(tpl) -> list[str]:
+    """返回模板中的表头标题列表。"""
     columns = list(getattr(tpl, "columns", None) or [])
     headers = [_clean_text(getattr(col, "title", "")) for col in columns]
     headers = [header for header in headers if header]
@@ -73,6 +76,7 @@ def _tpl_header_titles(tpl) -> list[str]:
 
 
 def _select_cs_headers(tender, attr_name: str, fallback_headers: list[str]) -> list[str]:
+    """选择CS 格式表头。"""
     tpl = getattr(tender, attr_name, None)
     headers = _tpl_header_titles(tpl)
     if len(headers) >= 2:
@@ -93,6 +97,7 @@ def _render_cs_row(
     invalid_item: str = "",
     self_check_placeholder: str = "【待填写：符合/不符合】",
 ) -> list[str]:
+    """渲染CS 格式行。"""
     row: list[str] = []
     for header in headers:
         norm = _norm_header(header)
@@ -124,6 +129,7 @@ def _render_cs_row(
 
 
 def _normalize_dense_text(text: str) -> str:
+    """归一化紧凑文本，便于匹配。"""
     text = text or ""
     text = re.sub(r"-\s*第\s*\d+\s*页\s*-", " ", text)
     text = re.sub(r"\s+", " ", text)
@@ -131,6 +137,7 @@ def _normalize_dense_text(text: str) -> str:
 
 
 def _dedupe_consecutive_lines(lines: list[str]) -> list[str]:
+    """去除连续重复的文本行。"""
     result: list[str] = []
     previous = ""
     for raw in lines:
@@ -145,6 +152,7 @@ def _dedupe_consecutive_lines(lines: list[str]) -> list[str]:
 
 
 def _looks_like_cs_title_fragment(line: str, title: str) -> bool:
+    """判断likeCS 格式标题fragment。"""
     compact = _clean_text(line)
     if not compact:
         return False
@@ -166,6 +174,7 @@ def _looks_like_cs_title_fragment(line: str, title: str) -> bool:
 
 
 def _clean_template_block(block: str, title: str) -> str:
+    """清理模板文本块。"""
     body = re.sub(r"-\s*第\s*\d+\s*页\s*-", "", block or "")
     body = body.strip()
     if not body:
@@ -194,6 +203,7 @@ def _clean_template_block(block: str, title: str) -> str:
 
 
 def _extract_cs_format_block(tender_raw: str) -> str:
+    """提取CS 格式格式块。"""
     text = tender_raw or ""
     if not text:
         return ""
@@ -224,6 +234,7 @@ def _extract_cs_format_block(tender_raw: str) -> str:
 
 
 def _extract_cs_template_blocks(tender_raw: str) -> dict[str, str]:
+    """提取CS 格式模板文本块。"""
     block = _extract_cs_format_block(tender_raw)
     if not block:
         return {}
@@ -249,11 +260,13 @@ def _extract_cs_template_blocks(tender_raw: str) -> dict[str, str]:
 
 
 def _build_cs_template_section(tender_raw: str, title: str, fallback: str) -> str:
+    """构建CS 格式模板章节。"""
     blocks = _extract_cs_template_blocks(tender_raw)
     return blocks.get(title, fallback).strip()
 
 
 def _extract_cs_review_block(tender_raw: str, anchor_patterns: list[str], stop_patterns: list[str]) -> str:
+    """提取CS 格式评审块。"""
     text = _normalize_dense_text(tender_raw)
     if not text:
         return ""
@@ -280,6 +293,7 @@ def _extract_cs_review_block(tender_raw: str, anchor_patterns: list[str], stop_p
 
 
 def _extract_contract_package_block(block: str, package_id: str) -> str:
+    """提取contract包件文本块。"""
     text = block or ""
     if not text:
         return ""
@@ -297,11 +311,13 @@ def _extract_contract_package_block(block: str, package_id: str) -> str:
 
 
 def _spaced_keyword_pattern(text: str) -> str:
+    """把关键词转换成允许夹空格的正则表达式。"""
     chars = [re.escape(ch) for ch in re.sub(r"\s+", "", text or "") if ch.strip()]
     return r"\s*".join(chars) if chars else ""
 
 
 def _extract_named_segments(text: str, markers: list[str]) -> list[tuple[str, str]]:
+    """提取namedsegments。"""
     block = text or ""
     hits: list[tuple[str, int]] = []
     cursor = 0
@@ -321,6 +337,7 @@ def _extract_named_segments(text: str, markers: list[str]) -> list[tuple[str, st
 
 
 def _extract_cs_qualification_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
+    """提取CS 格式资格审查行。"""
     block = _extract_cs_review_block(
         tender_raw,
         anchor_patterns=[r"表一资格性审查表[:：]?\s*表一资格性审查表[:：]?", r"表一资格性审查表[:：]?"],
@@ -361,6 +378,7 @@ def _extract_cs_qualification_rows(pkg, tender_raw: str) -> list[tuple[str, str]
 
 
 def _build_cs_qualification_review_section(tender, packages, tender_raw: str) -> str:
+    """构建CS 格式资格审查章节。"""
     headers = _select_cs_headers(
         tender,
         "qualification_review_table",
@@ -389,6 +407,7 @@ def _build_cs_qualification_review_section(tender, packages, tender_raw: str) ->
 
 
 def _extract_cs_compliance_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
+    """提取CS 格式符合性审查行。"""
     block = _extract_cs_review_block(
         tender_raw,
         anchor_patterns=[r"表二符合性审查表[:：]?\s*表二符合性审查表[:：]?", r"表二符合性审查表[:：]?"],
@@ -406,6 +425,7 @@ def _extract_cs_compliance_rows(pkg, tender_raw: str) -> list[tuple[str, str]]:
 
 
 def _build_cs_compliance_review_section(tender, packages, tender_raw: str) -> str:
+    """构建CS 格式符合性审查章节。"""
     headers = _select_cs_headers(
         tender,
         "compliance_review_table",
@@ -434,6 +454,7 @@ def _build_cs_compliance_review_section(tender, packages, tender_raw: str) -> st
 
 
 def _extract_cs_detailed_rows(pkg, packages, tender_raw: str) -> list[tuple[str, str]]:
+    """提取CS 格式详细行。"""
     block = _extract_cs_review_block(
         tender_raw,
         anchor_patterns=[r"表三详细评审表[:：]?\s*表三详细评审表[:：]?", r"表三详细评审表[:：]?"],
@@ -484,6 +505,7 @@ def _extract_cs_detailed_rows(pkg, packages, tender_raw: str) -> list[tuple[str,
 
 
 def _build_cs_detailed_review_section(tender, packages, tender_raw: str) -> str:
+    """构建CS 格式详细评审章节。"""
     headers = _select_cs_headers(
         tender,
         "detailed_review_table",
@@ -523,6 +545,7 @@ def _build_cs_detailed_review_section(tender, packages, tender_raw: str) -> str:
 
 
 def _extract_cs_invalid_items(tender_raw: str) -> list[str]:
+    """提取CS 格式无效项。"""
     text = _normalize_dense_text(tender_raw)
     if not text:
         return []
@@ -579,6 +602,7 @@ def _extract_cs_invalid_items(tender_raw: str) -> list[str]:
 
 
 def _build_cs_invalid_bid_checklist(tender, tender_raw: str) -> str:
+    """构建CS 格式无效投标checklist。"""
     headers = _select_cs_headers(tender, "invalid_bid_table", ["序号", "无效情形", "自检结果", "备注"])
     items = _extract_cs_invalid_items(tender_raw) or [
         "资格性审查和符合性审查中任意一项未通过的，按无效投标处理。",
@@ -601,6 +625,7 @@ def _build_cs_invalid_bid_checklist(tender, tender_raw: str) -> str:
 
 
 def _default_cs_compliance_rows() -> list[tuple[str, str]]:
+    """返回默认CS 格式符合性审查行。"""
     return [
         ("投标报价", "投标报价（包括分项报价，投标总报价）只能有一个有效报价且不超过采购预算或最高限价，投标报价不得缺项、漏项。"),
         ("投标文件规范性、符合性", "投标文件的签署、盖章、涂改、删除、插字、公章使用等符合招标文件要求；格式、文字、目录等符合招标文件要求或对投标无实质性影响。"),
@@ -612,6 +637,7 @@ def _default_cs_compliance_rows() -> list[tuple[str, str]]:
 
 
 def _extract_cs_requirement_rows(pkg, tender_raw: str) -> list[dict]:
+    """提取CS 格式需求行。"""
     block = _find_package_block(tender_raw, pkg.package_id)
     if not block:
         return [
@@ -690,6 +716,7 @@ def _build_cs_pkg_deviation_table(
     evidence_result: dict | None = None,
     product_profile: dict | None = None,
 ) -> str:
+    """构建CS 格式包件偏离表。"""
     requirement_rows, total_requirements = _build_requirement_rows(
         pkg,
         tender_raw,
@@ -734,6 +761,7 @@ def _build_cs_pkg_deviation_table(
 
 
 def _extract_cs_service_points(pkg, tender_raw: str) -> list[str]:
+    """提取CS 格式服务要点。"""
     block = _find_package_block(tender_raw, pkg.package_id)
     if not block:
         return []
@@ -774,6 +802,7 @@ def _structured_cs_service_points(
     evidence_result: dict | None = None,
     product_profile: dict | None = None,
 ) -> list[str]:
+    """从结构化需求中组装 CS 服务要点。"""
     if not normalized_result:
         return []
     rows, _ = _build_requirement_rows(
@@ -808,6 +837,7 @@ def _build_cs_service_section(
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
 ) -> str:
+    """构建CS 格式服务章节。"""
     parts: list[str] = []
 
     for pkg in packages:
@@ -884,6 +914,7 @@ def _build_cs_service_section(
 
 
 def _suggest_cs_qualification_response(item_name: str, requirement: str = "") -> str:
+    """生成建议CS 格式资格审查响应。"""
     haystack = _tidy_extracted_text(f"{item_name} {requirement}")
     if any(token in haystack for token in ("中华人民共和国政府采购法》第二十二条", "资格承诺函")):
         return "十一、资格承诺函；营业执照或主体资格证明文件"
@@ -897,6 +928,7 @@ def _suggest_cs_qualification_response(item_name: str, requirement: str = "") ->
 
 
 def _suggest_cs_compliance_response(item_name: str, requirement: str = "") -> str:
+    """生成建议CS 格式符合性审查响应。"""
     haystack = _tidy_extracted_text(f"{item_name} {requirement}")
     if "投标报价" in haystack:
         return "二、首轮报价表（或电子投标客户端报价部分）；三、分项报价表"
@@ -914,6 +946,7 @@ def _suggest_cs_compliance_response(item_name: str, requirement: str = "") -> st
 
 
 def _suggest_cs_detailed_response_location(item_name: str, rule: str = "") -> str:
+    """生成建议CS 格式详细响应location。"""
     haystack = _tidy_extracted_text(f"{item_name} {rule}")
     if "分值构成" in haystack:
         return "附三、详细评审响应对照表（本表自评说明）"
@@ -933,6 +966,7 @@ def _suggest_cs_detailed_response_location(item_name: str, rule: str = "") -> st
 
 
 def _suggest_cs_detailed_response_note(item_name: str, rule: str = "") -> str:
+    """生成建议CS 格式详细响应备注。"""
     haystack = _tidy_extracted_text(f"{item_name} {rule}")
     if "分值构成" in haystack:
         return "按招标文件评分办法确认分值构成，本项一般无需单独举证。"
@@ -961,6 +995,7 @@ def _build_cs_sections(
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
 ) -> list:
+    """构建CS 格式章节。"""
     packages = active_packages or tender.packages
     sections = []
 

@@ -1,7 +1,6 @@
 """Word 文档生成服务（基于 python-docx）"""
 import re
 from pathlib import Path
-from datetime import datetime
 from typing import Iterable
 
 from docx import Document
@@ -10,7 +9,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-from app.schemas import BidDocumentSection, TenderDocument, CompanyProfile
+from app.schemas import BidDocumentSection, TenderDocument, CompanyProfile, DraftLevel
 
 
 def _set_cell_bg(cell, hex_color: str) -> None:
@@ -102,6 +101,7 @@ def _heading_body_fallback_text(title: str) -> str:
 
 
 def _append_heading_body_fallback(doc: Document, title: str) -> None:
+    """在缺少正文时追加标题兜底内容。"""
     _add_paragraph(doc, _heading_body_fallback_text(title))
 
 
@@ -110,12 +110,45 @@ def _normalize_title(text: str) -> str:
     return re.sub(r"[\s#`*:：、（）()\-—_]", "", text or "")
 
 def _normalize_cover_placeholder(value: str, label: str) -> str:
+    """归一化封面占位符文本。"""
     text = (value or "").strip()
     if not text:
         return f"【待填写：{label}】"
     if text.startswith("[") and text.endswith("]"):
         return f"【待填写：{label}】"
     return text
+
+
+def _is_internal_draft(draft_level: DraftLevel | str | None) -> bool:
+    """判断当前稿件是否为内部底稿。"""
+    if isinstance(draft_level, DraftLevel):
+        return draft_level == DraftLevel.internal_draft
+    return str(draft_level or "").strip() == DraftLevel.internal_draft.value
+
+
+def _resolve_document_date(company: CompanyProfile | None, label: str = "日期") -> str:
+    """生成封面可用的文档日期文本。"""
+    text = (getattr(company, "document_date", "") or "").strip() if company is not None else ""
+    if not text or "待填写" in text or "待补充" in text:
+        return f"【待填写：{label}】"
+    return text
+
+
+def _rewrite_cover_content_for_draft_level(content: str, draft_level: DraftLevel | str | None) -> str:
+    """按稿件级别改写封面文本。"""
+    if not _is_internal_draft(draft_level):
+        return content
+
+    replacements = {
+        "投 标 文 件": "投 标 底 稿",
+        "投标文件": "投标底稿",
+        "响 应 文 件": "响 应 底 稿",
+        "响应文件": "响应底稿",
+    }
+    rewritten = content
+    for source, target in replacements.items():
+        rewritten = rewritten.replace(source, target)
+    return rewritten
 
 
 def _clean_markdown_content(section_title: str, content: str) -> str:
@@ -159,7 +192,9 @@ def _clean_markdown_content(section_title: str, content: str) -> str:
 
 
 def _get_fixed_table_widths(header_cells: list[str]):
+    """按表头组合返回固定列宽配置。"""
     def _compact(text: str) -> str:
+        """压缩表头文本，便于匹配固定列宽模板。"""
         return re.sub(r"\s+", "", text or "")
 
     key = tuple(_compact(cell) for cell in header_cells)
@@ -203,6 +238,7 @@ def _get_fixed_table_widths(header_cells: list[str]):
 
 
 def _normalize_header_signature(cells: list[str]) -> tuple[str, ...]:
+    """归一化表头签名。"""
     return tuple(re.sub(r"[\s\r\n\t]+", "", cell or "") for cell in cells)
 
 
@@ -211,6 +247,7 @@ def _select_table_layout_widths(
     header_cells: list[str],
     section_title: str = "",
 ):
+    """选择表格布局使用的列宽。"""
     if tender is None:
         return None
 
@@ -249,6 +286,7 @@ def _select_table_layout_widths(
 
 
 def _set_repeat_table_header(row) -> None:
+    """设置 Word 表格表头在分页时重复显示。"""
     tr_pr = row._tr.get_or_add_trPr()
     existing = tr_pr.xpath("./w:tblHeader")
     if existing:
@@ -259,6 +297,7 @@ def _set_repeat_table_header(row) -> None:
 
 
 def _cell_alignment_for_header(header_text: str, *, is_header: bool) -> WD_ALIGN_PARAGRAPH:
+    """为表头和正文选择单元格对齐方式。"""
     if is_header:
         return WD_ALIGN_PARAGRAPH.CENTER
 
@@ -307,6 +346,7 @@ def _extract_outline_items(content: str) -> list[str]:
 
 
 def _markdown_heading_info(stripped: str) -> tuple[int, str] | None:
+    """解析 Markdown 标题级别和标题文本。"""
     if stripped.startswith(">"):
         stripped = re.sub(r"^>\s*", "", stripped)
     if stripped.startswith("### "):
@@ -366,11 +406,6 @@ def _insert_toc_field(paragraph, levels: str = "1-3") -> None:
     fld_sep.set(qn("w:fldCharType"), "separate")
     run._r.append(fld_sep)
 
-    # 占位显示文本（真正目录会在 Word 更新域后出现）
-    hint_run = paragraph.add_run("目录将在打开文档后自动更新；如未更新，请在 Word 中右键目录并选择“更新域”，或按 F9。")
-    hint_run.font.size = Pt(10.5)
-    hint_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
-
     # end
     run = paragraph.add_run()
     fld_end = OxmlElement("w:fldChar")
@@ -385,11 +420,6 @@ def _add_toc(doc: Document, sections: Iterable[BidDocumentSection]) -> None:
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(6)
     _insert_toc_field(p, levels="1-3")
-
-    tip = doc.add_paragraph()
-    tip_run = tip.add_run("提示：目录项生成后可直接点击跳转到对应章节。")
-    tip_run.font.size = Pt(9.5)
-    tip_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
 def _render_markdown_table(
     doc: Document,
@@ -577,9 +607,16 @@ def _set_document_style(doc: Document) -> None:
     section.right_margin = Cm(2.5)
 
 
-def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -> None:
+def _add_cover(
+    doc: Document,
+    tender: TenderDocument,
+    company: CompanyProfile,
+    *,
+    draft_level: DraftLevel | str | None = None,
+) -> None:
     """生成投标文件封面"""
     def _center_line(text: str, size: int, *, bold: bool = False) -> None:
+        """在封面中追加一行居中的文本。"""
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p.add_run(text)
@@ -591,7 +628,7 @@ def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -
 
     _center_line(tender.project_name or "【待填写：项目名称】", 18, bold=True)
     doc.add_paragraph()
-    _center_line("投 标 文 件", 24, bold=True)
+    _center_line("投 标 底 稿" if _is_internal_draft(draft_level) else "投 标 文 件", 24, bold=True)
     doc.add_paragraph()
     _center_line(f"招标编号：{tender.project_number or '【待填写：项目编号】'}", 14)
     doc.add_paragraph()
@@ -599,10 +636,11 @@ def _add_cover(doc: Document, tender: TenderDocument, company: CompanyProfile) -
     _center_line(f"投标单位：{_normalize_cover_placeholder(company.name, '投标人名称')}（盖章）", 14)
     _center_line(f"单位地址：{_normalize_cover_placeholder(company.address, '单位地址')}", 12)
     doc.add_paragraph()
-    _center_line(datetime.now().strftime("%Y年%m月%d日"), 12)
+    _center_line(_resolve_document_date(company), 12)
 
 
 def _is_cover_section(section: BidDocumentSection) -> bool:
+    """判断章节是否属于封面内容。"""
     title = (getattr(section, "section_title", "") or "").strip()
     if "封面" in title:
         return True
@@ -612,6 +650,7 @@ def _is_cover_section(section: BidDocumentSection) -> bool:
 
 
 def _detect_structure_mode_from_tender(tender=None, sections=None) -> str:
+    """识别文档应采用的章节结构模式。"""
     titles = [getattr(s, "section_title", "") or "" for s in (sections or [])]
     text = " ".join(
         [
@@ -632,6 +671,7 @@ def _detect_structure_mode_from_tender(tender=None, sections=None) -> str:
     return "unknown"
 
 def _default_zb_titles() -> list[str]:
+    """返回 ZB 模式下的默认章节标题。"""
     return [
         "一、投标函",
         "二、开标一览表",
@@ -649,6 +689,7 @@ def _default_zb_titles() -> list[str]:
 
 
 def _is_bad_zb_section_title(title: str) -> bool:
+    """判断标题是否属于应过滤的 ZB 异常章节。"""
     s = re.sub(r"\s+", "", title or "")
     if not s:
         return True
@@ -669,6 +710,7 @@ def _is_bad_zb_section_title(title: str) -> bool:
     return any(x in s for x in bad_words)
 
 def _is_probable_zb_template_title(title: str) -> bool:
+    """判断标题是否像 ZB 原模板章节。"""
     s = re.sub(r"\s+", "", title or "")
     if not s:
         return False
@@ -710,6 +752,7 @@ def _is_probable_zb_template_title(title: str) -> bool:
 
 
 def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
+    """判断招标文件自带标题列表是否可直接使用。"""
     exact_titles = [str(x).strip() for x in (exact_titles or []) if str(x).strip()]
     mode = _detect_structure_mode_from_tender(tender=tender)
 
@@ -734,6 +777,7 @@ def _usable_exact_titles(tender=None, exact_titles=None) -> bool:
 
 
 def _required_titles_for_tender(tender=None, sections=None) -> list[str]:
+    """计算当前招标文件必须保留的章节标题。"""
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
     if _usable_exact_titles(tender=tender, exact_titles=exact_titles):
         seen: set[str] = set()
@@ -756,6 +800,7 @@ def _required_titles_for_tender(tender=None, sections=None) -> list[str]:
             ]
 
             def _has_existing(*keywords: str) -> bool:
+                """判断当前章节列表中是否已经存在目标标题。"""
                 return any(any(keyword in title for keyword in keywords) for title in existing_titles)
 
             ordered_titles: list[str] = []
@@ -825,6 +870,7 @@ def _required_titles_for_tender(tender=None, sections=None) -> list[str]:
     return []
 
 def _backfill_required_sections(sections, tender=None):
+    """补齐缺失的必需章节占位内容。"""
     placeholder_map = {
         "二、报价书": "【待人工补齐：按招标文件原格式填写报价书】",
         "三、报价一览表": "【待人工补齐：按招标文件原格式填写报价一览表】",
@@ -910,6 +956,7 @@ def _backfill_required_sections(sections, tender=None):
     return filled
 
 def _assert_new_structure_only(sections, tender=None) -> None:
+    """校验结果中是否只保留新结构章节。"""
     titles = [
         (getattr(s, "section_title", "") or "").strip()
         for s in (sections or [])
@@ -997,6 +1044,8 @@ def build_bid_docx(
     tender: TenderDocument,
     company: CompanyProfile,
     output_path: Path,
+    *,
+    draft_level: DraftLevel | str | None = None,
 ) -> Path:
     """
     将投标文件各章节内容写入 Word (.docx) 文件。
@@ -1006,6 +1055,7 @@ def build_bid_docx(
         tender: 招标文件结构化数据
         company: 企业信息
         output_path: 输出 .docx 文件路径
+        draft_level: 稿件等级，internal_draft 时按底稿样式输出封面
 
     Returns:
         输出文件路径
@@ -1024,7 +1074,10 @@ def build_bid_docx(
 
     if render_sections and _is_cover_section(render_sections[0]):
         cover_section = render_sections[0]
-        cover_content = _clean_markdown_content(cover_section.section_title, cover_section.content)
+        cover_content = _rewrite_cover_content_for_draft_level(
+            _clean_markdown_content(cover_section.section_title, cover_section.content),
+            draft_level,
+        )
         rendered_cover = (
             _parse_and_render_markdown(doc, cover_content, tender=tender, section_title=cover_section.section_title)
             if cover_content else False
@@ -1035,7 +1088,7 @@ def build_bid_docx(
         if render_sections:
             doc.add_page_break()
     elif mode == "zb":
-        _add_cover(doc, tender, company)
+        _add_cover(doc, tender, company, draft_level=draft_level)
         if render_sections:
             doc.add_page_break()
 

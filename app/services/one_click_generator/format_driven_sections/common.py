@@ -49,6 +49,7 @@ __all__ = [
 ]
 
 def _extract_review_block(tender_raw: str, title_keywords: list[str], stop_keywords: list[str] | None = None) -> str:
+    """提取评审块。"""
     stop_keywords = stop_keywords or [
         "响应文件格式", "合同包", "采购包", "报价", "技术参数", "商务要求", "采购需求", "资格承诺函",
     ]
@@ -67,6 +68,7 @@ def _extract_review_block(tender_raw: str, title_keywords: list[str], stop_keywo
 
 
 def _extract_review_rows_from_block(block: str) -> list[str]:
+    """提取文本块中的评审行。"""
     if not block:
         return []
 
@@ -96,10 +98,12 @@ def _extract_review_rows_from_block(block: str) -> list[str]:
 
 
 def _clean_text(value) -> str:
+    """清理文本。"""
     return " ".join(str(value or "").replace("|", "/").split())
 
 
 def _md_table(headers: list[str], rows: list[list[str]]) -> str:
+    """返回表格。"""
     aligns = ["---:"] + ["---"] * (len(headers) - 1)
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -116,6 +120,7 @@ def _md_table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 def _row_to_cells(row) -> dict[str, str]:
+    """把模板行对象转换成统一的单元格字典。"""
     cells = {str(k): _clean_text(v) for k, v in (getattr(row, "cells", {}) or {}).items()}
     source_text = _clean_text(getattr(row, "source_text", ""))
     package_id = _clean_text(getattr(row, "package_id", ""))
@@ -127,6 +132,7 @@ def _row_to_cells(row) -> dict[str, str]:
 
 
 def _pick_template_rows(table, pkg=None) -> list[dict[str, str]]:
+    """挑选模板行。"""
     raw_rows = list(getattr(table, "rows", []) or [])
     if not raw_rows:
         return []
@@ -166,6 +172,7 @@ def _pick_template_rows(table, pkg=None) -> list[dict[str, str]]:
 
 
 def _extract_labeled_block(text: str, labels: list[str], stop_labels: list[str]) -> str:
+    """提取labeled文本块。"""
     text = text or ""
     stop_pat = "|".join(map(re.escape, stop_labels))
     for label in labels:
@@ -180,6 +187,7 @@ def _extract_labeled_block(text: str, labels: list[str], stop_labels: list[str])
 
 
 def _parse_named_rows(block: str, keys: list[str]) -> list[tuple[str, str]]:
+    """解析named行。"""
     text = "\n".join(_clean_text(x) for x in (block or "").splitlines() if _clean_text(x))
     if not text:
         return []
@@ -203,6 +211,7 @@ def _dedupe_named_rows(
     rows: list[tuple[str, str]],
     normalizer=None,
 ) -> list[tuple[str, str]]:
+    """去重named行。"""
     seen: set[str] = set()
     result: list[tuple[str, str]] = []
 
@@ -216,6 +225,7 @@ def _dedupe_named_rows(
 
 
 def _normalize_detailed_review_key(key: str) -> str:
+    """归一化详细评审键。"""
     key = _clean_text(key)
     key = key.replace("商务部分 ", "")
     key = key.replace("投标报价 ", "")
@@ -223,6 +233,7 @@ def _normalize_detailed_review_key(key: str) -> str:
 
 
 def _is_valid_invalid_item(text: str) -> bool:
+    """判断valid无效项。"""
     s = _clean_text(text)
     if not s or len(s) < 6:
         return False
@@ -261,6 +272,7 @@ def _is_valid_invalid_item(text: str) -> bool:
 
 
 def _normalize_number_text(value) -> str:
+    """归一化number文本。"""
     if value is None:
         return ""
     s = str(value).strip()
@@ -276,10 +288,12 @@ def _normalize_number_text(value) -> str:
 
 
 def _normalize_dense_text(text: str) -> str:
+    """归一化紧凑文本，便于匹配。"""
     return re.sub(r"\s+", " ", text or "").strip()
 
 
 def _extract_front_matter_scope(tender_raw: str) -> str:
+    """提取前置正文前部范围。"""
     text = tender_raw or ""
     if not text:
         return ""
@@ -352,6 +366,7 @@ def _extract_package_summary_rows(tender_raw: str) -> list[dict]:
 
 
 def _find_summary_row(tender_raw: str, package_id: str) -> dict | None:
+    """查找汇总行。"""
     for row in _extract_package_summary_rows(tender_raw):
         if row["package_id"] == str(package_id):
             return row
@@ -377,6 +392,7 @@ def _extract_package_quantity(pkg, tender_raw: str) -> str:
 
 
 def _extract_delivery_time(pkg, tender_raw: str) -> str:
+    """提取交付时间。"""
     row = _find_summary_row(tender_raw, pkg.package_id)
     if row and row.get("delivery_time"):
         return row["delivery_time"]
@@ -411,6 +427,7 @@ def _extract_delivery_time(pkg, tender_raw: str) -> str:
 
 
 def _extract_delivery_place(pkg, tender_raw: str) -> str:
+    """提取交付地点。"""
     row = _find_summary_row(tender_raw, pkg.package_id)
     if row and row.get("delivery_place"):
         return row["delivery_place"]
@@ -445,6 +462,7 @@ def _extract_delivery_place(pkg, tender_raw: str) -> str:
 
 
 def _extract_package_budget(pkg, tender_raw: str) -> str:
+    """提取包件预算。"""
     row = _find_summary_row(tender_raw, pkg.package_id)
     if row and row.get("budget"):
         try:
@@ -461,6 +479,7 @@ def _extract_package_budget(pkg, tender_raw: str) -> str:
 
 
 def _budget_text(pkg: ProcurementPackage) -> str:
+    """返回文本。"""
     for name in ("budget_amount", "budget", "package_budget", "estimated_amount", "amount"):
         value = getattr(pkg, name, None)
         if value not in (None, ""):
@@ -472,6 +491,7 @@ def _budget_text(pkg: ProcurementPackage) -> str:
 
 
 def _extract_requirements_chapter(tender_raw: str) -> str:
+    """提取需求chapter。"""
     text = tender_raw or ""
     patterns = [
         r"第五章\s*采购需求(.*?)(?=第六章\s*投标文件格式|第六章\s*响应文件格式|第六章|$)",
@@ -487,6 +507,7 @@ def _extract_requirements_chapter(tender_raw: str) -> str:
 
 
 def _find_package_block(tender_raw: str, package_id: str) -> str:
+    """查找包件文本块。"""
     scope = _extract_requirements_chapter(tender_raw)
     pid = str(package_id).strip()
 
@@ -518,6 +539,7 @@ def _find_package_block(tender_raw: str, package_id: str) -> str:
 
 
 def _extract_detail_quantity(pkg: ProcurementPackage, tender_raw: str) -> str:
+    """提取明细数量。"""
     block = _find_package_block(tender_raw, pkg.package_id)
     if block:
         m = re.search(r"二、数量[：:]\s*([0-9]+(?:\.[0-9]+)?)", block)
@@ -527,6 +549,7 @@ def _extract_detail_quantity(pkg: ProcurementPackage, tender_raw: str) -> str:
 
 
 def _merge_numbered_lines(text: str) -> list[str]:
+    """合并numbered行。"""
     items: list[str] = []
     for raw in text.splitlines():
         s = " ".join(raw.strip().split())
@@ -543,6 +566,7 @@ def _merge_numbered_lines(text: str) -> list[str]:
 
 
 def _extract_tech_points(pkg: ProcurementPackage, tender_raw: str) -> list[str]:
+    """提取技术要点。"""
     block = _find_package_block(tender_raw, pkg.package_id)
     if not block:
         return []
@@ -566,6 +590,7 @@ def _extract_tech_points(pkg: ProcurementPackage, tender_raw: str) -> list[str]:
 
 
 def _extract_service_points(pkg: ProcurementPackage, tender_raw: str) -> list[str]:
+    """提取服务要点。"""
     block = _find_package_block(tender_raw, pkg.package_id)
     if not block:
         return ["按采购文件售后服务要求执行。"]
@@ -583,6 +608,7 @@ def _build_quote_summary_table(
     packages: list[ProcurementPackage],
     tender_raw: str,
 ) -> str:
+    """构建报价汇总表。"""
     lines = [
         "项目名称：{}".format(tender.project_name),
         "项目编号：{}".format(tender.project_number),
@@ -610,6 +636,7 @@ def _build_pkg_deviation_table(
     pkg: ProcurementPackage,
     tender_raw: str,
 ) -> str:
+    """构建包件偏离表。"""
     qty = _extract_detail_quantity(pkg, tender_raw)
     tech_points = _extract_tech_points(pkg, tender_raw)
 
@@ -644,6 +671,7 @@ def _build_service_section(
     packages: list[ProcurementPackage],
     tender_raw: str,
 ) -> str:
+    """构建服务章节。"""
     parts: list[str] = []
 
     for pkg in packages:
@@ -689,6 +717,7 @@ def _build_service_section(
 
 
 def _extract_anchor_block(text: str, anchor_patterns: list[str], stop_patterns: list[str] | None = None, max_chars: int = 9000) -> str:
+    """提取anchor文本块。"""
     if not text:
         return ""
     stop_patterns = stop_patterns or []
@@ -711,6 +740,7 @@ def _extract_anchor_block(text: str, anchor_patterns: list[str], stop_patterns: 
 
 
 def _merge_bullet_lines(block: str) -> list[str]:
+    """合并bullet行。"""
     if not block:
         return []
     raw_lines = [" ".join(line.strip().split()) for line in block.splitlines() if line and line.strip()]
@@ -736,6 +766,7 @@ def _merge_bullet_lines(block: str) -> list[str]:
 
 
 def _split_review_row(text: str) -> tuple[str, str]:
+    """切分评审行。"""
     s = text.strip(" ：:")
     for sep in ("：", ":", "——", "--", "-", "，"):
         if sep in s:
@@ -749,6 +780,7 @@ def _split_review_row(text: str) -> tuple[str, str]:
 
 
 def _build_review_table_markdown(rows: list[tuple[str, str]]) -> str:
+    """构建评审表 Markdown。"""
     lines = [
         "| 序号 | 审查项 | 招标文件要求 | 响应文件对应内容 | 是否满足 | 备注 |",
         "|---:|---|---|---|---|---|",
@@ -762,6 +794,7 @@ def _build_review_table_markdown(rows: list[tuple[str, str]]) -> str:
 
 
 def _extract_review_rows_from_tender(tender_raw: str, title_patterns: list[str], fallback_rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """提取招标文件中的评审行。"""
     block = _extract_anchor_block(
         tender_raw,
         anchor_patterns=title_patterns,
@@ -778,11 +811,13 @@ def _extract_review_rows_from_tender(tender_raw: str, title_patterns: list[str],
 
 
 def _extract_invalid_bid_items(tender_raw: str) -> list[str]:
+    """提取废标项。"""
     text = tender_raw or ""
     if not text:
         return []
 
     def _clean(line: str) -> str:
+        """清理清理。"""
         s = re.sub(r"\s+", " ", (line or "")).strip(" \t\r\n|：:;；，,")
         s = re.sub(r"^[（(]?\d+[)）]\s*", "", s)
         s = re.sub(r"^\d+[.、]\s*", "", s)
@@ -790,6 +825,7 @@ def _extract_invalid_bid_items(tender_raw: str) -> list[str]:
         return s.strip()
 
     def _ok(line: str) -> bool:
+        """判断当前文本行是否满足评分项抽取条件。"""
         s = _clean(line)
         if not s or len(s) < 10:
             return False
@@ -870,6 +906,7 @@ def _extract_invalid_bid_items(tender_raw: str) -> list[str]:
     return items
 
 def _extract_scoring_items(tender, tender_raw: str) -> list[str]:
+    """提取scoring项。"""
     block = _extract_anchor_block(
         tender_raw,
         anchor_patterns=[r"详细评审", r"评分标准", r"评审标准"],
@@ -892,6 +929,7 @@ def _extract_scoring_items(tender, tender_raw: str) -> list[str]:
 
 
 def _build_detailed_review_section(tender, tender_raw: str) -> str:
+    """构建详细评审章节。"""
     items = _extract_scoring_items(tender, tender_raw)
     lines = [
         "| 序号 | 评分项 | 招标文件评分标准 | 响应文件对应内容 | 自评说明 | 证明材料页码 |",
