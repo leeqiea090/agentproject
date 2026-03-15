@@ -1,25 +1,51 @@
 from __future__ import annotations
 
-from __future__ import annotations
+from datetime import datetime
+import uuid
 
-import importlib
-import app.routers.tender.common as _common
+from fastapi import HTTPException
 
-
-def __reexport_all(module) -> None:
-    for name, value in vars(module).items():
-        if name.startswith("__"):
-            continue
-        globals()[name] = value
-
-
-for _module in (_common,):
-    __reexport_all(_module)
-
-del _module
-
-def _router_api():
-    return importlib.import_module("app.routers.tender")
+from app.schemas import (
+    BidDocumentSection,
+    ProductSpecification,
+    TenderDocument,
+    TenderWorkflowRequest,
+    TenderWorkflowResponse,
+    TenderWorkflowStep1Result,
+    TenderWorkflowStep2Result,
+    TenderWorkflowStep3Result,
+    TenderWorkflowStep4Result,
+)
+from app.services.docx_builder import build_bid_docx
+from app.services.llm import get_chat_model
+from app.services.retriever import ingest_text_to_kb
+from app.services.tender_parser import create_tender_parser
+from app.services.tender_workflow import (
+    TenderWorkflowAgent,
+    _build_document_ingestion_view,
+    _build_internal_audit_snapshot,
+    _build_package_segmentation_view,
+    _ensure_str_list,
+    _expand_extracted_facts,
+    _extract_product_facts,
+    _match_requirements_to_product_facts,
+    _materialize_sections,
+)
+from app.routers.tender.common import (
+    BID_OUTPUT_DIR,
+    _PLACEHOLDER_COMPANY,
+    _build_external_delivery_view,
+    _is_external_delivery_blocked,
+    _sections_for_storage_or_response,
+    bid_storage,
+    company_storage,
+    logger,
+    product_storage,
+    router,
+    tender_storage,
+    workflow_kb_indexed_sources,
+    workflow_storage,
+)
 
 def _resolve_selected_packages(tender_doc: TenderDocument, selected_packages: list[str]) -> list[str]:
     package_ids = {pkg.package_id for pkg in tender_doc.packages}
@@ -77,7 +103,7 @@ def _ensure_tender_indexed_for_workflow(tender_id: str, raw_text: str) -> str | 
         return source
 
     try:
-        _router_api().ingest_text_to_kb(
+        ingest_text_to_kb(
             text=text,
             source=source,
             metadata={"tender_id": tender_id, "doc_type": "tender_raw"},
@@ -129,7 +155,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
         raise HTTPException(status_code=404, detail="招标文件不存在")
 
     tender_info = tender_storage[req.tender_id]
-    llm = _router_api().get_chat_model()
+    llm = get_chat_model()
     parser = create_tender_parser(llm)
     was_preparsed = bool(tender_info.get("parsed_data")) and tender_info.get("status") == "parsed"
     tender_doc = _ensure_tender_parsed_for_workflow(req.tender_id, tender_info, parser)

@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 from .common import *  # noqa: F401,F403
+from app.services.one_click_generator.config_tables import _build_configuration_table
+from app.services.one_click_generator.response_tables import (
+    _build_deviation_table,
+    _build_requirement_rows,
+    _has_real_bidder_response,
+)
 
 _TP_APPENDIX_TITLES = [
     "附一、资格性审查响应对照表",
@@ -125,6 +131,27 @@ def _dedupe_consecutive_lines(lines: list[str]) -> list[str]:
     return result
 
 
+def _looks_like_tp_title_fragment(line: str, title: str) -> bool:
+    compact = _clean_text(line)
+    if not compact:
+        return False
+    if any(token in compact for token in ("签字", "公章", "复印件", "授权", "电话", "地址", "邮编", "传真")):
+        return False
+
+    normalized_line = re.sub(r"[\s#`*:：、（）()/_\-—]", "", compact)
+    if len(normalized_line) < 4:
+        return False
+
+    for candidate, _ in _TP_TEMPLATE_PATTERNS:
+        normalized_title = re.sub(r"[\s#`*:：、（）()/_\-—]", "", candidate)
+        if normalized_line == normalized_title:
+            return True
+        if len(normalized_line) <= 14 and normalized_line in normalized_title:
+            return True
+    current_title = re.sub(r"[\s#`*:：、（）()/_\-—]", "", title)
+    return len(normalized_line) <= 14 and normalized_line in current_title
+
+
 def _clean_tp_template_block(block: str, title: str) -> str:
     body = re.sub(r"-\s*第\s*\d+\s*页\s*-", "", block or "").strip()
     if not body:
@@ -142,6 +169,8 @@ def _clean_tp_template_block(block: str, title: str) -> str:
         if not compact or compact == _clean_text(title):
             continue
         if compact.startswith("第 ") and compact.endswith(" 页"):
+            continue
+        if _looks_like_tp_title_fragment(line, title):
             continue
         cleaned.append(line.strip())
     return "\n".join(cleaned).strip()
@@ -300,49 +329,115 @@ def _build_tp_quote_summary_table(tender, packages, tender_raw: str) -> str:
     return "\n".join(lines)
 
 
-def _build_tp_combined_deviation_detail_table(tender, pkg, tender_raw: str) -> str:
-    block = _find_tp_package_block(tender_raw, pkg.package_id)
-    req_rows = _extract_tp_requirement_rows(block, pkg)
+def _build_tp_combined_deviation_detail_table(
+    tender,
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profile: dict | None = None,
+) -> str:
+    requirement_rows, total_requirements = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+    )
+    table = _build_deviation_table(
+        tender,
+        pkg,
+        requirement_rows,
+        total_requirements,
+        product=product,
+    )
+    table_lines = table.splitlines()
+    if table_lines and table_lines[0].startswith("### 四、技术偏离及详细配置明细表"):
+        table = "\n".join(table_lines[1:]).lstrip()
+    config_table = _build_configuration_table(
+        pkg,
+        tender_raw,
+        product=product,
+        product_profile=product_profile,
+        normalized_result=normalized_result,
+    )
+
     qty = _extract_tp_package_quantity(pkg, tender_raw)
-
-    if not req_rows:
-        req_rows = [{"requirement": "详见采购文件技术要求"}]
-
-    lines = [
-        f"### 合同包{pkg.package_id}：{pkg.item_name}",
-        f"项目名称：{tender.project_name}",
-        f"项目编号：{tender.project_number}",
-        f"交货期：{_extract_tp_delivery_time(pkg, tender_raw)}",
-        f"交货地点：{_extract_tp_delivery_place(pkg, tender_raw)}",
-        "",
-        "| 序号 | 货物名称 | 品牌型号、产地 | 数量/单位 | 报价(元) | 谈判文件的参数和要求 | 响应文件参数 | 偏离情况 |",
-        "|---:|---|---|---|---:|---|---|---|",
-    ]
-
-    for idx, row in enumerate(req_rows, start=1):
-        lines.append(
-            f"| {idx} | {pkg.item_name} | 【待填写：品牌/型号，产地】 | {qty}/台 | "
-            f"【待填写】 | {row['requirement']} | 【待填写：逐条响应参数/配置/证据】 | "
-            f"【待填写：无偏离/正偏离/负偏离】 |"
-        )
-
-    lines.extend([
-        "",
-        "说明：带“※/★”或采购文件明确为实质性条款的项目，必须逐条实质性响应，不能只写“响应/完全响应”。",
-        "",
-        "供应商全称：【待填写：投标人名称】",
-        "日期：【待填写：年 月 日】",
-    ])
-    return "\n".join(lines)
+    delivery_time = _extract_tp_delivery_time(pkg, tender_raw)
+    delivery_place = _extract_tp_delivery_place(pkg, tender_raw)
+    return "\n".join(
+        [
+            f"### 合同包{pkg.package_id}：{pkg.item_name}",
+            f"数量：{qty}",
+            f"交货期：{delivery_time}",
+            f"交货地点：{delivery_place}",
+            "",
+            table,
+            "",
+            config_table,
+        ]
+    ).strip()
 
 
-def _build_tp_service_plan_section(packages, tender_raw: str) -> str:
+def _structured_tp_service_points(
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profile: dict | None = None,
+) -> list[str]:
+    if not normalized_result:
+        return []
+    rows, _ = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+        category_filter="service_requirement",
+    )
+    points: list[str] = []
+    for row in rows:
+        key = _clean_text(row.get("key") or "")
+        requirement = _clean_text(row.get("requirement") or "")
+        if not key and not requirement:
+            continue
+        response = _clean_text(row.get("response") or "")
+        if response and _has_real_bidder_response(response):
+            points.append(f"{key}：{requirement}；我方响应：{response}".strip("："))
+        else:
+            points.append(f"{key}：{requirement}".strip("："))
+    return points
+
+
+def _build_tp_service_plan_section(
+    packages,
+    tender_raw: str,
+    *,
+    products: dict | None = None,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profiles: dict | None = None,
+) -> str:
     parts: list[str] = []
 
     for pkg in packages:
         delivery_time = _extract_tp_delivery_time(pkg, tender_raw)
         delivery_place = _extract_tp_delivery_place(pkg, tender_raw)
-        raw_service_points = _extract_tp_service_points(pkg, tender_raw)
+        raw_service_points = _structured_tp_service_points(
+            pkg,
+            tender_raw,
+            product=(products or {}).get(pkg.package_id),
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profile=(product_profiles or {}).get(pkg.package_id),
+        ) or _extract_tp_service_points(pkg, tender_raw)
 
         parts.extend([
             f"### 合同包{pkg.package_id}：{pkg.item_name}",
@@ -918,21 +1013,37 @@ def _extract_tp_requirement_rows(block: str, pkg) -> list[dict]:
 
 def _extract_tp_service_points(pkg, tender_raw: str) -> list[str]:
     block = _find_tp_package_block(tender_raw, pkg.package_id)
-    match = re.search(r"六、售后服务要求[：:]?(.*?)(?:说明\s*打|合同包\s*\d+|$)", block, re.S)
-    if not match:
+    if not block:
         return []
 
-    raw_lines = [line.strip() for line in match.group(1).splitlines() if line.strip()]
-    merged: list[str] = []
-    for line in raw_lines:
-        if re.match(r"^\d+[、.]", line):
-            merged.append(line)
-        elif merged:
-            merged[-1] += " " + line
+    lines = [_clean_text(line) for line in block.splitlines() if _clean_text(line)]
+    collecting = False
+    collected: list[str] = []
+    for line in lines:
+        compact = line.strip()
+        if not collecting and "售后服务要求" in compact:
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        if any(token in compact for token in ("说明", "合同包", "第六章", "第七章", "第八章")):
+            break
+        collected.append(compact)
 
+    if not collected:
+        return []
+
+    joined = " ".join(collected)
     points = []
-    for item in merged:
+    enum_pat = re.compile(
+        r"(?:^|(?<=\s))(?:\d+|[一二三四五六七八九十]+)\s*[、.]\s*(.*?)(?=(?:\s+(?:\d+|[一二三四五六七八九十]+)\s*[、.])|$)"
+    )
+    for item in enum_pat.findall(joined):
         value = _tidy_extracted_text(item)
+        value = re.sub(r"(\d)\s+(小时|分钟|次|天|年|个|台|项|页)", r"\1\2", value)
+        value = re.sub(r"\s*/\s*", "/", value)
+        value = re.sub(r"([\u4e00-\u9fff])\s+([A-Z]{2,})", r"\1\2", value)
+        value = re.sub(r"([A-Z]{2,})\s+([\u4e00-\u9fff])", r"\1\2", value)
         if value:
             points.append(value)
     return points
@@ -943,8 +1054,11 @@ def _build_tp_sections(
     tender_raw: str,
     products: dict | None = None,
     active_packages: list | None = None,
+    *,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profiles: dict | None = None,
 ) -> list:
-    _ = products
     packages = active_packages or tender.packages
     sections = []
 
@@ -1005,14 +1119,32 @@ def _build_tp_sections(
     sections.append(
         BidDocumentSection(
             section_title="五、技术偏离及详细配置明细表",
-            content="\n\n".join(_build_tp_combined_deviation_detail_table(tender, pkg, tender_raw) for pkg in packages).strip(),
+            content="\n\n".join(
+                _build_tp_combined_deviation_detail_table(
+                    tender,
+                    pkg,
+                    tender_raw,
+                    product=(products or {}).get(pkg.package_id),
+                    normalized_result=normalized_result,
+                    evidence_result=evidence_result,
+                    product_profile=(product_profiles or {}).get(pkg.package_id),
+                )
+                for pkg in packages
+            ).strip(),
         )
     )
 
     sections.append(
         BidDocumentSection(
             section_title="六、技术服务和售后服务的内容及措施",
-            content=_build_tp_service_plan_section(packages, tender_raw),
+            content=_build_tp_service_plan_section(
+                packages,
+                tender_raw,
+                products=products,
+                normalized_result=normalized_result,
+                evidence_result=evidence_result,
+                product_profiles=product_profiles,
+            ),
         )
     )
 

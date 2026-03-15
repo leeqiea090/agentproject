@@ -206,6 +206,8 @@ def _safe_text(text: str | None, default: str = "详见招标文件") -> str:
     if text is None:
         return default
     stripped = str(text).strip()
+    if stripped.lower() in {"none", "null", "nan"}:
+        return default
     return stripped or default
 
 
@@ -223,8 +225,11 @@ def _normalize_commitment_term(text: str | None, default: str = "按招标文件
 
 
 def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
     if isinstance(value, str):
-        return value.strip()
+        stripped = value.strip()
+        return "" if stripped.lower() in {"none", "null", "nan"} else stripped
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, dict):

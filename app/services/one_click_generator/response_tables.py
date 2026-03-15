@@ -29,6 +29,11 @@ from app.services.requirement_processor import (
 
 logger = logging.getLogger(__name__)
 
+_STRUCTURED_NUMERIC_VALUE_PATTERN = re.compile(
+    r"(?:≥|≤|>|<|>=|<=|不少于|不低于|不超过|至少|最高|最低)\s*\d+(?:\.\d+)?(?:\s*[%A-Za-z/\-._\u00b0\u03bc\u4e00-\u9fff]+)?$"
+)
+_EMPTYISH_TEXT_VALUES = {"", "none", "null", "nan", "n/a"}
+
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
         if name.startswith("__"):
@@ -351,6 +356,69 @@ def _format_structured_bidder_evidence(
         quote_text = f"{quote_text}（第{bid_page}页）"
     return source_text, quote_text, bid_page
 
+
+def _is_usable_requirement_value(value: str) -> bool:
+    text = _safe_text(value, "")
+    if not text:
+        return True
+    if not _is_bad_requirement_value(text):
+        return True
+    return bool(_STRUCTURED_NUMERIC_VALUE_PATTERN.fullmatch(text))
+
+
+def _normalized_optional_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    if text.lower() in _EMPTYISH_TEXT_VALUES:
+        return default
+    return text or default
+
+
+_SOFT_RESPONSE_MARKERS = (
+    "响应，投标产品（",
+    "响应，详见投标产品",
+    "满足该项要求",
+    "满足招标要求",
+    "详见技术偏离表",
+    "承诺满足",
+    "配合验收",
+    "交付时提供",
+)
+
+def _response_kind(value: Any) -> str:
+    text = _normalized_optional_text(value, "")
+    if not text:
+        return "pending"
+
+    pending_markers = (
+        _PENDING_BIDDER_RESPONSE,
+        "【待填写：投标产品实参】",
+        "【待填写：实际响应值】",
+        "待补充（投标产品实参）",
+        "待核实（需填入投标产品实参）",
+        "待核实",
+        "待补证",
+    )
+    if any(marker in text for marker in pending_markers):
+        return "pending"
+
+    plain = text.replace("。", "").replace("；", "").strip()
+    if plain in {"响应", "满足", "符合", "无偏离"}:
+        return "soft"
+
+    if any(marker in text for marker in _SOFT_RESPONSE_MARKERS):
+        return "soft"
+
+    if re.fullmatch(r"(?:响应|满足|符合)(?:招标要求|采购要求|该项要求)?", plain):
+        return "soft"
+
+    return "real"
+
+
+def _has_real_bidder_response(value: Any) -> bool:
+    return _response_kind(value) == "real"
+
 def _mapping_confidence_for_row(
     pkg: ProcurementPackage,
     req_key: str,
@@ -367,7 +435,7 @@ def _mapping_confidence_for_row(
     if "待定位" in quote or "未定位" in quote:
         return "none"
 
-    if _is_bad_requirement_name(req_key) or _is_bad_requirement_value(req_val):
+    if _is_bad_requirement_name(req_key) or not _is_usable_requirement_value(req_val):
         return "none"
 
     forbidden_terms = _package_forbidden_terms(pkg.item_name)
@@ -415,7 +483,7 @@ def _row_is_usable_for_package(
 ) -> bool:
     if _is_bad_requirement_name(req_key):
         return False
-    if _is_bad_requirement_value(req_val):
+    if not _is_usable_requirement_value(req_val):
         return False
 
     forbidden_terms = _package_forbidden_terms(pkg.item_name)
@@ -440,7 +508,7 @@ def _resolve_structured_response(
     3. 旧有 _build_response_value(...) 的能力兜底
     4. 最后才退化为统一待核实占位符
     """
-    response = _safe_text((match or {}).get("response_value"), "")
+    response = _normalized_optional_text((match or {}).get("response_value"), "")
     if response:
         return response
 
@@ -474,11 +542,34 @@ def _build_requirement_rows(
         match_by_id, match_by_param = _structured_match_indexes(evidence_result, pkg.package_id)
         rows: list[dict[str, Any]] = []
         for requirement in structured_requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
+            req_category = _safe_text(requirement.get("category"), "technical_requirement")
             req_key = _safe_text(
                 requirement.get("param_name") or requirement.get("parameter_name"),
                 "",
             )
-            req_val = _safe_text(requirement.get("normalized_value"), "")
+            req_val = _normalized_optional_text(
+                requirement.get("normalized_value") or requirement.get("raw_text") or requirement.get("source_text"),
+                "",
+            )
+            if category_filter is None and req_category in {
+                "service_requirement",
+                "acceptance_requirement",
+                "documentation_requirement",
+                "commercial_requirement",
+                "compliance_note",
+                "attachment_requirement",
+                "noise",
+            }:
+                continue
+            if (
+                category_filter is None
+                and (
+                req_category == "config_requirement"
+                and any(token in req_key for token in ("装箱配置", "配置清单", "标准配置"))
+                and any(marker in req_val for marker in ("详见招标文件", "详见采购文件", "按招标文件", "按采购文件"))
+                )
+            ):
+                continue
             requirement_id = _safe_text(requirement.get("requirement_id"), "")
             match = match_by_id.get(requirement_id) or match_by_param.get(req_key)
 
@@ -505,7 +596,7 @@ def _build_requirement_rows(
                 or (match or {}).get("tender_source_page")
                 or requirement.get("source_page")
             )
-            has_real_response = response != _PENDING_BIDDER_RESPONSE
+            has_real_response = _has_real_bidder_response(response)
             if not bidder_quote and has_real_response:
                 bidder_source = bidder_source or _safe_text(
                     (match or {}).get("matched_fact_source"),
@@ -529,7 +620,7 @@ def _build_requirement_rows(
 
             if _is_bad_requirement_name(req_key):
                 continue
-            if _is_bad_requirement_value(req_val):
+            if not _is_usable_requirement_value(req_val):
                 continue
 
             forbidden_terms = _package_forbidden_terms(pkg.item_name)
@@ -545,7 +636,7 @@ def _build_requirement_rows(
                     "key": req_key,
                     "requirement": req_val,
                     "response": response,
-                    "category": _safe_text(requirement.get("category"), "technical_requirement"),
+                    "category": req_category,
                     "package_id": _safe_text(requirement.get("package_id"), pkg.package_id),
                     "evidence_source": bidder_source or "招标原文",
                     "evidence_quote": bidder_quote if (has_real_response and bidder_quote) else "",
@@ -565,7 +656,7 @@ def _build_requirement_rows(
                     "bid_evidence_snippet": _safe_text(_bid_bind.get("evidence_snippet"), ""),
                     "deviation_status": _safe_text(
                         (match or {}).get("deviation_status"),
-                        "无偏离" if has_real_response and bidder_quote else "待核实",
+                        "待核实",
                     ),
                 }
             )
@@ -576,9 +667,14 @@ def _build_requirement_rows(
     rows: list[dict[str, Any]] = []
 
     for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
+        if (
+            any(token in req_key for token in ("装箱配置", "配置清单", "标准配置"))
+            and any(marker in req_val for marker in ("详见招标文件", "详见采购文件", "按招标文件", "按采购文件"))
+        ):
+            continue
         source, quote, mapped = _extract_evidence_snippet(package_scoped_raw, req_key, req_val, tender_raw)
         response = _build_response_value(req_val, req_key=req_key, product=product)
-        has_real_response = response != _PENDING_BIDDER_RESPONSE
+        has_real_response = _has_real_bidder_response(response)
 
         bidder_evidence = ""
         bidder_source = ""
@@ -615,7 +711,7 @@ def _build_requirement_rows(
                 "bidder_evidence_page": None,
                 "source_page": None,
                 "tender_quote": quote,
-                "deviation_status": "无偏离" if has_real_response and bidder_evidence else "待核实",
+                "deviation_status": "待核实",
             }
         )
 
@@ -639,17 +735,19 @@ def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
     return "【待补证：说明书/彩页/厂家参数表】"
 
 def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
-    text = _safe_text(raw_value, "")
+    text = _normalized_optional_text(raw_value, "")
+    if not has_real:
+        return "【待填写：无偏离/正偏离/负偏离】"
     bad_values = {
         "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充", "待核对",
     }
     if text in bad_values or "待填写" in text:
-        return "无偏离" if has_real else "【待选择：无偏离/有偏离】"
+        return "【待填写：无偏离/正偏离/负偏离】"
     return text
 
 
 def _display_bidder_response(raw_value: Any) -> str:
-    text = _safe_text(raw_value, "")
+    text = _normalized_optional_text(raw_value, "")
     if not text:
         return "【待填写：实际响应值】"
 
@@ -678,16 +776,13 @@ def _build_deviation_table(
     product=None,
 ) -> str:
     def _safe(v):
-        return "" if v is None else str(v).strip()
+        return _normalized_optional_text(v, "")
 
     def _md(v):
         return _safe(v).replace("|", "/")
 
     def _normalize_dev(raw_value, has_real=False):
-        text = _safe(raw_value)
-        if not text or "待填写" in text:
-            return "【待填写：无偏离/正偏离/负偏离】" if not has_real else "无偏离"
-        return text
+        return _normalize_deviation_status(raw_value, has_real=has_real)
 
     p_model = ""
     p_mfr = ""
@@ -702,13 +797,13 @@ def _build_deviation_table(
         f"项目名称：{tender.project_name}",
         f"项目编号：{tender.project_number}",
         f"（第{pkg.package_id}包）",
-        "| 序号 | 服务名称 | 磋商文件的服务需求 | 响应文件响应情况 | 偏离情况 |",
+        "| 序号 | 技术参数项 | 采购文件技术要求 | 响应文件响应情况 | 偏离情况 |",
         "|---:|---|---|---|---|",
     ]
 
     if not requirement_rows:
         lines.append(
-            "| 1 | 【待填写：服务名称】 | 详见招标文件采购需求 | 【待填写：品牌/型号/规格/配置及逐条响应】 | 【待填写：无偏离/正偏离/负偏离】 |"
+            "| 1 | 【待填写：技术参数项】 | 【待人工根据采购文件逐条补录技术参数，禁止仅写“响应/完全响应”】 | 【待填写：品牌/型号/规格/配置及逐条响应】 | 【待填写：无偏离/正偏离/负偏离】 |"
         )
         lines.extend([
             "",
@@ -717,12 +812,16 @@ def _build_deviation_table(
         ])
         return "\n".join(lines)
 
+    real_response_count = 0
     for idx, row in enumerate(requirement_rows, start=1):
         service_name = _md(row.get("key") or f"条款{idx}")
         tender_requirement = _md(row.get("requirement") or row.get("value") or "")
 
         raw_response = _safe(row.get("response"))
-        if not raw_response or "待填写" in raw_response:
+        has_real_response = _has_real_bidder_response(raw_response)
+        if has_real_response:
+            real_response_count += 1
+        if not has_real_response:
             if model_identity:
                 bid_response = f"品牌/型号：{_md(model_identity)}；【待填写：对应参数实测值/配置情况】"
             else:
@@ -733,10 +832,16 @@ def _build_deviation_table(
             else:
                 bid_response = _md(raw_response)
 
-        deviation = _normalize_dev(row.get("deviation_status"), has_real=bool(raw_response))
+        deviation = _normalize_dev(row.get("deviation_status"), has_real=has_real_response)
 
         lines.append(
             f"| {idx} | {service_name} | {tender_requirement} | {bid_response} | {deviation} |"
+        )
+
+    if real_response_count == 0:
+        lines.insert(
+            4,
+            "> 注：当前仅依据采购文件展开技术条款；未接入投标产品事实/证据时，响应值与偏离结论不得预填。",
         )
 
     if total_requirements > len(requirement_rows):

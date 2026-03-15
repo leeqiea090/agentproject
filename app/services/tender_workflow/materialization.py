@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import app.services.tender_workflow.common as _common
 import app.services.tender_workflow.classification as _classification
 import app.services.tender_workflow.product_facts as _product_facts
@@ -85,66 +87,30 @@ def _resolve_materialized_response_value(
     match: dict[str, Any] | None,
     parameter_name: str,
 ) -> str:
+    # 1) 优先拿产品规格中的明确值
     if product is not None:
         response_value = _lookup_product_spec_value(product, parameter_name)
         if response_value:
             return response_value
 
+    # 2) 再拿证据绑定里已经提取好的事实值
     if match:
-        response_value = _safe_text(match.get("response_value") or match.get("matched_fact_value"))
-        if response_value:
-            return response_value
+        for key in ("response_value", "matched_fact_value"):
+            value = _safe_text(match.get(key), "")
+            if value and value.lower() not in {"none", "null", "nan"}:
+                return value
 
-        matched_fact_quote = _safe_text(match.get("matched_fact_quote"))
-        if matched_fact_quote:
-            response_value = _extract_fact_value_from_quote(matched_fact_quote, parameter_name)
-            if response_value:
-                return response_value
+        # 3) 最后尝试从证据原文片段里抽值
+        for quote_key in ("matched_fact_quote", "bidder_evidence_quote"):
+            quote = _safe_text(match.get(quote_key), "")
+            if not quote:
+                continue
+            value = _extract_fact_value_from_quote(quote, parameter_name)
+            if value:
+                return value
 
-        bidder_quote = _safe_text(match.get("bidder_evidence_quote"))
-        if bidder_quote:
-            response_value = _extract_fact_value_from_quote(bidder_quote, parameter_name)
-            if response_value:
-                return response_value
-
-    # 扩展策略：能力推断 — 对"具备/支持"类条款返回有意义的承诺而非空值
-    _CAP_MARKERS = ("具备", "支持", "提供", "配备", "配置", "满足", "可", "能够", "兼容")
-    if product is not None and any(m in parameter_name for m in _CAP_MARKERS):
-        return f"满足，投标产品（{product.product_name}）具备该功能"
-
-    # 富展开模式：产品信息充分时给出上下文描述
-    if _RICH_EXPANSION_MODE and product is not None:
-        specs = product.specifications or {}
-        p_name = product.product_name.strip()
-        p_mfr = _safe_text(product.manufacturer, "")
-        p_model = _safe_text(product.model, "")
-
-        # 策略A: 找到任意相关 spec 值进行关联
-        if specs and parameter_name:
-            param_tokens = [t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", parameter_name) if len(t) >= 2]
-            for spec_key, spec_val in specs.items():
-                k = _safe_text(spec_key)
-                if k and param_tokens and any(t in k for t in param_tokens):
-                    return _safe_text(spec_val)
-
-        # 策略B: 产品名称充分时给出描述
-        if p_name and len(specs) >= 3:
-            identity = f"{p_mfr} {p_model}" if p_model else p_mfr
-            return f"响应，投标产品（{identity.strip()} {p_name}）满足该项要求，详见技术偏离表"
-
-        # 策略C: 有产品名时给承诺式响应
-        if p_name:
-            return f"响应，投标产品（{p_name}）满足招标要求"
-
-    # 原始扩展策略：产品信息充分时给出上下文描述
-    if product is not None:
-        specs = product.specifications or {}
-        if product.product_name.strip() and len(specs) >= 3:
-            mfr = _safe_text(product.manufacturer, "")
-            return f"响应，详见投标产品（{mfr} {product.product_name}）技术偏离表"
-
+    # 4) 技术表里拿不到事实值，就返回空，不再伪造“满足要求”
     return ""
-
 
 def _parameter_name_tokens(value: str) -> list[str]:
     return [
@@ -429,6 +395,408 @@ def _build_appendix_enrichment_block(
     return "\n".join(lines) if has_content else ""
 
 
+def _today_cn_date() -> str:
+    return datetime.now().strftime("%Y年%m月%d日")
+
+
+def _staff_position(company: CompanyProfile | None) -> str:
+    if company is None or not company.staff:
+        return ""
+    return _safe_text(company.staff[0].position, "")
+
+
+def _product_identity_placeholder_text(product: ProductSpecification | None) -> str:
+    if product is None:
+        return "【待填写：品牌/型号，产地】"
+    model = _safe_text(product.model or product.product_name, "")
+    origin = _safe_text(product.origin, "")
+    if model and origin:
+        return f"{model}，{origin}"
+    return model or origin or "【待填写：品牌/型号，产地】"
+
+
+def _apply_structured_placeholders(
+    content: str,
+    company: CompanyProfile | None,
+    product: ProductSpecification | None,
+) -> str:
+    auth_rep = _authorized_representative(company)
+    position = _staff_position(company)
+    replacements = {
+        "【待填写：投标人名称】": _safe_text(company.name if company else "", "【待填写：投标人名称】"),
+        "【待填写：法定代表人姓名】": _safe_text(company.legal_representative if company else "", "【待填写：法定代表人姓名】"),
+        "【待填写：法定代表人】": _safe_text(company.legal_representative if company else "", "【待填写：法定代表人】"),
+        "【待填写：授权代表】": _safe_text(auth_rep, "【待填写：授权代表】"),
+        "【待填写：授权代表姓名】": _safe_text(auth_rep, "【待填写：授权代表姓名】"),
+        "【待填写：联系电话】": _safe_text(company.phone if company else "", "【待填写：联系电话】"),
+        "【待填写：电话】": _safe_text(company.phone if company else "", "【待填写：电话】"),
+        "【待填写：联系地址】": _safe_text(company.address if company else "", "【待填写：联系地址】"),
+        "【待填写：详细通讯地址】": _safe_text(company.address if company else "", "【待填写：详细通讯地址】"),
+        "【待填写：公司注册地址】": _safe_text(company.address if company else "", "【待填写：公司注册地址】"),
+        "【待填写：职务】": position or "【待填写：职务】",
+        "【待填写：品牌/型号，产地】": _product_identity_placeholder_text(product),
+        "【待填写：品牌/型号/产地】": _product_identity_placeholder_text(product),
+        "【待填写：品牌/型号】": _safe_text((product.model or product.product_name) if product else "", "【待填写：品牌/型号】"),
+        "【待填写：投标型号】": _safe_text((product.model or product.product_name) if product else "", "【待填写：投标型号】"),
+        "【待填写：品牌】": _derive_brand(product) if product else "【待填写：品牌】",
+        "【待填写：日期】": _today_cn_date(),
+        "【待填写：年 月 日】": _today_cn_date(),
+        "【待填写：磋商日期】": _today_cn_date(),
+        "【待填写：谈判日期】": _today_cn_date(),
+    }
+    for placeholder, value in replacements.items():
+        if value:
+            content = content.replace(placeholder, value)
+    return content
+
+
+def _target_packages_for_materialization(
+    tender: TenderDocument,
+    products: dict[str, ProductSpecification],
+) -> list[ProcurementPackage]:
+    selected = [pkg for pkg in tender.packages if not products or pkg.package_id in products]
+    return selected or list(tender.packages)
+
+
+def _coarse_technical_section(content: str) -> bool:
+    markers = (
+        "详见采购文件技术要求",
+        "【待填写：逐条响应参数/配置/证据】",
+        "【待填写：逐条响应】",
+        "谈判文件的参数和要求",
+        "响应文件参数",
+        "品牌型号、产地",
+    )
+    return any(marker in content for marker in markers)
+
+
+def _product_profile_for_materialization(product: ProductSpecification | None) -> dict[str, Any]:
+    if product is None:
+        return {
+            "config_items": [],
+            "functional_notes": "",
+            "acceptance_notes": "",
+            "training_notes": "",
+        }
+    return _build_product_profile(product)
+
+
+def _fallback_requirement_rows(
+    pkg: ProcurementPackage,
+    product: ProductSpecification | None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, value in (pkg.technical_requirements or {}).items():
+        rows.append(
+            {
+                "parameter_name": _safe_text(key),
+                "requirement_value": _safe_text(value),
+                "response_value": _lookup_product_spec_value(product, _safe_text(key)) if product else "",
+                "matched_fact_source": "产品参数库",
+                "bidder_evidence_source": "",
+                "bid_evidence_file": "",
+                "bid_evidence_page": None,
+                "comparison_reason": "",
+                "deviation_status": "无偏离" if product and _lookup_product_spec_value(product, _safe_text(key)) else "待核实",
+                "proven": bool(product and _lookup_product_spec_value(product, _safe_text(key))),
+            }
+        )
+    return rows
+
+
+def _ordered_package_matches(
+    pkg: ProcurementPackage,
+    product: ProductSpecification | None,
+    evidence_result: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    matches = _package_technical_matches(evidence_result, pkg.package_id)
+    if not matches:
+        return _fallback_requirement_rows(pkg, product)
+
+    key_order = {
+        _safe_text(name): idx
+        for idx, name in enumerate((pkg.technical_requirements or {}).keys(), start=1)
+        if _safe_text(name)
+    }
+    return sorted(
+        matches,
+        key=lambda item: (
+            key_order.get(_safe_text(item.get("parameter_name")), 10**6),
+            _safe_text(item.get("parameter_name")),
+        ),
+    )
+
+
+def _resolve_match_evidence_page(
+    product: ProductSpecification | None,
+    match: dict[str, Any] | None,
+    parameter_name: str,
+) -> str:
+    page = None
+    if match:
+        page = match.get("bid_evidence_page") or match.get("tender_source_page")
+    if page in (None, "", 0) and product is not None:
+        for ref in product.evidence_refs or []:
+            if not isinstance(ref, dict):
+                continue
+            description = _safe_text(ref.get("description", ""))
+            if parameter_name and parameter_name in description:
+                page = ref.get("page")
+                break
+    return str(page) if page not in (None, "", 0) else "待补页码"
+
+
+def _resolve_match_evidence_label(
+    match: dict[str, Any] | None,
+) -> str:
+    if not match:
+        return "待补充投标方证据"
+    for key in ("bid_evidence_file", "bidder_evidence_source", "matched_fact_source", "bid_evidence_type"):
+        value = _safe_text(match.get(key), "")
+        if value:
+            return value
+    return "待补充投标方证据"
+
+
+def _build_materialized_technical_section(
+    tender: TenderDocument,
+    products: dict[str, ProductSpecification],
+    evidence_result: dict[str, Any] | None,
+) -> str:
+    parts: list[str] = []
+    for pkg in _target_packages_for_materialization(tender, products):
+        product = _product_for_package(pkg.package_id, products) or _fallback_single_product(products)
+        profile = _product_profile_for_materialization(product)
+        rows = _ordered_package_matches(pkg, product, evidence_result)
+        model_text = _safe_text((product.model or product.product_name) if product else "", "待补充")
+
+        parts.extend(
+            [
+                f"### （一）技术偏离及详细配置明细表（第{pkg.package_id}包）",
+                f"项目名称：{tender.project_name}",
+                f"项目编号：{tender.project_number}",
+                f"包件名称：{pkg.item_name}",
+                "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 说明/验收备注 |",
+                "|---:|---|---|---|---|---|---:|---|",
+            ]
+        )
+
+        for idx, match in enumerate(rows, start=1):
+            parameter_name = _safe_text(match.get("parameter_name"), f"参数{idx}")
+            requirement_value = _safe_text(match.get("requirement_value"), _safe_text(match.get("normalized_value"), ""))
+            response_value = _resolve_materialized_response_value(product, match, parameter_name)
+            evaluation = _evaluate_requirement_response(requirement_value, response_value)
+            deviation = _resolve_materialized_deviation_status(match, evaluation) if response_value else "待核实"
+            evidence_label = _resolve_match_evidence_label(match)
+            evidence_page = _resolve_match_evidence_page(product, match, parameter_name)
+            note_parts = []
+            comparison_reason = _safe_text(match.get("comparison_reason"), "")
+            if bool(match.get("proven")):
+                note_parts.append("已完成参数与投标证据闭环")
+            elif response_value:
+                note_parts.append("已写入响应值，待补投标方证据页码")
+            else:
+                note_parts.append("待补实际响应值与证据")
+            if comparison_reason:
+                note_parts.append(comparison_reason)
+            parts.append(
+                "| {seq} | {param} | {req} | {model} | {resp} | {dev} | {evidence} | {page} | {note} |".format(
+                    seq=idx,
+                    param=parameter_name,
+                    req=requirement_value or "详见采购文件技术要求",
+                    model=model_text if idx == 1 else "同上",
+                    resp=response_value or _PENDING_RESPONSE_TEXT,
+                    dev=deviation,
+                    evidence=evidence_label,
+                    page=evidence_page,
+                    note="；".join(_dedupe_texts(note_parts)),
+                )
+            )
+
+        config_rows = []
+        for idx, item in enumerate(profile.get("config_items", [])[:8], start=1):
+            if not isinstance(item, dict):
+                continue
+            name = _safe_text(item.get("配置项") or item.get("name"), "")
+            qty = _safe_text(item.get("数量") or item.get("qty") or item.get("quantity"), "1")
+            desc = _safe_text(item.get("说明") or item.get("remark"), "")
+            source = _safe_text(item.get("来源") or item.get("source"), "产品资料")
+            if name:
+                config_rows.append((idx, name, qty or "1", desc or "标配", source))
+
+        if config_rows:
+            parts.extend(
+                [
+                    "",
+                    f"### （二）配置明细表（第{pkg.package_id}包）",
+                    "| 序号 | 配置项 | 数量 | 说明 | 来源 |",
+                    "|---:|---|---|---|---|",
+                ]
+            )
+            for seq, name, qty, desc, source in config_rows:
+                parts.append(f"| {seq} | {name} | {qty} | {desc} | {source} |")
+
+        feature_lines = []
+        functional_notes = _safe_text(profile.get("functional_notes"), "")
+        if functional_notes:
+            feature_lines.append(f"- 功能概述：{functional_notes}")
+        for seq, name, _, desc, _ in config_rows[:5]:
+            _ = seq
+            feature_lines.append(f"- {name}：{desc}")
+        if feature_lines:
+            parts.extend(["", f"### （二-B）配置功能描述（第{pkg.package_id}包）", *feature_lines])
+
+        acceptance_notes = _safe_text(profile.get("acceptance_notes"), "")
+        if acceptance_notes:
+            parts.extend(["", f"### （八）验收要点（第{pkg.package_id}包）", f"- {acceptance_notes}"])
+
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def _build_materialized_service_section(
+    tender: TenderDocument,
+    products: dict[str, ProductSpecification],
+) -> str:
+    parts: list[str] = []
+    for pkg in _target_packages_for_materialization(tender, products):
+        product = _product_for_package(pkg.package_id, products) or _fallback_single_product(products)
+        profile = _product_profile_for_materialization(product)
+        spec_items = list((product.specifications or {}).items())[:3] if product else []
+        spec_digest = "；".join(f"{key}：{value}" for key, value in spec_items) or "按采购文件要求配置"
+        product_identity = (
+            f"{_safe_text(product.manufacturer, '')} {_safe_text(product.product_name, '')}（型号：{_safe_text(product.model, '待补充')}）"
+            if product is not None
+            else pkg.item_name
+        ).strip()
+        acceptance_notes = _safe_text(profile.get("acceptance_notes"), "按采购文件及国家相关标准进行验收。")
+        training_notes = _safe_text(profile.get("training_notes"), "提供设备操作培训，确保用户熟练掌握。")
+        functional_notes = _safe_text(profile.get("functional_notes"), f"围绕{pkg.item_name}关键功能制定安装调试和交付方案。")
+        service_bits = []
+        if product and product.registration_number.strip():
+            service_bits.append(f"注册证：{product.registration_number}")
+        if product and product.authorization_letter.strip():
+            service_bits.append(f"授权文件：{product.authorization_letter}")
+        if product and product.certifications:
+            service_bits.append(f"认证：{'、'.join(product.certifications[:3])}")
+        support_digest = "；".join(service_bits) if service_bits else "配合提交说明书、装箱单、合格证等随货资料"
+
+        parts.extend(
+            [
+                f"### 包{pkg.package_id}：{pkg.item_name}",
+                f"- 拟投产品：{product_identity}",
+                f"- 交货期：{pkg.delivery_time or '按采购文件约定'}",
+                f"- 交货地点：{pkg.delivery_place or '采购人指定地点'}",
+                "",
+                "#### 1. 供货组织与进度安排",
+                f"围绕{pkg.item_name}建立专项交付计划，按“备货复核-发运预约-到货签收-安装调试-培训验收”五个节点推进，本包拟投产品为{product_identity}，重点跟踪{spec_digest}等关键交付信息。",
+                "",
+                "#### 2. 包装运输与到货保护",
+                f"结合{pkg.item_name}的运输特性执行原厂包装、防震防潮和到货外观检查；到货后按装箱清单、随机附件和关键部件逐项点验，异常情况第一时间留痕并启动补发或整改。",
+                "",
+                "#### 3. 安装调试与场地联动",
+                functional_notes,
+                "",
+                "#### 4. 培训实施",
+                training_notes,
+                "",
+                "#### 5. 验收与资料移交",
+                f"{acceptance_notes}；同步移交{support_digest}。",
+                "",
+                "#### 6. 售后与维保安排",
+                f"针对{pkg.item_name}安排项目联系人、安装调试工程师和售后支持人员，围绕{spec_digest}建立巡检、故障响应、备件支持和版本升级的服务闭环。",
+                "",
+            ]
+        )
+    parts.extend(["供应商全称：【待填写：投标人名称】", f"日期：{_today_cn_date()}"])
+    return "\n".join(parts).strip()
+
+
+def _maybe_rebuild_section_content(
+    section: BidDocumentSection,
+    tender: TenderDocument,
+    products: dict[str, ProductSpecification],
+    evidence_result: dict[str, Any] | None = None,
+) -> str:
+    title = _safe_text(section.section_title)
+    content = _safe_text(section.content)
+    if "技术偏离及详细配置明细表" in title or "技术偏离及详细配置明细表" in content:
+        if products and _coarse_technical_section(content):
+            return _build_materialized_technical_section(tender, products, evidence_result)
+    if "技术服务和售后服务的内容及措施" in title and products:
+        return _build_materialized_service_section(tender, products)
+    return ""
+
+
+def _find_review_match(
+    evidence_result: dict[str, Any] | None,
+    package_id: str | None,
+    item_name: str,
+    requirement: str = "",
+) -> dict[str, Any] | None:
+    haystack = _safe_text(f"{item_name} {requirement}")
+    if not haystack:
+        return None
+    for match in _package_technical_matches(evidence_result, package_id):
+        if not isinstance(match, dict):
+            continue
+        parameter_name = _safe_text(match.get("parameter_name"), "")
+        if parameter_name and (parameter_name in haystack or _parameter_name_matches(parameter_name, haystack)):
+            return match
+    return None
+
+
+def _resolve_review_location(item_name: str, requirement: str, package_id: str | None) -> str:
+    haystack = _safe_text(f"{item_name} {requirement}")
+    if any(token in haystack for token in ("营业执照", "资格承诺", "授权书", "法定代表人", "授权代表", "信用", "社保")):
+        return "第一章 资格性证明文件"
+    if any(token in haystack for token in ("报价", "价格", "总价", "投标报价")):
+        return "第二章/第三章 报价相关章节"
+    if any(token in haystack for token in ("技术", "参数", "品牌", "型号", "配置", "性能", "偏离")):
+        return f"技术偏离及详细配置明细表（第{package_id or '对应'}包）"
+    if any(token in haystack for token in ("供货", "运输", "安装", "调试", "培训", "验收", "售后", "维保", "升级")):
+        return f"技术服务和售后服务的内容及措施（第{package_id or '对应'}包）"
+    return "对应章节见正文"
+
+
+def _resolve_review_evidence(
+    item_name: str,
+    requirement: str,
+    package_id: str | None,
+    company: CompanyProfile | None,
+    products: dict[str, ProductSpecification],
+    evidence_result: dict[str, Any] | None,
+) -> str:
+    location = _resolve_review_location(item_name, requirement, package_id)
+    haystack = _safe_text(f"{item_name} {requirement}")
+    product = _product_for_package(package_id, products) or _fallback_single_product(products)
+    match = _find_review_match(evidence_result, package_id, item_name, requirement)
+
+    if match:
+        label = _resolve_match_evidence_label(match)
+        page = _resolve_match_evidence_page(product, match, _safe_text(match.get("parameter_name"), item_name))
+        page_part = f" 第{page}页" if page != "待补页码" else ""
+        return f"{location}；{label}{page_part}"
+
+    if company and any(token in haystack for token in ("营业执照", "许可证", "资质")) and company.licenses:
+        license_item = company.licenses[0]
+        return f"{location}；{license_item.license_type}（{license_item.license_number}）"
+
+    if company and any(token in haystack for token in ("社保", "保险")) and company.social_insurance_proof.strip():
+        return f"{location}；{company.social_insurance_proof}"
+
+    if product and any(token in haystack for token in ("注册证", "备案", "医疗器械")) and product.registration_number.strip():
+        return f"{location}；注册证编号：{product.registration_number}"
+
+    if product and "授权" in haystack and product.authorization_letter.strip():
+        return f"{location}；{product.authorization_letter}"
+
+    if product and any(token in haystack for token in ("认证", "证书", "节能", "环保")) and product.certifications:
+        return f"{location}；{'、'.join(product.certifications[:3])}"
+
+    return f"见{location}"
+
+
 def _replace_placeholder_line(
     section_title: str,
     current_heading: str,
@@ -488,6 +856,10 @@ def _detect_table_mode(cells: list[str]) -> str:
         return "evidence_mapping"
     if "校验项" in joined and "证据载体" in joined and "校验状态" in joined:
         return "response_checklist"
+    if ("评审项" in joined or "评审因素" in joined) and ("证明材料/页码" in joined or "证明材料页码" in joined):
+        return "review_detailed"
+    if "投标文件所在页码" in joined or "投标文件对应页码" in joined or "对应材料/页码" in joined:
+        return "review_page"
     if "投标报价(元)" in joined and "预算金额(元)" in joined:
         return "quote_overview"
     if "规格型号" in joined and "生产厂家" in joined:
@@ -526,6 +898,9 @@ def _resolve_row_package_id(
 ) -> str | None:
     if current_package_id and current_package_id in products:
         return current_package_id
+
+    if len(products) == 1:
+        return next(iter(products.keys()))
 
     for pkg in tender.packages:
         haystack = " | ".join(cells)
@@ -571,6 +946,17 @@ def _materialize_section_content(
         "2. 与投标人存在直接控股、管理关系的其他单位：[待填写]",
         "2. 与投标人存在直接控股、管理关系的其他单位：无",
     )
+    content = _apply_structured_placeholders(content, company, fallback_product)
+
+    rebuilt_content = _maybe_rebuild_section_content(
+        section,
+        tender,
+        products,
+        evidence_result=evidence_result,
+    )
+    was_rebuilt = bool(rebuilt_content)
+    if rebuilt_content:
+        content = _apply_structured_placeholders(rebuilt_content, company, fallback_product)
 
     package_map = {pkg.package_id: pkg for pkg in tender.packages}
     updated_lines: list[str] = []
@@ -579,227 +965,286 @@ def _materialize_section_content(
     current_heading = ""
     current_table_mode = ""
     current_table_header: list[str] = []
-    for raw_line in content.splitlines():
-        line = raw_line
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            current_heading = re.sub(r"^#+\s*", "", stripped)
-            heading_package_id = _extract_heading_package_id(current_heading)
-            if heading_package_id:
-                current_package_id = heading_package_id
-            current_table_mode = ""
-            current_table_header = []
-        elif stripped.startswith("|"):
-            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-            if not cells or all(re.fullmatch(r"[-: ]+", cell) for cell in cells):
-                updated_lines.append(line)
-                continue
+    if was_rebuilt:
+        updated_lines = content.splitlines()
+    else:
+        for raw_line in content.splitlines():
+            line = raw_line
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                current_heading = re.sub(r"^#+\s*", "", stripped)
+                heading_package_id = _extract_heading_package_id(current_heading)
+                if heading_package_id:
+                    current_package_id = heading_package_id
+                current_table_mode = ""
+                current_table_header = []
+            elif stripped.startswith("|"):
+                cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+                if not cells or all(re.fullmatch(r"[-: ]+", cell) for cell in cells):
+                    updated_lines.append(line)
+                    continue
 
-            detected_table_mode = _detect_table_mode(cells)
-            if detected_table_mode:
-                current_table_mode = detected_table_mode
-                current_table_header = cells
-                updated_lines.append(line)
-                continue
+                detected_table_mode = _detect_table_mode(cells)
+                if detected_table_mode:
+                    current_table_mode = detected_table_mode
+                    current_table_header = cells
+                    updated_lines.append(line)
+                    continue
 
-            row_package_id = _resolve_row_package_id(current_package_id, cells, tender, products)
-            product = _product_for_package(row_package_id, products)
-            pkg = package_map.get(row_package_id) if row_package_id else None
+                row_package_id = _resolve_row_package_id(current_package_id, cells, tender, products)
+                product = _product_for_package(row_package_id, products)
+                pkg = package_map.get(row_package_id) if row_package_id else None
 
-            if current_table_mode == "detail_quote" and product and pkg and len(cells) >= 8:
-                quantity = pkg.quantity
-                try:
-                    if cells[6]:
-                        quantity = int(float(cells[6]))
-                except ValueError:
+                if current_table_mode == "detail_quote" and product and pkg and len(cells) >= 8:
                     quantity = pkg.quantity
-                cells[2] = _safe_text(product.model or product.product_name, cells[2])
-                cells[3] = _safe_text(product.manufacturer, cells[3])
-                cells[4] = _derive_brand(product)
-                if product.price > 0:
-                    cells[5] = _fmt_money(product.price)
-                    cells[7] = _fmt_money(product.price * quantity)
-                else:
-                    cells[5] = cells[5].replace("[待填写]", "[待确认]")
-                    cells[7] = cells[7].replace("[待填写]", "[待确认]")
-                line = "| " + " | ".join(cells) + " |"
-                changed = True
-            elif current_table_mode == "quote_overview" and product and pkg and len(cells) >= 6:
-                quantity = pkg.quantity
-                try:
-                    if cells[2]:
-                        quantity = int(float(cells[2]))
-                except ValueError:
-                    quantity = pkg.quantity
-                if product.price > 0:
-                    cells[4] = _fmt_money(product.price * quantity)
+                    try:
+                        if cells[6]:
+                            quantity = int(float(cells[6]))
+                    except ValueError:
+                        quantity = pkg.quantity
+                    cells[2] = _safe_text(product.model or product.product_name, cells[2])
+                    cells[3] = _safe_text(product.manufacturer, cells[3])
+                    cells[4] = _derive_brand(product)
+                    if product.price > 0:
+                        cells[5] = _fmt_money(product.price)
+                        cells[7] = _fmt_money(product.price * quantity)
+                    else:
+                        cells[5] = cells[5].replace("[待填写]", "[待确认]")
+                        cells[7] = cells[7].replace("[待填写]", "[待确认]")
                     line = "| " + " | ".join(cells) + " |"
                     changed = True
-            elif current_table_mode == "deviation" and len(cells) >= 5:
-                # Support both legacy 5-column and new 8-column deviation tables
-                parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
-                requirement_idx = _find_table_column(current_table_header, ("招标要求", "招标技术参数要求"))
-                response_idx = _find_table_column(current_table_header, ("投标产品响应参数", "响应情况", "实际响应值"))
-                deviation_idx = _find_table_column(current_table_header, ("偏离说明", "偏离情况"))
-                evidence_idx = _find_table_column(current_table_header, ("证据映射", "响应依据/证据映射", "证据材料"))
-                remark_idx = _find_table_column(current_table_header, ("说明/验收备注", "说明", "验收备注"))
-                model_idx = _find_table_column(current_table_header, ("投标型号",))
-                parameter_cell = _safe_text(cells[parameter_idx]) if 0 <= parameter_idx < len(cells) else ""
-                if requirement_idx >= 0 and requirement_idx != parameter_idx:
-                    parameter_name = parameter_cell.split("：", 1)[0].strip()
-                    requirement_value = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else parameter_cell
-                else:
-                    parameter_name = parameter_cell.split("：", 1)[0].strip()
-                    requirement_value = parameter_cell
-                match = _find_technical_match(evidence_result, row_package_id, parameter_name)
-                response_value = _resolve_materialized_response_value(product, match, parameter_name)
-                evaluation = _evaluate_requirement_response(requirement_value, response_value)
-
-                # Fill model column for 8-column format
-                if product and 0 <= model_idx < len(cells):
-                    p_model = _safe_text(product.model) or _safe_text(product.product_name)
-                    if p_model and (not cells[model_idx].strip() or cells[model_idx].strip() == "[待填写]"):
-                        cells[model_idx] = p_model
+                elif current_table_mode == "quote_overview" and product and pkg and len(cells) >= 6:
+                    quantity = pkg.quantity
+                    try:
+                        if cells[2]:
+                            quantity = int(float(cells[2]))
+                    except ValueError:
+                        quantity = pkg.quantity
+                    if product.price > 0:
+                        cells[4] = _fmt_money(product.price * quantity)
+                        line = "| " + " | ".join(cells) + " |"
                         changed = True
+                elif current_table_mode == "deviation" and len(cells) >= 5:
+                    # Support both legacy 5-column and new 8-column deviation tables
+                    parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
+                    requirement_idx = _find_table_column(current_table_header, ("招标要求", "招标技术参数要求"))
+                    response_idx = _find_table_column(current_table_header, ("投标产品响应参数", "响应情况", "实际响应值"))
+                    deviation_idx = _find_table_column(current_table_header, ("偏离说明", "偏离情况"))
+                    evidence_idx = _find_table_column(current_table_header, ("证据映射", "响应依据/证据映射", "证据材料"))
+                    remark_idx = _find_table_column(current_table_header, ("说明/验收备注", "说明", "验收备注"))
+                    model_idx = _find_table_column(current_table_header, ("投标型号",))
+                    parameter_cell = _safe_text(cells[parameter_idx]) if 0 <= parameter_idx < len(cells) else ""
+                    if requirement_idx >= 0 and requirement_idx != parameter_idx:
+                        parameter_name = parameter_cell.split("：", 1)[0].strip()
+                        requirement_value = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else parameter_cell
+                    else:
+                        parameter_name = parameter_cell.split("：", 1)[0].strip()
+                        requirement_value = parameter_cell
+                    match = _find_technical_match(evidence_result, row_package_id, parameter_name)
+                    response_value = _resolve_materialized_response_value(product, match, parameter_name)
+                    evaluation = _evaluate_requirement_response(requirement_value, response_value)
 
-                if response_value:
+                    # Fill model column for 8-column format
+                    if product and 0 <= model_idx < len(cells):
+                        p_model = _safe_text(product.model) or _safe_text(product.product_name)
+                        if p_model and (not cells[model_idx].strip() or cells[model_idx].strip() == "[待填写]"):
+                            cells[model_idx] = p_model
+                            changed = True
+
+                    response_value = _resolve_materialized_response_value(product, match, parameter_name)
+                    evaluation = _evaluate_requirement_response(requirement_value, response_value)
+                    is_proven = bool(match and match.get("proven"))
+                    has_fact = bool(response_value)
+
+                    # 响应列
                     if 0 <= response_idx < len(cells):
-                        cells[response_idx] = response_value
+                        if has_fact:
+                            cells[response_idx] = response_value
+                        else:
+                            cells[response_idx] = "【待填写：实际响应值】"
+
+                    # 偏离列
                     if 0 <= deviation_idx < len(cells):
-                        cells[deviation_idx] = _resolve_materialized_deviation_status(match, evaluation)
+                        if has_fact and (is_proven or evaluation.get("deviation_status") in {"无偏离", "有偏离"}):
+                            cells[deviation_idx] = _resolve_materialized_deviation_status(match, evaluation)
+                        else:
+                            cells[deviation_idx] = "【待填写：无偏离/正偏离/负偏离】"
+
+                    # 证据列
                     if 0 <= evidence_idx < len(cells):
-                        cells[evidence_idx] = _compose_binding_quote(
-                            match,
-                            parameter_name=parameter_name,
-                            requirement_value=requirement_value,
-                            fallback_response_value=response_value,
-                        )
+                        if match:
+                            cells[evidence_idx] = _compose_binding_quote(
+                                match,
+                                parameter_name=parameter_name,
+                                requirement_value=requirement_value,
+                                fallback_response_value=response_value,
+                            )
+                        else:
+                            cells[evidence_idx] = "【待补证：说明书/彩页/厂家参数表】"
+
+                    # 备注列
                     if 0 <= remark_idx < len(cells):
-                        if match and bool(match.get("proven")):
-                            cells[remark_idx] = "已匹配产品参数"
+                        if is_proven and has_fact:
+                            cells[remark_idx] = "已完成参数与投标证据闭环"
+                        elif has_fact:
+                            cells[remark_idx] = "已写入实参，待补投标方证据页码"
                         else:
-                            cells[remark_idx] = "需补充投标方证据"
-                    line = "| " + " | ".join(cells) + " |"
-                    changed = True
-                elif 0 <= deviation_idx < len(cells):
-                    if 0 <= response_idx < len(cells):
-                        # 富展开模式：尝试产品上下文描述
-                        if _RICH_EXPANSION_MODE and product is not None:
-                            p_name = _safe_text(product.product_name)
-                            p_mfr = _safe_text(product.manufacturer, "")
-                            if p_name:
-                                cells[response_idx] = f"响应，投标产品（{p_mfr} {p_name}）满足该项要求"
-                            else:
-                                cells[response_idx] = _PENDING_RESPONSE_TEXT
-                        else:
-                            cells[response_idx] = _PENDING_RESPONSE_TEXT
-                    cells[deviation_idx] = "待核实"
-                    if 0 <= evidence_idx < len(cells):
-                        cells[evidence_idx] = _compose_binding_quote(
-                            match,
-                            parameter_name=parameter_name,
-                            requirement_value=requirement_value,
-                        )
-                    line = "| " + " | ".join(cells) + " |"
-                    changed = True
-            elif current_table_mode == "main_parameter" and len(cells) >= 5:
-                parameter_name = _safe_text(cells[1])
-                match = _find_technical_match(evidence_result, row_package_id, parameter_name)
-                response_value = _resolve_materialized_response_value(product, match, parameter_name)
-                evaluation = _evaluate_requirement_response(_safe_text(cells[2]), response_value)
-                if response_value:
-                    cells[3] = response_value
-                    if len(cells) >= 5:
-                        cells[4] = _resolve_materialized_deviation_status(match, evaluation)
-                    line = "| " + " | ".join(cells) + " |"
-                    changed = True
-                else:
-                    cells[3] = _PENDING_RESPONSE_TEXT
-                    if len(cells) >= 5:
-                        cells[4] = "待核实"
-                    line = "| " + " | ".join(cells) + " |"
-                    changed = True
-            elif current_table_mode == "evidence_mapping" and len(cells) >= 5:
-                parameter_idx = _find_table_column(current_table_header, ("技术参数项", "参数项"))
-                source_idx = _find_table_column(current_table_header, ("证据来源",))
-                quote_idx = _find_table_column(current_table_header, ("原文片段", "证据摘要"))
-                parameter_name = _safe_text(cells[parameter_idx]) if 0 <= parameter_idx < len(cells) else ""
-                match = _find_technical_match(evidence_result, row_package_id, parameter_name)
-                if 0 <= source_idx < len(cells):
-                    cells[source_idx] = _compose_binding_sources(match)
-                if 0 <= quote_idx < len(cells):
-                    cells[quote_idx] = _compose_binding_quote(
-                        match,
-                        parameter_name=parameter_name,
-                        requirement_value=_safe_text(match.get("requirement_value") if match else ""),
-                        fallback_requirement_quote=_safe_text(cells[quote_idx]),
-                        fallback_response_value=_safe_text(match.get("response_value") if match else ""),
-                    )
-                line = "| " + " | ".join(cells) + " |"
-                changed = True
-            elif current_table_mode == "response_checklist" and len(cells) >= 5:
-                item_name = _safe_text(cells[1])
-                package_matches = _package_technical_matches(evidence_result, row_package_id)
-                package_total = len(package_matches)
-                package_proven = len([item for item in package_matches if bool(item.get("proven"))])
-                if "关键技术参数逐条响应" in item_name:
-                    cells[2] = (
-                        "暂无可核技术参数"
-                        if package_total == 0
-                        else f"已证实 {package_proven}/{package_total} 项；其余 {max(0, package_total - package_proven)} 项待补证"
-                    )
-                    cells[4] = "已完成" if 0 < package_total == package_proven else "待补证"
-                    line = "| " + " | ".join(cells) + " |"
-                    changed = True
-                elif "技术条款证据映射" in item_name:
-                    cells[2] = (
-                        "暂无可映射技术参数"
-                        if package_total == 0
-                        else f"已形成 {package_total} 条映射，其中已证实 {package_proven} 条"
-                    )
-                    cells[4] = (
-                        "已完成"
-                        if package_total > 0 and package_proven / package_total >= _MIN_PROVEN_COMPLETION_RATE
-                        else "待补证"
-                    )
+                            cells[remark_idx] = "待补实际响应值与证据"
+
                     line = "| " + " | ".join(cells) + " |"
                     changed = True
 
-            if "投标总报价" in line and "[待填写]" in line:
-                total_price = 0.0
-                total_ready = False
-                for pkg_id, product in products.items():
-                    pkg = package_map.get(pkg_id)
-                    if pkg and product.price > 0:
-                        total_price += product.price * pkg.quantity
-                        total_ready = True
-                if total_ready:
-                    line = line.replace("[待填写]", _fmt_money(total_price))
+                elif current_table_mode == "main_parameter" and len(cells) >= 5:
+                    parameter_name = _safe_text(cells[1])
+                    match = _find_technical_match(evidence_result, row_package_id, parameter_name)
+                    response_value = _resolve_materialized_response_value(product, match, parameter_name)
+                    evaluation = _evaluate_requirement_response(_safe_text(cells[2]), response_value)
+                    if response_value:
+                        cells[3] = response_value
+                        if len(cells) >= 5:
+                            cells[4] = _resolve_materialized_deviation_status(match, evaluation)
+                        line = "| " + " | ".join(cells) + " |"
+                        changed = True
+                    else:
+                        cells[3] = _PENDING_RESPONSE_TEXT
+                        if len(cells) >= 5:
+                            cells[4] = "待核实"
+                        line = "| " + " | ".join(cells) + " |"
+                        changed = True
+                elif current_table_mode == "evidence_mapping" and len(cells) >= 5:
+                    parameter_idx = _find_table_column(current_table_header, ("技术参数项", "参数项"))
+                    source_idx = _find_table_column(current_table_header, ("证据来源",))
+                    quote_idx = _find_table_column(current_table_header, ("原文片段", "证据摘要"))
+                    parameter_name = _safe_text(cells[parameter_idx]) if 0 <= parameter_idx < len(cells) else ""
+                    match = _find_technical_match(evidence_result, row_package_id, parameter_name)
+                    if 0 <= source_idx < len(cells):
+                        cells[source_idx] = _compose_binding_sources(match)
+                    if 0 <= quote_idx < len(cells):
+                        cells[quote_idx] = _compose_binding_quote(
+                            match,
+                            parameter_name=parameter_name,
+                            requirement_value=_safe_text(match.get("requirement_value") if match else ""),
+                            fallback_requirement_quote=_safe_text(cells[quote_idx]),
+                            fallback_response_value=_safe_text(match.get("response_value") if match else ""),
+                        )
+                    line = "| " + " | ".join(cells) + " |"
                     changed = True
-            if "合计" in line and "[待填写]" in line:
-                total_price = 0.0
-                total_ready = False
-                for pkg_id, product in products.items():
-                    pkg = package_map.get(pkg_id)
-                    if pkg and product.price > 0:
-                        total_price += product.price * pkg.quantity
-                        total_ready = True
-                if total_ready:
-                    line = line.replace("[待填写]", _fmt_money(total_price))
+                elif current_table_mode == "response_checklist" and len(cells) >= 5:
+                    item_name = _safe_text(cells[1])
+                    package_matches = _package_technical_matches(evidence_result, row_package_id)
+                    package_total = len(package_matches)
+                    package_proven = len([item for item in package_matches if bool(item.get("proven"))])
+                    if "关键技术参数逐条响应" in item_name:
+                        cells[2] = (
+                            "暂无可核技术参数"
+                            if package_total == 0
+                            else f"已证实 {package_proven}/{package_total} 项；其余 {max(0, package_total - package_proven)} 项待补证"
+                        )
+                        cells[4] = "已完成" if 0 < package_total == package_proven else "待补证"
+                        line = "| " + " | ".join(cells) + " |"
+                        changed = True
+                    elif "技术条款证据映射" in item_name:
+                        cells[2] = (
+                            "暂无可映射技术参数"
+                            if package_total == 0
+                            else f"已形成 {package_total} 条映射，其中已证实 {package_proven} 条"
+                        )
+                        cells[4] = (
+                            "已完成"
+                            if package_total > 0 and package_proven / package_total >= _MIN_PROVEN_COMPLETION_RATE
+                            else "待补证"
+                        )
+                        line = "| " + " | ".join(cells) + " |"
+                        changed = True
+                elif current_table_mode == "review_detailed" and len(cells) >= 4:
+                    item_idx = _find_table_column(current_table_header, ("评审项", "评审因素", "内容", "审查项"))
+                    requirement_idx = _find_table_column(current_table_header, ("采购文件评分要求", "评分标准", "评审标准", "招标文件要求"))
+                    response_idx = _find_table_column(current_table_header, ("响应文件对应内容", "响应情况"))
+                    self_idx = _find_table_column(current_table_header, ("自评说明", "是否满足"))
+                    evidence_idx = _find_table_column(current_table_header, ("证明材料/页码", "证明材料页码", "证明材料", "页码"))
+                    item_name = _safe_text(cells[item_idx]) if 0 <= item_idx < len(cells) else ""
+                    requirement = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else ""
+                    location = _resolve_review_location(item_name, requirement, row_package_id)
+                    evidence_ref = _resolve_review_evidence(
+                        item_name,
+                        requirement,
+                        row_package_id,
+                        company,
+                        products,
+                        evidence_result,
+                    )
+                    if 0 <= response_idx < len(cells) and (
+                        not cells[response_idx].strip() or "待填写" in cells[response_idx]
+                    ):
+                        cells[response_idx] = location
+                        changed = True
+                    if 0 <= self_idx < len(cells) and (
+                        not cells[self_idx].strip() or "待填写" in cells[self_idx]
+                    ):
+                        cells[self_idx] = "已按对应章节逐项响应"
+                        changed = True
+                    if 0 <= evidence_idx < len(cells) and (
+                        not cells[evidence_idx].strip() or "待填写" in cells[evidence_idx]
+                    ):
+                        cells[evidence_idx] = evidence_ref
+                        changed = True
+                    line = "| " + " | ".join(cells) + " |"
+                elif current_table_mode == "review_page" and len(cells) >= 3:
+                    item_idx = _find_table_column(current_table_header, ("审查内容", "审查项", "评审项", "评审因素", "内容"))
+                    requirement_idx = _find_table_column(current_table_header, ("合格条件", "招标文件要求", "评审标准", "采购文件评分要求"))
+                    page_idx = _find_table_column(current_table_header, ("投标文件所在页码", "投标文件对应页码", "对应材料/页码", "页码"))
+                    item_name = _safe_text(cells[item_idx]) if 0 <= item_idx < len(cells) else ""
+                    requirement = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else ""
+                    page_ref = _resolve_review_evidence(
+                        item_name,
+                        requirement,
+                        row_package_id,
+                        company,
+                        products,
+                        evidence_result,
+                    )
+                    if 0 <= page_idx < len(cells) and (
+                        not cells[page_idx].strip() or "待填写" in cells[page_idx]
+                    ):
+                        cells[page_idx] = page_ref
+                        changed = True
+                    line = "| " + " | ".join(cells) + " |"
+
+                if "投标总报价" in line and "[待填写]" in line:
+                    total_price = 0.0
+                    total_ready = False
+                    for pkg_id, product in products.items():
+                        pkg = package_map.get(pkg_id)
+                        if pkg and product.price > 0:
+                            total_price += product.price * pkg.quantity
+                            total_ready = True
+                    if total_ready:
+                        line = line.replace("[待填写]", _fmt_money(total_price))
+                        changed = True
+                if "合计" in line and "[待填写]" in line:
+                    total_price = 0.0
+                    total_ready = False
+                    for pkg_id, product in products.items():
+                        pkg = package_map.get(pkg_id)
+                        if pkg and product.price > 0:
+                            total_price += product.price * pkg.quantity
+                            total_ready = True
+                    if total_ready:
+                        line = line.replace("[待填写]", _fmt_money(total_price))
+                        changed = True
+            else:
+                replaced_line = _replace_placeholder_line(
+                    section_title=section.section_title,
+                    current_heading=current_heading,
+                    current_package_id=current_package_id,
+                    raw_line=line,
+                    company=company,
+                    products=products,
+                )
+                if replaced_line != line:
+                    line = replaced_line
                     changed = True
-        else:
-            replaced_line = _replace_placeholder_line(
-                section_title=section.section_title,
-                current_heading=current_heading,
-                current_package_id=current_package_id,
-                raw_line=line,
-                company=company,
-                products=products,
-            )
-            if replaced_line != line:
-                line = replaced_line
-                changed = True
-        updated_lines.append(line)
+            updated_lines.append(line)
 
     enriched_content = "\n".join(updated_lines).strip()
     extra_blocks: list[str] = []

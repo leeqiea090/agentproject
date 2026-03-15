@@ -729,7 +729,7 @@ def _extract_zb_rows_from_pkg_requirements(pkg) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     for idx, (key, value) in enumerate(requirements.items(), start=1):
         key_text = _clean_text(key)
-        value_text = _clean_text(_as_text(value))
+        value_text = _clean_text(value)
         clause_no = key_text if re.fullmatch(r"[★▲]?\d+(?:\.\d+)*", key_text) else str(idx)
         if value_text and key_text and key_text != clause_no:
             requirement = f"{key_text}：{value_text}"
@@ -1761,7 +1761,12 @@ def _build_zb_sections(
     tender_raw: str,
     products: dict | None = None,
     active_packages: list | None = None,
+    *,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profiles: dict | None = None,
 ) -> list:
+    _ = (products, normalized_result, evidence_result, product_profiles)
     packages = active_packages or tender.packages
     entries = _get_zb_template_entries(tender)
 

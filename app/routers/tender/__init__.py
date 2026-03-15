@@ -24,3 +24,5 @@ for _module in (
 del _module
 
 from .common import router
+
+__all__ = ["router"]

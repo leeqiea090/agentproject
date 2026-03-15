@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .common import *  # noqa: F401,F403
+from app.services.one_click_generator.config_tables import _build_configuration_table
 
 _CS_APPENDIX_TITLES = [
     "附一、资格性审查响应对照表",
@@ -9,6 +10,12 @@ _CS_APPENDIX_TITLES = [
     "附三、详细评审响应对照表",
     "附四、投标无效情形汇总及自检表",
 ]
+
+from app.services.one_click_generator.response_tables import (
+    _build_requirement_rows,
+    _build_deviation_table,
+    _has_real_bidder_response,
+)
 
 _CS_TEMPLATE_PATTERNS: list[tuple[str, str]] = [
     ("一、响应文件封面格式", r"一\s*、\s*响应文件封面格式"),
@@ -137,6 +144,27 @@ def _dedupe_consecutive_lines(lines: list[str]) -> list[str]:
     return result
 
 
+def _looks_like_cs_title_fragment(line: str, title: str) -> bool:
+    compact = _clean_text(line)
+    if not compact:
+        return False
+    if any(token in compact for token in ("签字", "公章", "复印件", "授权", "电话", "地址", "邮编", "传真")):
+        return False
+
+    normalized_line = re.sub(r"[\s#`*:：、（）()/_\-—]", "", compact)
+    if len(normalized_line) < 4:
+        return False
+
+    for candidate, _ in _CS_TEMPLATE_PATTERNS:
+        normalized_title = re.sub(r"[\s#`*:：、（）()/_\-—]", "", candidate)
+        if normalized_line == normalized_title:
+            return True
+        if len(normalized_line) <= 14 and normalized_line in normalized_title:
+            return True
+    current_title = re.sub(r"[\s#`*:：、（）()/_\-—]", "", title)
+    return len(normalized_line) <= 14 and normalized_line in current_title
+
+
 def _clean_template_block(block: str, title: str) -> str:
     body = re.sub(r"-\s*第\s*\d+\s*页\s*-", "", block or "")
     body = body.strip()
@@ -157,6 +185,8 @@ def _clean_template_block(block: str, title: str) -> str:
         if compact == _clean_text(title):
             continue
         if compact in {"第 37 页", "第 38 页", "第 39 页", "第 40 页", "第 41 页", "第 42 页"}:
+            continue
+        if _looks_like_cs_title_fragment(line, title):
             continue
         cleaned.append(line.strip())
 
@@ -650,37 +680,57 @@ def _extract_cs_requirement_rows(pkg, tender_raw: str) -> list[dict]:
     ]
 
 
-def _build_cs_pkg_deviation_table(tender, pkg, tender_raw: str) -> str:
-    qty = _extract_package_quantity(pkg, tender_raw)
-    rows = _extract_cs_requirement_rows(pkg, tender_raw)
+def _build_cs_pkg_deviation_table(
+    tender,
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profile: dict | None = None,
+) -> str:
+    requirement_rows, total_requirements = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+    )
+    table = _build_deviation_table(
+        tender,
+        pkg,
+        requirement_rows,
+        total_requirements,
+        product=product,
+    )
+    table_lines = table.splitlines()
+    if table_lines and table_lines[0].startswith("### 四、技术偏离及详细配置明细表"):
+        table = "\n".join(table_lines[1:]).lstrip()
+    config_table = _build_configuration_table(
+        pkg,
+        tender_raw,
+        product=product,
+        product_profile=product_profile,
+        normalized_result=normalized_result,
+    )
 
-    lines = [
-        f"### 包{pkg.package_id}：{pkg.item_name}",
-        f"项目名称：{tender.project_name}",
-        f"项目编号：{tender.project_number}",
-        f"数量：{qty}",
-        f"交货期：{_extract_delivery_time(pkg, tender_raw)}",
-        f"交货地点：{_extract_delivery_place(pkg, tender_raw)}",
-        "",
-        "| 序号 | 服务名称 | 磋商文件的服务需求 | 响应文件响应情况 | 偏离情况 |",
-        "|---:|---|---|---|---|",
-    ]
-
-    for row in rows:
-        lines.append(
-            f"| {row['seq']} | {row['item_name']} | {row['requirement']} | "
-            f"【待填写：品牌/型号/规格/配置及逐条响应】 | "
-            f"【待填写：无偏离/正偏离/负偏离】 |"
-        )
-
-    lines.extend([
-        "",
-        "说明：带“※/★”或采购文件明确为实质性条款的项目，必须逐条实质性响应，不能只写“响应/完全响应”。",
-        "",
-        "供应商全称：【待填写：投标人名称】",
-        "日期：【待填写：年 月 日】",
-    ])
-    return "\n".join(lines)
+    quantity = _extract_package_quantity(pkg, tender_raw)
+    delivery_time = _extract_delivery_time(pkg, tender_raw)
+    delivery_place = _extract_delivery_place(pkg, tender_raw)
+    return "\n".join(
+        [
+            f"### 包{pkg.package_id}：{pkg.item_name}",
+            f"数量：{quantity}",
+            f"交货期：{delivery_time}",
+            f"交货地点：{delivery_place}",
+            "",
+            table,
+            "",
+            config_table,
+        ]
+    ).strip()
 
 
 def _extract_cs_service_points(pkg, tender_raw: str) -> list[str]:
@@ -715,14 +765,63 @@ def _extract_cs_service_points(pkg, tender_raw: str) -> list[str]:
     return cleaned
 
 
-def _build_cs_service_section(packages, tender_raw: str) -> str:
+def _structured_cs_service_points(
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profile: dict | None = None,
+) -> list[str]:
+    if not normalized_result:
+        return []
+    rows, _ = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+        category_filter="service_requirement",
+    )
+    points: list[str] = []
+    for row in rows:
+        key = _clean_text(row.get("key") or "")
+        requirement = _clean_text(row.get("requirement") or "")
+        if not key and not requirement:
+            continue
+        response = _clean_text(row.get("response") or "")
+        if response and _has_real_bidder_response(response):
+            points.append(f"{key}：{requirement}；我方响应：{response}".strip("："))
+        else:
+            points.append(f"{key}：{requirement}".strip("："))
+    return points
+
+
+def _build_cs_service_section(
+    packages,
+    tender_raw: str,
+    *,
+    products: dict | None = None,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profiles: dict | None = None,
+) -> str:
     parts: list[str] = []
 
     for pkg in packages:
         qty = _extract_package_quantity(pkg, tender_raw)
         delivery_time = _extract_delivery_time(pkg, tender_raw)
         delivery_place = _extract_delivery_place(pkg, tender_raw)
-        raw_service_points = _extract_cs_service_points(pkg, tender_raw)
+        raw_service_points = _structured_cs_service_points(
+            pkg,
+            tender_raw,
+            product=(products or {}).get(pkg.package_id),
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profile=(product_profiles or {}).get(pkg.package_id),
+        ) or _extract_cs_service_points(pkg, tender_raw)
 
         parts.extend([
             f"### 包{pkg.package_id}：{pkg.item_name}",
@@ -857,8 +956,11 @@ def _build_cs_sections(
     tender_raw: str,
     products: dict | None = None,
     active_packages: list | None = None,
+    *,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profiles: dict | None = None,
 ) -> list:
-    _ = products
     packages = active_packages or tender.packages
     sections = []
 
@@ -897,14 +999,32 @@ def _build_cs_sections(
     sections.append(
         BidDocumentSection(
             section_title="四、技术偏离及详细配置明细表",
-            content="\n\n".join(_build_cs_pkg_deviation_table(tender, pkg, tender_raw) for pkg in packages).strip(),
+            content="\n\n".join(
+                _build_cs_pkg_deviation_table(
+                    tender,
+                    pkg,
+                    tender_raw,
+                    product=(products or {}).get(pkg.package_id),
+                    normalized_result=normalized_result,
+                    evidence_result=evidence_result,
+                    product_profile=(product_profiles or {}).get(pkg.package_id),
+                )
+                for pkg in packages
+            ).strip()
         )
     )
 
     sections.append(
         BidDocumentSection(
             section_title="五、技术服务和售后服务的内容及措施",
-            content=_build_cs_service_section(packages, tender_raw),
+            content=_build_cs_service_section(
+                packages,
+                tender_raw,
+                products=products,
+                normalized_result=normalized_result,
+                evidence_result=evidence_result,
+                product_profiles=product_profiles,
+            ),
         )
     )
 

@@ -300,12 +300,17 @@ def _safe_text(text: str | None, default: str = "详见招标文件") -> str:
     if text is None:
         return default
     stripped = str(text).strip()
+    if stripped.lower() in {"none", "null", "nan"}:
+        return default
     return stripped or default
 
 
 def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
     if isinstance(value, str):
-        return value.strip()
+        stripped = value.strip()
+        return "" if stripped.lower() in {"none", "null", "nan"} else stripped
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, dict):
@@ -417,8 +422,8 @@ def _split_compound_requirement(key: str, value: str) -> list[tuple[str, str]]:
     if re.fullmatch(r"[≥≤><\d\s.+\-~～至到%％μmLnNgGhHzZkKwWtT/*()（）]+", value.strip()):
         return [(key, value)]
 
-    _VERB_MARKERS = ("具备", "支持", "提供", "满足", "采用", "配置", "配备", "可", "能够", "应", "须")
     _COMPOUND_DELIMITERS = r"(?<=[）\)\u4e00-\u9fff])、(?=[\u4e00-\u9fff])"
+    _CONTINUATION_PREFIXES = ("或", "及", "和", "并", "且", "同时", "以及", "并且")
 
     fragments = re.split(_COMPOUND_DELIMITERS, value)
     if len(fragments) < 2:
@@ -431,6 +436,12 @@ def _split_compound_requirement(key: str, value: str) -> list[tuple[str, str]]:
         frag = frag.strip(" ，,；;。、")
         if not frag or len(frag) < 3:
             continue
+        if results and not _extract_requirement_pair(frag) and frag.startswith(_CONTINUATION_PREFIXES):
+            prev_key, prev_val = results[-1]
+            results[-1] = (prev_key, f"{prev_val}；{frag}")
+            continue
+        if frag == key or (frag in key and len(frag) <= len(key)):
+            continue
         # 语义完整性检查：拆后条目 key+frag 必须 >= 6 字才允许入表
         if len(frag) < 6 and not any(m in frag for m in _HARD_REQUIREMENT_MARKERS) and not re.search(r"\d", frag):
             continue
@@ -441,6 +452,49 @@ def _split_compound_requirement(key: str, value: str) -> list[tuple[str, str]]:
             results.append((key, frag))
 
     return results if len(results) > 1 else [(key, value)]
+
+
+_GENERIC_REQUIREMENT_VALUE_MARKERS = (
+    "详见招标文件",
+    "详见采购文件",
+    "按招标文件",
+    "按采购文件",
+    "见附件",
+    "见清单",
+)
+
+
+def _requirement_value_quality(key: str, value: str) -> int:
+    text = _safe_text(value, "").strip()
+    if not text:
+        return -100
+
+    score = min(len(text), 24)
+    if any(marker in text for marker in _GENERIC_REQUIREMENT_VALUE_MARKERS):
+        score -= 12
+    if any(marker in text for marker in _HARD_REQUIREMENT_MARKERS):
+        score += 8
+    if re.search(r"\d", text):
+        score += 6
+    if _UNIT_PATTERN.search(text):
+        score += 3
+    if _contains_any(text, _TECH_KEYWORDS):
+        score += 2
+    if text.startswith(("、", "，", ",", "；", ";")):
+        score -= 8
+    if text.startswith(("或", "及", "和", "并", "且")):
+        score -= 3
+    if key and (text == key or (key in text and len(text) <= len(key) + 2)):
+        score -= 8
+    return score
+
+
+def _prefer_requirement_value(key: str, candidate: str, existing: str) -> bool:
+    candidate_score = _requirement_value_quality(key, candidate)
+    existing_score = _requirement_value_quality(key, existing)
+    if candidate_score != existing_score:
+        return candidate_score > existing_score
+    return len(_safe_text(candidate, "")) > len(_safe_text(existing, ""))
 
 
 def _expand_requirement_entry(key: str, value: str) -> list[tuple[str, str]]:
@@ -530,7 +584,13 @@ def _extract_requirements_from_raw(pkg: ProcurementPackage, tender_raw: str) -> 
         if not scoped and not _looks_like_technical_requirement(normalized):
             continue
 
-        fragments = [frag for frag in re.split(r"[；;。]", normalized) if frag.strip()]
+        raw_fragments = [frag.strip() for frag in re.split(r"[；;。]", normalized) if frag.strip()]
+        fragments: list[str] = []
+        for fragment in raw_fragments:
+            if fragments and fragment.startswith(("或", "及", "和", "并", "且")):
+                fragments[-1] = f"{fragments[-1]}；{fragment}"
+                continue
+            fragments.append(fragment)
         for fragment in fragments:
             if _contains_any(fragment, _TECH_EXIT_HINTS):
                 continue
@@ -567,7 +627,13 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
         return [(key, normalized_val or "详见招标文件")]
 
     # 检测是否含多个参数（用、；分隔，且每段含数值或技术关键词）
-    segments = re.split(r"[；;]", normalized_val)
+    raw_segments = [seg.strip() for seg in re.split(r"[；;]", normalized_val) if seg.strip()]
+    segments: list[str] = []
+    for seg in raw_segments:
+        if segments and seg.startswith(("或", "及", "和", "并", "且")):
+            segments[-1] = f"{segments[-1]}；{seg}"
+            continue
+        segments.append(seg)
     if len(segments) <= 1:
         # 尝试用、分隔 — 阈值降至2段，且只需大多数含技术内容即可
         sub_segments = re.split(r"、", normalized_val)
@@ -675,13 +741,23 @@ def _effective_requirements(pkg: ProcurementPackage, tender_raw: str) -> list[tu
     extra_pairs = _extract_requirements_from_raw(pkg, package_scoped_raw)
 
     if extra_pairs:
-        existing_keys = {key for key, _ in requirements}
-        merged = list(requirements)
-        for key, val in extra_pairs:
-            if key in existing_keys:
+        merged_map: dict[str, str] = {}
+        key_order: list[str] = []
+        for key, val in requirements:
+            if key not in merged_map:
+                key_order.append(key)
+                merged_map[key] = val
                 continue
-            merged.append((key, val))
-            existing_keys.add(key)
+            if _prefer_requirement_value(key, val, merged_map[key]):
+                merged_map[key] = val
+        for key, val in extra_pairs:
+            if key not in merged_map:
+                key_order.append(key)
+                merged_map[key] = val
+                continue
+            if _prefer_requirement_value(key, val, merged_map[key]):
+                merged_map[key] = val
+        merged = [(key, merged_map[key]) for key in key_order]
         atomized = _atomize_requirements(merged)
     else:
         atomized = _atomize_requirements(requirements)

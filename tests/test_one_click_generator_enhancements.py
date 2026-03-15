@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.schemas import BidDocumentSection, BidEvidenceBinding, CommercialTerms, NormalizedRequirement, ProcurementPackage, TenderDocument
+from app.schemas import BidDocumentSection, BidEvidenceBinding, CommercialTerms, NormalizedRequirement, ProcurementPackage, ProductSpecification, TenderDocument
 from app.services.one_click_generator import (
     _apply_template_pollution_guard,
     _build_configuration_table,
@@ -14,6 +14,9 @@ from app.services.one_click_generator import (
     _gen_technical,
     generate_bid_sections,
 )
+from app.services.one_click_generator.format_driven_sections.common import _build_pkg_deviation_table
+from app.services.one_click_generator.pipeline import _pack_normalized_result
+from app.services.one_click_generator.response_tables import _build_deviation_table
 from app.services.evidence_binder import _extract_evidence_snippet
 from app.services.one_click_generator.config_tables import _build_main_parameter_table
 from app.services.requirement_processor import _extract_package_scope_text
@@ -248,6 +251,38 @@ def test_effective_requirements_split_composite_technical_parameters() -> None:
     assert ("技术参数", "激光器：≥3；荧光通道：≥11；分析速度：不少于10000个事件/秒") not in requirements
 
 
+def test_effective_requirements_prefers_complete_raw_values_over_dirty_parser_values() -> None:
+    pkg = ProcurementPackage(
+        package_id="5",
+        item_name="全自动化学发光免疫分析仪（2025357）",
+        quantity=1,
+        budget=48000.0,
+        technical_requirements={
+            "加样针": "、加样针",
+            "加样系统": "或样本针加样需双重清洗",
+        },
+        delivery_time="签订合同后15个工作日送达指定地点",
+        delivery_place="采购人指定地点",
+    )
+
+    requirements = dict(
+        _effective_requirements(
+            pkg,
+            tender_raw=(
+                "合同包 5（全自动化学发光免疫分析仪（2025357））\n"
+                "三、技术参数：\n"
+                "7、加样系统：一次性Tip加样；或样本针加样需双重清洗。\n"
+                "8、加样针：≥3针。\n"
+                "四、装箱配置单：\n"
+                "五、质保：进口一年，国产三年。\n"
+            ),
+        )
+    )
+
+    assert requirements["加样针"] == "≥3针"
+    assert requirements["加样系统"] == "一次性Tip加样；或样本针加样需双重清洗"
+
+
 def test_requirement_rows_bind_evidence_within_same_package_scope() -> None:
     pkg1 = ProcurementPackage(
         package_id="1",
@@ -364,6 +399,143 @@ def test_requirement_rows_can_consume_structured_workflow_matches() -> None:
     assert rows[0]["evidence_source"] == "产品彩页.pdf / 产品规格"
     assert rows[0]["bidder_evidence_page"] == 8
     assert rows[0]["tender_quote"] == "激光器≥3"
+
+
+def test_pkg_deviation_table_exposes_missing_tech_points_instead_of_fake_fallback() -> None:
+    tender = _sample_tender()
+    pkg = tender.packages[0]
+
+    table = _build_pkg_deviation_table(tender, pkg, tender_raw="仅有项目概况，没有技术参数章节")
+
+    assert "【待人工根据采购文件逐条补录技术参数，禁止仅写“响应/完全响应”】" in table
+    assert "详见采购文件技术要求" not in table
+
+
+def test_generate_bid_sections_forwards_structured_payload_to_format_generator() -> None:
+    tender = _sample_tender().model_copy(
+        update={
+            "project_number": "[TP]XJ-2026-001",
+            "procurement_type": "竞争性谈判",
+        }
+    )
+    product = ProductSpecification(
+        product_id="p1",
+        product_name="流式细胞分析仪",
+        manufacturer="某厂家",
+        model="FC5000",
+        origin="美国",
+        specifications={"激光器": "3个独立激光器"},
+        price=1000000.0,
+    )
+
+    result = generate_bid_sections(
+        tender,
+        "竞争性谈判文件\n合同包 1（流式细胞分析仪）\n三、技术参数：\n1、激光器：≥3\n",
+        llm=None,
+        products={"1": product},
+        normalized_result={
+            "technical_requirements": [
+                {
+                    "requirement_id": "wf-1",
+                    "package_id": "1",
+                    "param_name": "激光器",
+                    "normalized_value": "≥3",
+                    "source_text": "激光器：≥3",
+                }
+            ]
+        },
+        evidence_result={
+            "technical_matches": [
+                {
+                    "requirement_id": "wf-1",
+                    "package_id": "1",
+                    "parameter_name": "激光器",
+                    "response_value": "3个独立激光器",
+                    "deviation_status": "无偏离",
+                    "bid_evidence_file": "产品彩页.pdf",
+                    "bid_evidence_type": "产品规格",
+                }
+            ]
+        },
+        product_profiles={
+            "1": {
+                "technical_specs": {"激光器": "3个独立激光器"},
+            }
+        },
+        selected_packages=["1"],
+    )
+
+    deviation_section = next(section for section in result.sections if section.section_title == "五、技术偏离及详细配置明细表")
+    assert "3个独立激光器" in deviation_section.content
+    assert "详见采购文件技术要求" not in deviation_section.content
+
+
+def test_pack_normalized_result_keeps_full_semantic_value_instead_of_bare_threshold() -> None:
+    packed = _pack_normalized_result(
+        {
+            "1": [
+                NormalizedRequirement(
+                    package_id="1",
+                    requirement_id="pkg1-req-001",
+                    param_name="稳定电压范围",
+                    operator="=",
+                    threshold="50",
+                    unit="V",
+                    raw_text="稳定电压范围：至少包含50-600V范围电压",
+                    source_text="稳定电压范围：至少包含50-600V范围电压",
+                )
+            ]
+        }
+    )
+
+    assert packed["technical_requirements"][0]["normalized_value"] == "至少包含50-600V范围电压"
+
+
+def test_pack_normalized_result_falls_back_to_source_text_when_raw_value_is_thin() -> None:
+    packed = _pack_normalized_result(
+        {
+            "1": [
+                NormalizedRequirement(
+                    package_id="1",
+                    requirement_id="pkg1-req-002",
+                    param_name="维修响应速度",
+                    operator="=",
+                    threshold="0.5",
+                    unit="小时",
+                    raw_text="维修响应速度：0.5",
+                    source_text="维修响应速度：要求本地设有厂家技术服务人员，接到通知后0.5小时内响应",
+                )
+            ]
+        }
+    )
+
+    assert packed["technical_requirements"][0]["normalized_value"] == "要求本地设有厂家技术服务人员，接到通知后0.5小时内响应"
+
+
+def test_deviation_table_treats_string_none_as_unfilled_response() -> None:
+    tender = _sample_tender(project_name="检验科购置全自动电泳仪等设备")
+    pkg = tender.packages[0]
+
+    table = _build_deviation_table(
+        tender,
+        pkg,
+        requirement_rows=[
+            {
+                "key": "稳定电压范围",
+                "requirement": "至少包含50-600V范围电压",
+                "response": "None",
+                "deviation_status": "无偏离",
+            }
+        ],
+        total_requirements=1,
+        product=None,
+    )
+
+    assert "| 序号 | 技术参数项 | 采购文件技术要求 | 响应文件响应情况 | 偏离情况 |" in table
+    assert "当前仅依据采购文件展开技术条款" in table
+    assert "None" not in table
+    assert "【待填写：品牌/型号/规格/配置及逐条响应】" in table
+    assert "【待填写：无偏离/正偏离/负偏离】" in table
 
 
 def test_generated_sections_do_not_use_commitment_sentences_as_response_values() -> None:

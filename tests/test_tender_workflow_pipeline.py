@@ -762,3 +762,315 @@ def test_materialize_sections_can_fill_truth_from_evidence_binding() -> None:
     content = materialized[0].content
     assert "| 1 | 原产地：美国 | 美国 | 无偏离 |" in content
     assert "投标方证据：原产地：美国" in content
+
+
+def test_materialize_sections_fills_full_width_critical_placeholders() -> None:
+    tender = _sample_tender()
+    company = CompanyProfile(
+        company_id="c1",
+        name="测试医疗科技有限公司",
+        legal_representative="张三",
+        address="长春市高新区示范路1号",
+        phone="13800000000",
+        staff=[],
+    )
+    product = ProductSpecification(
+        product_id="p1",
+        product_name="流式细胞分析仪",
+        manufacturer="某厂家",
+        model="FC5000",
+        origin="美国",
+        specifications={"激光器": "3个独立激光器"},
+        price=1000000.0,
+    )
+    sections = [
+        BidDocumentSection(
+            section_title="一、响应文件封面格式",
+            content=(
+                "供应商全称：（公章）【待填写：投标人名称】\n"
+                "授权代表：【待填写：授权代表】\n"
+                "电话：【待填写：联系电话】\n"
+                "法定代表人：【待填写：法定代表人姓名】\n"
+                "品牌型号：【待填写：品牌/型号，产地】\n"
+            ),
+            attachments=[],
+        )
+    ]
+
+    materialized, report = _materialize_sections(
+        sections=sections,
+        tender=tender,
+        company=company,
+        products={"1": product},
+    )
+
+    content = materialized[0].content
+    assert "测试医疗科技有限公司" in content
+    assert "张三" in content
+    assert "13800000000" in content
+    assert "FC5000" in content
+    assert "美国" in content
+    assert "【待填写：投标人名称】" not in content
+    assert report["changed_sections"] == ["一、响应文件封面格式"]
+
+
+def test_materialize_sections_rebuilds_coarse_deviation_table_with_evidence_pages() -> None:
+    tender = _sample_tender()
+    tender.packages[0].technical_requirements = {
+        "激光器": "≥3",
+        "荧光通道": "≥11",
+        "分析速度": "不少于10000个事件/秒",
+    }
+    product = ProductSpecification(
+        product_id="p1",
+        product_name="流式细胞分析仪",
+        manufacturer="某厂家",
+        model="FC5000",
+        origin="美国",
+        specifications={
+            "激光器": "3个独立激光器",
+            "荧光通道": "12个检测通道",
+            "分析速度": "12000个事件/秒",
+        },
+        price=1000000.0,
+        config_items=[
+            {"配置项": "主机", "数量": "1", "说明": "核心检测模块"},
+            {"配置项": "工作站", "数量": "1", "说明": "数据采集与分析"},
+        ],
+        acceptance_notes="按激光器、通道数和分析速度逐项验收。",
+    )
+    sections = [
+        BidDocumentSection(
+            section_title="五、技术偏离及详细配置明细表",
+            content=(
+                "### 合同包1：进口流式细胞分析仪\n"
+                "| 序号 | 货物名称 | 品牌型号、产地 | 数量/单位 | 报价(元) | 谈判文件的参数和要求 | 响应文件参数 | 偏离情况 |\n"
+                "|---:|---|---|---|---:|---|---|---|\n"
+                "| 1 | 进口流式细胞分析仪 | 【待填写：品牌/型号，产地】 | 1/台 | 【待填写】 | 详见采购文件技术要求 | 【待填写：逐条响应参数/配置/证据】 | 【待填写：无偏离/正偏离/负偏离】 |\n"
+            ),
+            attachments=[],
+        )
+    ]
+    evidence_result = {
+        "technical_matches": [
+            {
+                "package_id": "1",
+                "parameter_name": "激光器",
+                "requirement_value": "≥3",
+                "response_value": "3个独立激光器",
+                "matched_fact_quote": "激光器：3个独立激光器",
+                "matched_fact_source": "产品参数库",
+                "bidder_evidence_bound": True,
+                "bidder_evidence_source": "产品彩页.pdf",
+                "bidder_evidence_quote": "激光器：3个独立激光器",
+                "bid_evidence_file": "产品彩页.pdf",
+                "bid_evidence_page": 5,
+                "deviation_status": "无偏离",
+                "comparison_reason": "已完成数值门槛校验",
+                "proven": True,
+            },
+            {
+                "package_id": "1",
+                "parameter_name": "荧光通道",
+                "requirement_value": "≥11",
+                "response_value": "12个检测通道",
+                "matched_fact_quote": "荧光通道：12个检测通道",
+                "matched_fact_source": "产品参数库",
+                "bidder_evidence_bound": True,
+                "bidder_evidence_source": "厂家参数页.pdf",
+                "bidder_evidence_quote": "荧光通道：12个检测通道",
+                "bid_evidence_file": "厂家参数页.pdf",
+                "bid_evidence_page": 6,
+                "deviation_status": "无偏离",
+                "comparison_reason": "已完成数值门槛校验",
+                "proven": True,
+            },
+            {
+                "package_id": "1",
+                "parameter_name": "分析速度",
+                "requirement_value": "不少于10000个事件/秒",
+                "response_value": "12000个事件/秒",
+                "matched_fact_quote": "分析速度：12000个事件/秒",
+                "matched_fact_source": "产品说明书.pdf",
+                "bidder_evidence_bound": True,
+                "bidder_evidence_source": "产品说明书.pdf",
+                "bidder_evidence_quote": "分析速度：12000个事件/秒",
+                "bid_evidence_file": "产品说明书.pdf",
+                "bid_evidence_page": 8,
+                "deviation_status": "无偏离",
+                "comparison_reason": "已完成数值门槛校验",
+                "proven": True,
+            },
+        ]
+    }
+
+    materialized, _ = _materialize_sections(
+        sections=sections,
+        tender=tender,
+        company=None,
+        products={"1": product},
+        evidence_result=evidence_result,
+    )
+
+    content = materialized[0].content
+    assert "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 说明/验收备注 |" in content
+    assert "| 1 | 激光器 | ≥3 | FC5000 | 3个独立激光器 | 无偏离 | 产品彩页.pdf | 5 |" in content
+    assert "| 2 | 荧光通道 | ≥11 | 同上 | 12个检测通道 | 无偏离 | 厂家参数页.pdf | 6 |" in content
+    assert "| 3 | 分析速度 | 不少于10000个事件/秒 | 同上 | 12000个事件/秒 | 无偏离 | 产品说明书.pdf | 8 |" in content
+    assert "配置功能描述" in content
+    assert "主机" in content
+    assert "工作站" in content
+
+
+def test_materialize_sections_rewrites_service_plan_with_package_specific_notes() -> None:
+    tender = TenderDocument(
+        project_name="设备采购项目",
+        project_number="TP-2026-009",
+        budget=3000000.0,
+        purchaser="某医院",
+        agency="某代理机构",
+        procurement_type="竞争性谈判",
+        packages=[
+            ProcurementPackage(
+                package_id="1",
+                item_name="X射线血液辐照设备",
+                quantity=1,
+                budget=2000000.0,
+                technical_requirements={"辐照剂量": "可设定", "联锁保护": "具备"},
+                delivery_time="合同签订后45日内",
+                delivery_place="输血科",
+            ),
+            ProcurementPackage(
+                package_id="2",
+                item_name="全自动电泳仪",
+                quantity=1,
+                budget=1000000.0,
+                technical_requirements={"样本通道": "≥8", "分析软件": "具备"},
+                delivery_time="合同签订后30日内",
+                delivery_place="检验科",
+            ),
+        ],
+        commercial_terms=CommercialTerms(payment_method="验收合格后付款"),
+        evaluation_criteria={"技术分": 60, "价格分": 30, "商务分": 10},
+    )
+    product_1 = ProductSpecification(
+        product_id="p1",
+        product_name="X射线血液辐照设备",
+        manufacturer="辐照厂家",
+        model="XR-9000",
+        origin="德国",
+        specifications={"辐照剂量": "1~99Gy", "联锁保护": "具备"},
+        functional_notes="重点校验联锁状态、辐照剂量和屏蔽安全。",
+        acceptance_notes="按剂量均匀性、联锁保护和射线安全要求验收。",
+        training_notes="培训内容覆盖剂量设置、辐照流程和异常停机处理。",
+        price=2000000.0,
+    )
+    product_2 = ProductSpecification(
+        product_id="p2",
+        product_name="全自动电泳仪",
+        manufacturer="电泳厂家",
+        model="EP-500",
+        origin="中国",
+        specifications={"样本通道": "8通道", "分析软件": "具备"},
+        functional_notes="重点校验样本通道、成像模块和结果分析软件。",
+        acceptance_notes="按条带分辨率、重复性和结果分析功能要求验收。",
+        training_notes="培训内容覆盖样本上样、电泳程序设置和结果分析。",
+        price=900000.0,
+    )
+    sections = [
+        BidDocumentSection(
+            section_title="六、技术服务和售后服务的内容及措施",
+            content=(
+                "### 合同包1：X射线血液辐照设备\n"
+                "#### 1. 供货组织与进度安排\n"
+                "按采购文件要求执行。\n\n"
+                "### 合同包2：全自动电泳仪\n"
+                "#### 1. 供货组织与进度安排\n"
+                "按采购文件要求执行。"
+            ),
+            attachments=[],
+        )
+    ]
+
+    materialized, _ = _materialize_sections(
+        sections=sections,
+        tender=tender,
+        company=None,
+        products={"1": product_1, "2": product_2},
+    )
+
+    content = materialized[0].content
+    assert "XR-9000" in content
+    assert "重点校验联锁状态、辐照剂量和屏蔽安全" in content
+    assert "培训内容覆盖剂量设置、辐照流程和异常停机处理" in content
+    assert "EP-500" in content
+    assert "重点校验样本通道、成像模块和结果分析软件" in content
+    assert "培训内容覆盖样本上样、电泳程序设置和结果分析" in content
+
+
+def test_materialize_sections_fills_review_table_locations_and_evidence_refs() -> None:
+    tender = _sample_tender()
+    company = CompanyProfile(
+        company_id="c1",
+        name="测试医疗科技有限公司",
+        legal_representative="张三",
+        address="长春市高新区示范路1号",
+        phone="13800000000",
+        licenses=[
+            CompanyLicense(
+                license_type="营业执照",
+                license_number="91110101TEST",
+                valid_until="长期",
+            )
+        ],
+    )
+    product = ProductSpecification(
+        product_id="p1",
+        product_name="流式细胞分析仪",
+        manufacturer="某厂家",
+        model="FC5000",
+        origin="美国",
+        specifications={"激光器": "3个独立激光器"},
+        price=1000000.0,
+        registration_number="国械注进20260001",
+    )
+    sections = [
+        BidDocumentSection(
+            section_title="附三、详细评审响应对照表",
+            content=(
+                "| 序号 | 评审项 | 采购文件评分要求 | 响应文件对应内容 | 自评说明 | 证明材料/页码 |\n"
+                "|---:|---|---|---|---|---|\n"
+                "| 1 | 技术参数响应 | 激光器≥3 | 【待填写：对应章节/材料】 | 【待填写：如何满足该评分项】 | 【待填写：页码】 |\n"
+                "| 2 | 售后服务方案 | 包含培训、验收、维保 | 【待填写：对应章节/材料】 | 【待填写：如何满足该评分项】 | 【待填写：页码】 |\n"
+                "| 3 | 营业执照 | 与主体资格一致 |  |  |  |\n"
+            ),
+            attachments=[],
+        )
+    ]
+    evidence_result = {
+        "technical_matches": [
+            {
+                "package_id": "1",
+                "parameter_name": "激光器",
+                "requirement_value": "≥3",
+                "response_value": "3个独立激光器",
+                "bid_evidence_file": "产品彩页.pdf",
+                "bid_evidence_page": 5,
+                "proven": True,
+            }
+        ]
+    }
+
+    materialized, _ = _materialize_sections(
+        sections=sections,
+        tender=tender,
+        company=company,
+        products={"1": product},
+        evidence_result=evidence_result,
+    )
+
+    content = materialized[0].content
+    assert "技术偏离及详细配置明细表（第1包）" in content
+    assert "产品彩页.pdf 第5页" in content
+    assert "技术服务和售后服务的内容及措施（第1包）" in content
+    assert "营业执照（91110101TEST）" in content

@@ -164,7 +164,10 @@ def _get_fixed_table_widths(header_cells: list[str]):
 
     key = tuple(_compact(cell) for cell in header_cells)
 
-    if key == ("序号", "服务名称", "磋商文件的服务需求", "响应文件响应情况", "偏离情况"):
+    if key in {
+        ("序号", "技术参数项", "采购文件技术要求", "响应文件响应情况", "偏离情况"),
+        ("序号", "服务名称", "磋商文件的服务需求", "响应文件响应情况", "偏离情况"),
+    }:
         return [Cm(1.2), Cm(2.8), Cm(5.8), Cm(5.8), Cm(2.2)]
 
     if key == ("序号", "审查项", "采购文件要求", "响应文件对应内容", "是否满足", "备注"):

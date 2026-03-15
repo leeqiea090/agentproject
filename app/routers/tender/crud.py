@@ -1,28 +1,49 @@
 from __future__ import annotations
 
-import app.routers.tender.common as _common
-import importlib
 import uuid
+from datetime import datetime
+from pathlib import Path
+import shutil
 
+from fastapi import File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
+from app.schemas import (
+    BidDocumentSection,
+    BidGenerateRequest,
+    BidGenerateResponse,
+    CompanyProfile,
+    ProductSpecification,
+    TenderDocument,
+    TenderParseResponse,
+    TenderUploadResponse,
+)
+from app.services.docx_builder import build_bid_docx
+from app.services.llm import get_chat_model
+from app.services.one_click_generator import generate_bid_sections
 from app.services.quality_gate import render_editable_draft_sections
-
-
-def __reexport_all(module) -> None:
-    for name, value in vars(module).items():
-        if name.startswith("__"):
-            continue
-        globals()[name] = value
-
-
-for _module in (_common,):
-    __reexport_all(_module)
-
-
-del _module
-
-
-def _router_api():
-    return importlib.import_module("app.routers.tender")
+from app.services.tender_parser import create_tender_parser
+from app.services.tender_workflow import (
+    TenderWorkflowAgent,
+    _default_step1_result,
+    _extract_product_facts,
+    _materialize_sections,
+    _sanitize_for_external_delivery,
+    _second_validation,
+)
+from app.routers.tender.common import (
+    BID_OUTPUT_DIR,
+    UPLOAD_DIR,
+    _build_external_delivery_view,
+    _safe_download_filename,
+    _sections_for_storage_or_response,
+    bid_storage,
+    company_storage,
+    logger,
+    product_storage,
+    router,
+    tender_storage,
+)
 
 
 def _existing_output_file(file_path: str | Path | None) -> Path | None:
@@ -112,7 +133,7 @@ async def parse_tender_file(tender_id: str):
 
     try:
         # 创建解析器
-        llm = _router_api().get_chat_model()
+        llm = get_chat_model()
         parser = create_tender_parser(llm)
 
         # 解析PDF
@@ -288,7 +309,7 @@ async def generate_bid_document(request: BidGenerateRequest):
         products[package_id] = product_storage[product_id]
 
     try:
-        llm = _router_api().get_chat_model()
+        llm = get_chat_model()
         workflow_agent = TenderWorkflowAgent(llm)
         raw_text = str(tender_info.get("raw_text", "") or "")
 

@@ -10,6 +10,10 @@ def build_format_driven_sections(
     tender_raw: str,
     products: dict | None = None,
     active_packages: list | None = None,
+    *,
+    normalized_result: dict | None = None,
+    evidence_result: dict | None = None,
+    product_profiles: dict | None = None,
 ) -> list:
     """
     对外统一导出函数：
@@ -25,6 +29,9 @@ def build_format_driven_sections(
             tender_raw=tender_raw,
             products=products,
             active_packages=active_packages,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
         )
 
     if mode == "cs":
@@ -33,6 +40,9 @@ def build_format_driven_sections(
             tender_raw=tender_raw,
             products=products,
             active_packages=active_packages,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
         )
 
     if mode == "zb":
@@ -41,6 +51,9 @@ def build_format_driven_sections(
             tender_raw=tender_raw,
             products=products,
             active_packages=active_packages,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
         )
 
     # 未识别时：
@@ -52,6 +65,9 @@ def build_format_driven_sections(
             tender_raw=tender_raw,
             products=products,
             active_packages=active_packages,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
         )
 
     return _build_tp_sections(
@@ -59,6 +75,9 @@ def build_format_driven_sections(
         tender_raw=tender_raw,
         products=products,
         active_packages=active_packages,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profiles=product_profiles,
     )
 
 

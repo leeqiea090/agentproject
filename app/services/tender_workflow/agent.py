@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from langchain_openai import ChatOpenAI
+
 import app.services.tender_workflow.common as _common
 import app.services.tender_workflow.classification as _classification
 import app.services.tender_workflow.product_facts as _product_facts
@@ -9,6 +11,9 @@ import app.services.tender_workflow.sanitization as _sanitization
 import app.services.tender_workflow.reporting as _reporting
 import app.services.tender_workflow.validation as _validation
 import importlib
+
+from app.schemas import TenderDocument
+
 
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():

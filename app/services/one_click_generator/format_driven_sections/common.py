@@ -545,7 +545,7 @@ def _merge_numbered_lines(text: str) -> list[str]:
 def _extract_tech_points(pkg: ProcurementPackage, tender_raw: str) -> list[str]:
     block = _find_package_block(tender_raw, pkg.package_id)
     if not block:
-        return ["详见采购文件技术要求"]
+        return []
 
     m = re.search(
         r"(设备名称：.*?)(?:四、装箱配置单：|四、装箱配置单|五、质保：)",
@@ -553,7 +553,7 @@ def _extract_tech_points(pkg: ProcurementPackage, tender_raw: str) -> list[str]:
         re.S,
     )
     if not m:
-        return ["详见采购文件技术要求"]
+        return []
 
     points = _merge_numbered_lines(m.group(1))
     clean_points: list[str] = []
@@ -562,7 +562,7 @@ def _extract_tech_points(pkg: ProcurementPackage, tender_raw: str) -> list[str]:
             continue
         if p.strip():
             clean_points.append(p.strip())
-    return clean_points or ["详见采购文件技术要求"]
+    return clean_points
 
 
 def _extract_service_points(pkg: ProcurementPackage, tender_raw: str) -> list[str]:
@@ -621,6 +621,9 @@ def _build_pkg_deviation_table(
         "| 序号 | 货物名称 | 品牌型号、产地 | 数量/单位 | 报价(元) | 谈判文件的参数和要求 | 响应文件参数 | 偏离情况 |",
         "|---:|---|---|---|---:|---|---|---|",
     ]
+
+    if not tech_points:
+        tech_points = ["【待人工根据采购文件逐条补录技术参数，禁止仅写“响应/完全响应”】"]
 
     for idx, point in enumerate(tech_points, start=1):
         lines.append(

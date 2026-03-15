@@ -574,6 +574,28 @@ def _normalize_section_evidence(row: dict[str, Any], section_type: str) -> str:
     return _default_evidence_placeholder(section_type)
 
 
+def _rich_pending(message: str) -> str:
+    return f"【待补：{message}】"
+
+
+def _resolve_rich_commitment_response(
+    requirement: NormalizedRequirement,
+    *,
+    warranty: str = "",
+    evidence_refs: list[Any] | None = None,
+) -> str:
+    text = _safe_text(f"{requirement.param_name} {requirement.raw_text}", "")
+    evidence_refs = evidence_refs or []
+
+    if "质保" in text and warranty:
+        return warranty
+
+    if evidence_refs:
+        return f"详见{_as_text(evidence_refs[0])}"
+
+    return _rich_pending("按采购文件、产品资料或证据材料填写")
+
+
 
 
 
@@ -638,7 +660,7 @@ def _generate_rich_draft_sections(
                 material_mark = "★" if req.is_material else ""
                 tech_content += f"| {idx} | {material_mark}{_markdown_cell(req.param_name)} | {_markdown_cell(req.threshold or req.raw_text)} | {_markdown_cell(str(response))} | {deviation} |\n"
         else:
-            tech_content += "[TODO:待补技术参数响应表]\n"
+            tech_content += f"{_rich_pending('根据采购文件逐条补录技术参数响应表')}\n"
         tech_content += "\n"
 
         # ── 分表2: 配置清单 ──
@@ -659,9 +681,12 @@ def _generate_rich_draft_sections(
             config_content += "| 序号 | 配置项 | 招标要求 | 投标响应 |\n"
             config_content += "|------|--------|----------|----------|\n"
             for idx, req in enumerate(config_reqs, 1):
-                config_content += f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | [TODO:待补] |\n"
+                config_content += (
+                    f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | "
+                    f"{_markdown_cell(_rich_pending('按投标配置清单填写'))} |\n"
+                )
         else:
-            config_content += "[TODO:待补配置清单]\n"
+            config_content += f"{_rich_pending('按投标产品配置清单逐项填写')}\n"
         config_content += "\n"
 
         # ── 分表3: 售后服务响应表 ──
@@ -670,14 +695,27 @@ def _generate_rich_draft_sections(
         ]
         service_content = f"### 包{pkg.package_id} 售后服务响应表\n\n"
         warranty = tender.commercial_terms.warranty_period
-        service_content += f"- 质保期：{warranty or '[TODO:待补质保期限]'}\n"
-        service_content += "- 响应时间：接到通知后24小时内响应\n"
-        service_content += "- 维修服务：提供7×24小时技术热线\n\n"
+        service_content += f"- 质保期：{warranty or _rich_pending('按采购文件或厂家承诺填写')}\n"
+        service_content += (
+            f"- 证据来源：{_as_text(evidence_refs[0])}\n\n"
+            if evidence_refs else
+            f"- 证据来源：{_rich_pending('售后承诺函/说明书/服务方案')}\n\n"
+        )
         if service_reqs:
             service_content += "| 序号 | 服务项 | 招标要求 | 投标承诺 |\n"
             service_content += "|------|--------|----------|----------|\n"
             for idx, req in enumerate(service_reqs, 1):
-                service_content += f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | 满足 |\n"
+                response = _resolve_rich_commitment_response(
+                    req,
+                    warranty=_as_text(warranty),
+                    evidence_refs=evidence_refs,
+                )
+                service_content += (
+                    f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | "
+                    f"{_markdown_cell(response)} |\n"
+                )
+        else:
+            service_content += f"{_rich_pending('按采购文件逐条补录售后服务承诺')}\n"
         service_content += "\n"
 
         # ── 分表4: 验收/资料要求响应表 ──
@@ -693,10 +731,13 @@ def _generate_rich_draft_sections(
             accept_content += "|------|------|--------|----------|----------|\n"
             for idx, req in enumerate(accept_reqs, 1):
                 cat_label = "验收" if req.category == ClauseCategory.acceptance_requirement else "资料"
-                accept_content += f"| {idx} | {cat_label} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | 满足 |\n"
+                accept_content += (
+                    f"| {idx} | {cat_label} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | "
+                    f"{_markdown_cell(_resolve_rich_commitment_response(req, evidence_refs=evidence_refs))} |\n"
+                )
         else:
-            accept_content += "- 验收标准：按照国家标准及采购文件要求\n"
-            accept_content += "- 随机文件：[TODO:待补随机文件清单]\n"
+            accept_content += f"- 验收标准：{_rich_pending('按采购文件或验收方案填写')}\n"
+            accept_content += f"- 随机文件：{_rich_pending('补充随机文件清单')}\n"
         accept_content += "\n"
 
         # ── 合并为一个章节 ──
@@ -737,7 +778,7 @@ def _build_package_detail_section(
     if has_real_product:
         content += f"本包投标产品为 **{p_brand or p_mfr} {p_name}**（型号：{p_model}），生产厂家：{p_mfr}。\n\n"
     else:
-        content += f"本包投标产品为{p_name}。[TODO:待补品牌型号及厂家信息]\n\n"
+        content += f"本包投标产品为{p_name}。{_rich_pending('补充品牌、型号及生产厂家信息')}\n\n"
 
     if specs:
         content += "**核心技术参数**：\n\n"
@@ -745,21 +786,21 @@ def _build_package_detail_section(
             content += f"{idx}. **{key}**：{_as_text(value)}。\n"
         content += "\n"
     else:
-        content += "[TODO:待补关键性能参数]\n\n"
+        content += f"{_rich_pending('补充关键性能参数')}\n\n"
 
     # 交付说明
     content += f"### 包{pkg.package_id} 交付说明\n\n"
-    content += f"- 交货期：{pkg.delivery_time or '[TODO:待补交货期限]'}\n"
-    content += f"- 交货地点：{pkg.delivery_place or '[TODO:待补交货地点]'}\n"
-    content += "- 交货方式：由我公司负责运输至指定地点\n\n"
+    content += f"- 交货期：{pkg.delivery_time or _rich_pending('按采购文件填写交货期限')}\n"
+    content += f"- 交货地点：{pkg.delivery_place or _rich_pending('按采购文件填写交货地点')}\n"
+    content += f"- 交货方式：{_rich_pending('按采购文件或投标承诺填写')}\n\n"
 
     # 培训说明
     content += f"### 包{pkg.package_id} 使用与培训说明\n\n"
     content += f"- 培训对象：{pkg.item_name}操作人员、维护人员\n"
-    content += "- 培训方式：现场培训+远程技术支持\n"
-    content += "- 培训时长：不少于3天 [TODO:待核实具体培训时长要求]\n"
+    content += f"- 培训方式：{_rich_pending('按培训方案填写')}\n"
+    content += f"- 培训时长：{_rich_pending('按采购文件或投标承诺填写')}\n"
     warranty = tender.commercial_terms.warranty_period
-    content += f"- 质保期：{warranty or '[TODO:待补质保期限]'}\n\n"
+    content += f"- 质保期：{warranty or _rich_pending('按采购文件或厂家承诺填写')}\n\n"
 
     return content
 

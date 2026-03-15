@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import app.services.one_click_generator.common as _common
@@ -72,6 +73,65 @@ def _has_structural_failures(gate) -> bool:
         or gate.anchor_pollution_rate > gate.anchor_pollution_threshold
         or gate.nested_placeholder_detected
     )
+
+
+def _pack_normalized_result(all_normalized: dict[str, list[NormalizedRequirement]]) -> dict[str, Any]:
+    def _looks_semantically_thin(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        if len(text) <= 3:
+            return True
+        if re.fullmatch(r"[\d.,]+(?:\s*[%A-Za-z/\-._\u00b0\u03bc\u4e00-\u9fff]{0,6})?", text):
+            return True
+        return False
+
+    def _extract_value(text: str, param_name: str) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return ""
+        if param_name:
+            for sep in ("：", ":"):
+                prefix = f"{param_name}{sep}"
+                if prefix in normalized:
+                    value = normalized.split(prefix, 1)[1].strip()
+                    if value:
+                        return value
+        parts = re.split(r"[：:]", normalized, maxsplit=1)
+        if len(parts) == 2 and parts[1].strip():
+            return parts[1].strip()
+        return normalized
+
+    def _best_normalized_value(req: NormalizedRequirement) -> str:
+        raw_text = str(req.raw_text or "").strip()
+        source_text = str(req.source_text or "").strip()
+        param_name = str(req.param_name or "").strip()
+
+        for candidate_text in (raw_text, source_text):
+            candidate = _extract_value(candidate_text, param_name)
+            if candidate and not _looks_semantically_thin(candidate):
+                return candidate
+        for candidate_text in (raw_text, source_text):
+            candidate = _extract_value(candidate_text, param_name)
+            if candidate:
+                return candidate
+        if req.operator and req.threshold:
+            return f"{req.operator}{req.threshold}{req.unit or ''}"
+        if req.threshold:
+            return f"{req.threshold}{req.unit or ''}"
+        return source_text
+
+    items: list[dict[str, Any]] = []
+    for pkg_id, reqs in all_normalized.items():
+        for req in reqs:
+            row = req.model_dump()
+            row["normalized_value"] = _best_normalized_value(req)
+            items.append(row)
+    return {"technical_requirements": items}
+
+
+def _pack_product_profiles(all_profiles: dict[str, ProductProfile]) -> dict[str, Any]:
+    return {pkg_id: profile.model_dump() for pkg_id, profile in all_profiles.items()}
 
 
 def _downgrade_to_pending_draft(sections):
@@ -262,42 +322,53 @@ def generate_bid_sections(
         )
 
     # ── Step 3: 包件隔离生成章节 ──
-    # 为了兼容，将 ProductProfile 转为 product_profiles dict 格式
-    pp_dict = product_profiles or {}
-    for pid, prof in all_profiles.items():
-        if pid not in pp_dict:
-            pp_dict[pid] = prof.model_dump()
+    normalized_payload = _pack_normalized_result(all_normalized)
+    if isinstance(normalized_result, dict):
+        normalized_payload = {**normalized_payload, **normalized_result}
+        if normalized_result.get("technical_requirements"):
+            normalized_payload["technical_requirements"] = normalized_result["technical_requirements"]
+
+    profile_payload = _pack_product_profiles(all_profiles)
+    if isinstance(product_profiles, dict):
+        profile_payload.update(product_profiles)
 
     sections = build_format_driven_sections(
         tender=tender,
         tender_raw=tender_raw,
         products=products,
         active_packages=active_packages,
+        normalized_result=normalized_payload,
+        evidence_result=evidence_result,
+        product_profiles=profile_payload,
     )
 
-    # Rich draft mode 或 single_package_rich_draft 需要额外的分表章节
-    #if (mode == "rich_draft" or doc_mode == DocumentMode.single_package_rich_draft) and products:
-        # all_writer_contexts = {}
-        # for pkg in active_packages:
-        #     pkg_reqs = all_normalized.get(pkg.package_id, [])
-        #     profile = all_profiles.get(pkg.package_id)
-        #     wctxs = build_writer_contexts(
-        #         package_id=pkg.package_id,
-        #         requirements=pkg_reqs,
-        #         product_profile=profile,
-        #         tender_source_bindings=all_tender_bindings.get(pkg.package_id, []),
-        #         bid_evidence_bindings=all_bid_bindings.get(pkg.package_id, []),
-        #         document_mode=doc_mode,
-        #     )
-        #     all_writer_contexts[pkg.package_id] = wctxs
-        #
-        # rich_sections = _generate_rich_draft_sections(
-        #     tender, products,
-        #     normalized_reqs=all_normalized,
-        #     active_packages=active_packages,
-        #     writer_contexts=all_writer_contexts,
-        # )
-        # sections.extend(rich_sections)
+    # Rich draft 仅追加分表，不追加整段“成熟说明”，避免没有证据的固定承诺混入正文。
+    if (mode == "rich_draft" or doc_mode == DocumentMode.single_package_rich_draft) and products:
+        all_writer_contexts = {}
+        for pkg in active_packages:
+            pkg_reqs = all_normalized.get(pkg.package_id, [])
+            profile = all_profiles.get(pkg.package_id)
+            wctxs = build_writer_contexts(
+                package_id=pkg.package_id,
+                requirements=pkg_reqs,
+                product_profile=profile,
+                tender_source_bindings=all_tender_bindings.get(pkg.package_id, []),
+                bid_evidence_bindings=all_bid_bindings.get(pkg.package_id, []),
+                document_mode=doc_mode,
+            )
+            all_writer_contexts[pkg.package_id] = wctxs
+
+        rich_sections = _generate_rich_draft_sections(
+            tender,
+            products,
+            normalized_reqs=all_normalized,
+            active_packages=active_packages,
+            writer_contexts=all_writer_contexts,
+        )
+        sections.extend(
+            section for section in rich_sections
+            if section.section_title.endswith("分表响应")
+        )
 
     sections = _apply_template_pollution_guard(sections)
 

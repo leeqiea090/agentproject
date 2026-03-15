@@ -1,29 +1,29 @@
 from __future__ import annotations
 
-import logger
+from datetime import datetime
+from pathlib import Path
+import shutil
+import uuid
 
-import app.routers.tender.common as _common
-import importlib
+from fastapi import BackgroundTasks, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
+from app.schemas import OneClickJobStartResponse, OneClickJobStatusResponse
 from app.services.docx_builder import build_bid_docx
-
-
-def __reexport_all(module) -> None:
-    for name, value in vars(module).items():
-        if name.startswith("__"):
-            continue
-        globals()[name] = value
-
-
-for _module in (_common,):
-    __reexport_all(_module)
-
-
-del _module
-
-
-def _router_api():
-    return importlib.import_module("app.routers.tender")
+from app.services.llm import get_chat_model
+from app.services.one_click_generator import generate_bid_sections
+from app.services.one_click_generator.common import BidSectionsValidationError
+from app.services.tender_parser import create_tender_parser
+from app.services.tender_workflow import _materialize_sections
+from app.routers.tender.common import (
+    BID_OUTPUT_DIR,
+    UPLOAD_DIR,
+    _PLACEHOLDER_COMPANY,
+    _safe_download_filename,
+    logger,
+    one_click_job_storage,
+    router,
+)
 
 
 _ALLOWED_SUFFIXES = {".pdf", ".docx", ".doc"}
@@ -37,14 +37,6 @@ _ONE_CLICK_STEP_LABELS = {
     "completed": "处理完成",
     "error": "处理失败",
 }
-
-_PLACEHOLDER_COMPANY = CompanyProfile(
-    company_id="placeholder",
-    name="【待填写：投标人名称】",
-    legal_representative="【待填写：法定代表人】",
-    address="【待填写：公司注册地址】",
-    phone="【待填写：联系电话】",
-)
 
 def _set_one_click_job_status(
     job_id: str,
@@ -80,7 +72,7 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             message="正在解析文档内容…",
             progress=12,
         )
-        llm = _router_api().get_chat_model()
+        llm = get_chat_model()
         parser = create_tender_parser(llm)
         raw_text = parser.extract_text(save_path)
 
@@ -114,7 +106,13 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             llm,
             require_validation_pass=True,
         )
-        sections = gen_result.sections
+        sections, _ = _materialize_sections(
+            sections=gen_result.sections,
+            tender=tender_doc,
+            company=_PLACEHOLDER_COMPANY,
+            products={},
+            evidence_result=None,
+        )
         _set_one_click_job_status(
             job_id,
             status="running",
@@ -122,12 +120,12 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             message="正在输出 Word 文档…",
             progress=90,
         )
-        output_file = _common.BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
+        output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
         build_bid_docx(sections, tender_doc, _PLACEHOLDER_COMPANY, output_file)
         if not output_file.exists() or output_file.stat().st_size == 0:
             raise RuntimeError("Word 文件生成失败，输出文件为空")
 
-        filename = _common._safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx")
+        filename = _safe_download_filename(f"投标文件_{tender_doc.project_name}", ".docx")
         download_url = f"/api/tender/one-click/download/{job_id}"
         logger.info("一键生成任务完成: %s -> %s", job_id, output_file)
         is_external_ready = gen_result.validation_gate.passes_external_gate()
@@ -138,15 +136,15 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             message=(
                 "投标文件已生成完成，可直接下载。"
                 if is_external_ready
-                else "待补充底稿已生成，可下载后补充未完善信息。"
+                else "骨架底稿已生成，可下载补录；如需成熟响应稿，请改走 workflow 并上传产品/证据资料。"
             ),
             progress=100,
             filename=filename,
             download_url=download_url,
         )
-        _common.one_click_job_storage[job_id]["validation_gate"] = gen_result.validation_gate.model_dump()
-        _common.one_click_job_storage[job_id]["regression_metrics"] = gen_result.regression_metrics.model_dump()
-        _common.one_click_job_storage[job_id]["draft_level"] = gen_result.draft_level.value
+        one_click_job_storage[job_id]["validation_gate"] = gen_result.validation_gate.model_dump()
+        one_click_job_storage[job_id]["regression_metrics"] = gen_result.regression_metrics.model_dump()
+        one_click_job_storage[job_id]["draft_level"] = gen_result.draft_level.value
     except Exception as exc:  # noqa: BLE001
         logger.error("一键生成后台任务失败：%s", exc, exc_info=True)
         _set_one_click_job_status(
@@ -164,13 +162,13 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             logger.warning("一键生成临时文件清理失败: %s", save_path)
 
 
-@router.post("/one-click", summary="一键生成投标文件")
+@router.post("/one-click", summary="一键生成底稿骨架")
 async def one_click_generate(file: UploadFile = File(...)):
     """
-    上传招标文件（PDF 或 Word），自动解析并生成可下载的投标文件 Word 文档。
+    上传招标文件（PDF 或 Word），自动解析并生成可下载的底稿骨架 Word 文档。
 
     - 输入：招标文件（.pdf / .docx）
-    - 输出：投标文件（.docx）下载链接
+    - 输出：可补录的底稿骨架（.docx）
     """
     # 1. 校验文件格式
     filename = file.filename or ""
@@ -193,7 +191,7 @@ async def one_click_generate(file: UploadFile = File(...)):
 
     try:
         # 3. 解析招标文件
-        llm = _router_api().get_chat_model()
+        llm = get_chat_model()
         parser = create_tender_parser(llm)
 
         logger.info("开始提取文本：%s", save_path)
@@ -209,7 +207,13 @@ async def one_click_generate(file: UploadFile = File(...)):
             llm,
             require_validation_pass=True,
         )
-        sections = gen_result.sections
+        sections, _ = _materialize_sections(
+            sections=gen_result.sections,
+            tender=tender_doc,
+            company=_PLACEHOLDER_COMPANY,
+            products={},
+            evidence_result=None,
+        )
 
         # 5. 构建 Word 文档
         output_file = BID_OUTPUT_DIR / f"{job_id}_投标文件.docx"
@@ -238,7 +242,7 @@ async def one_click_generate(file: UploadFile = File(...)):
             pass
 
 
-@router.post("/one-click/start", response_model=OneClickJobStartResponse, summary="启动一键生成任务")
+@router.post("/one-click/start", response_model=OneClickJobStartResponse, summary="启动一键生成底稿任务")
 async def start_one_click_generate(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()

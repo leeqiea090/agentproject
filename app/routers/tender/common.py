@@ -1,52 +1,15 @@
-"""招投标系统API路由"""
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+"""招投标系统 API 共享路由状态与辅助函数。"""
+from fastapi import APIRouter
 from pathlib import Path
-import shutil
-import uuid
 import re
-from datetime import datetime
 import logging
 
 from app.schemas import (
-    TenderDocument,
-    TenderUploadResponse,
-    TenderParseResponse,
+    BidDocumentSection,
     CompanyProfile,
     ProductSpecification,
-    BidGenerateRequest,
-    BidGenerateResponse,
-    BidDocumentSection,
-    TenderWorkflowRequest,
-    TenderWorkflowResponse,
-    TenderWorkflowStep1Result,
-    TenderWorkflowStep2Result,
-    TenderWorkflowStep3Result,
-    TenderWorkflowStep4Result,
-    OneClickJobStartResponse,
-    OneClickJobStatusResponse,
-    # ErrorResponse
 )
 from app.config import get_settings
-from app.services.tender_parser import create_tender_parser
-from app.services.one_click_generator import generate_bid_sections
-from app.services.docx_builder import build_bid_docx
-from app.services.retriever import ingest_text_to_kb
-from app.services.tender_workflow import (
-    TenderWorkflowAgent,
-    _build_document_ingestion_view,
-    _build_internal_audit_snapshot,
-    _build_package_segmentation_view,
-    _default_step1_result,
-    _ensure_str_list,
-    _expand_extracted_facts,
-    _extract_product_facts,
-    _match_requirements_to_product_facts,
-    _materialize_sections,
-    _sanitize_for_external_delivery,
-    _second_validation,
-)
-from app.services.llm import get_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +30,14 @@ bid_storage: dict[str, dict] = {}
 workflow_storage: dict[str, dict] = {}
 workflow_kb_indexed_sources: set[str] = set()
 one_click_job_storage: dict[str, dict] = {}
+
+_PLACEHOLDER_COMPANY = CompanyProfile(
+    company_id="placeholder",
+    name="【待填写：投标人名称】",
+    legal_representative="【待填写：法定代表人】",
+    address="【待填写：公司注册地址】",
+    phone="【待填写：联系电话】",
+)
 
 _INVALID_DOWNLOAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n]+')
 
