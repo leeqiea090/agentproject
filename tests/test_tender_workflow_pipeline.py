@@ -1074,3 +1074,51 @@ def test_materialize_sections_fills_review_table_locations_and_evidence_refs() -
     assert "产品彩页.pdf 第5页" in content
     assert "技术服务和售后服务的内容及措施（第1包）" in content
     assert "营业执照（91110101TEST）" in content
+
+
+def test_materialize_sections_route_five_column_parameter_table_to_deviation_logic() -> None:
+    tender = _sample_tender()
+    product = ProductSpecification(
+        product_id="p1",
+        product_name="流式细胞分析仪",
+        manufacturer="某厂家",
+        model="FC5000",
+        origin="美国",
+        specifications={"激光器": "3个独立激光器"},
+        price=1000000.0,
+    )
+    sections = [
+        BidDocumentSection(
+            section_title="五、技术偏离及详细配置明细表",
+            content=(
+                "| 序号 | 技术参数项 | 采购文件技术要求 | 响应文件响应情况 | 偏离情况 |\n"
+                "|---:|---|---|---|---|\n"
+                "| 1 | 激光器 | ≥3 | 待核实（未匹配到已证实产品事实） | 待核实 |\n"
+            ),
+            attachments=[],
+        )
+    ]
+    evidence_result = {
+        "technical_matches": [
+            {
+                "package_id": "1",
+                "parameter_name": "激光器",
+                "requirement_value": "≥3",
+                "response_value": "3个独立激光器",
+                "proven": False,
+            }
+        ]
+    }
+
+    materialized, _ = _materialize_sections(
+        sections=sections,
+        tender=tender,
+        company=None,
+        products={"1": product},
+        evidence_result=evidence_result,
+    )
+
+    content = materialized[0].content
+    assert "| 1 | 激光器 | ≥3 | 3个独立激光器 | 【待填写：无偏离/正偏离/负偏离】 |" in content
+    assert "待核实（未匹配到已证实产品事实）" not in content
+    assert "| 1 | 激光器 | ≥3 | 3个独立激光器 | 待核实 |" not in content

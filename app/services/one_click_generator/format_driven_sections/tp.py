@@ -39,6 +39,54 @@ _TP_COMPLIANCE_LABELS = [
     "其他要求",
 ]
 
+_TP_SERVICE_INCLUDE_KEYWORDS = (
+    "售后",
+    "维修",
+    "维保",
+    "保修",
+    "上门",
+    "响应时间",
+    "培训",
+    "安装调试",
+    "验收",
+    "巡检",
+    "技术支持",
+    "配件库",
+    "升级",
+    "LIS 对接费用",
+    "维护保养",
+)
+
+_TP_SERVICE_EXCLUDE_KEYWORDS = (
+    "设备名称",
+    "检测原理",
+    "检测方法",
+    "激光器",
+    "检测通道",
+    "通道",
+    "FITC",
+    "PE",
+    "APC",
+    "CV",
+    "光源输出",
+    "试剂位",
+    "样本位",
+    "分析速度",
+    "检测速度",
+    "参数阈值",
+)
+
+
+def _is_tp_service_or_acceptance_clause(text: str) -> bool:
+    normalized = _clean_text(text)
+    if not normalized:
+        return False
+    if any(keyword in normalized for keyword in _TP_SERVICE_EXCLUDE_KEYWORDS):
+        return False
+    if "LIS" in normalized and "费用" in normalized:
+        return True
+    return any(keyword in normalized for keyword in _TP_SERVICE_INCLUDE_KEYWORDS)
+
 
 def _norm_header(text: str) -> str:
     return "".join(str(text or "").split())
@@ -407,6 +455,9 @@ def _structured_tp_service_points(
         key = _clean_text(row.get("key") or "")
         requirement = _clean_text(row.get("requirement") or "")
         if not key and not requirement:
+            continue
+        combined = f"{key} {requirement}".strip()
+        if not _is_tp_service_or_acceptance_clause(combined):
             continue
         response = _clean_text(row.get("response") or "")
         if response and _has_real_bidder_response(response):

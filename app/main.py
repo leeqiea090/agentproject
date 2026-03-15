@@ -31,20 +31,6 @@ app.include_router(agent_router)
 app.include_router(tender_router)
 
 
-@app.get("/", include_in_schema=False)
-def root():
-    return FileResponse(_STATIC_DIR / "index.html")
-
-
-@app.get("/api/status", summary="服务状态", description="返回当前服务的基本信息与运行状态")
-def api_status():
-    return {
-        "服务名称": "招投标 AI Agent 服务",
-        "版本": settings.app_version,
-        "状态": "运行中",
-    }
-
-
 if __name__ == "__main__":
 
     if settings.app_host == "0.0.0.0":

@@ -586,7 +586,12 @@ def _build_materialized_technical_section(
             requirement_value = _safe_text(match.get("requirement_value"), _safe_text(match.get("normalized_value"), ""))
             response_value = _resolve_materialized_response_value(product, match, parameter_name)
             evaluation = _evaluate_requirement_response(requirement_value, response_value)
-            deviation = _resolve_materialized_deviation_status(match, evaluation) if response_value else "待核实"
+            is_proven = bool(match.get("proven"))
+            deviation = (
+                _resolve_materialized_deviation_status(match, evaluation)
+                if response_value and is_proven
+                else "【待填写：无偏离/正偏离/负偏离】"
+            )
             evidence_label = _resolve_match_evidence_label(match)
             evidence_page = _resolve_match_evidence_page(product, match, parameter_name)
             note_parts = []
@@ -605,7 +610,7 @@ def _build_materialized_technical_section(
                     param=parameter_name,
                     req=requirement_value or "详见采购文件技术要求",
                     model=model_text if idx == 1 else "同上",
-                    resp=response_value or _PENDING_RESPONSE_TEXT,
+                    resp=response_value or "【待填写：实际响应值】",
                     dev=deviation,
                     evidence=evidence_label,
                     page=evidence_page,
@@ -844,6 +849,11 @@ def _replace_placeholder_line(
 
 def _detect_table_mode(cells: list[str]) -> str:
     joined = "|".join(cells)
+    if all(
+        header in joined
+        for header in ("技术参数项", "采购文件技术要求", "响应文件响应情况", "偏离情况")
+    ):
+        return "deviation"
     # 8-column deviation table (new format)
     if "实际响应值" in joined and "偏离情况" in joined:
         return "deviation"
@@ -1027,8 +1037,8 @@ def _materialize_section_content(
                 elif current_table_mode == "deviation" and len(cells) >= 5:
                     # Support both legacy 5-column and new 8-column deviation tables
                     parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
-                    requirement_idx = _find_table_column(current_table_header, ("招标要求", "招标技术参数要求"))
-                    response_idx = _find_table_column(current_table_header, ("投标产品响应参数", "响应情况", "实际响应值"))
+                    requirement_idx = _find_table_column(current_table_header, ("采购文件技术要求", "采购文件要求", "招标要求", "招标技术参数要求"))
+                    response_idx = _find_table_column(current_table_header, ("响应文件响应情况", "投标产品响应参数", "响应情况", "实际响应值"))
                     deviation_idx = _find_table_column(current_table_header, ("偏离说明", "偏离情况"))
                     evidence_idx = _find_table_column(current_table_header, ("证据映射", "响应依据/证据映射", "证据材料"))
                     remark_idx = _find_table_column(current_table_header, ("说明/验收备注", "说明", "验收备注"))
@@ -1065,7 +1075,7 @@ def _materialize_section_content(
 
                     # 偏离列
                     if 0 <= deviation_idx < len(cells):
-                        if has_fact and (is_proven or evaluation.get("deviation_status") in {"无偏离", "有偏离"}):
+                        if has_fact and is_proven:
                             cells[deviation_idx] = _resolve_materialized_deviation_status(match, evaluation)
                         else:
                             cells[deviation_idx] = "【待填写：无偏离/正偏离/负偏离】"
@@ -1095,22 +1105,39 @@ def _materialize_section_content(
                     changed = True
 
                 elif current_table_mode == "main_parameter" and len(cells) >= 5:
-                    parameter_name = _safe_text(cells[1])
+                    parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
+                    requirement_idx = _find_table_column(current_table_header, ("采购文件技术要求", "采购文件要求", "招标要求", "招标技术参数要求"))
+                    response_idx = _find_table_column(current_table_header, ("响应文件响应情况", "投标产品响应参数", "响应情况", "实际响应值"))
+                    deviation_idx = _find_table_column(current_table_header, ("偏离说明", "偏离情况"))
+                    parameter_cell = _safe_text(cells[parameter_idx]) if 0 <= parameter_idx < len(cells) else _safe_text(cells[1])
+                    if requirement_idx >= 0 and requirement_idx != parameter_idx:
+                        parameter_name = parameter_cell.split("：", 1)[0].strip()
+                        requirement_value = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else parameter_cell
+                    else:
+                        parameter_name = parameter_cell.split("：", 1)[0].strip()
+                        requirement_value = parameter_cell
                     match = _find_technical_match(evidence_result, row_package_id, parameter_name)
                     response_value = _resolve_materialized_response_value(product, match, parameter_name)
-                    evaluation = _evaluate_requirement_response(_safe_text(cells[2]), response_value)
-                    if response_value:
-                        cells[3] = response_value
-                        if len(cells) >= 5:
-                            cells[4] = _resolve_materialized_deviation_status(match, evaluation)
-                        line = "| " + " | ".join(cells) + " |"
-                        changed = True
-                    else:
-                        cells[3] = _PENDING_RESPONSE_TEXT
-                        if len(cells) >= 5:
-                            cells[4] = "待核实"
-                        line = "| " + " | ".join(cells) + " |"
-                        changed = True
+                    evaluation = _evaluate_requirement_response(requirement_value, response_value)
+                    is_proven = bool(match and match.get("proven"))
+                    if 0 <= response_idx < len(cells):
+                        cells[response_idx] = response_value or "【待填写：实际响应值】"
+                    elif len(cells) >= 4:
+                        cells[3] = response_value or "【待填写：实际响应值】"
+                    if 0 <= deviation_idx < len(cells):
+                        cells[deviation_idx] = (
+                            _resolve_materialized_deviation_status(match, evaluation)
+                            if response_value and is_proven
+                            else "【待填写：无偏离/正偏离/负偏离】"
+                        )
+                    elif len(cells) >= 5:
+                        cells[4] = (
+                            _resolve_materialized_deviation_status(match, evaluation)
+                            if response_value and is_proven
+                            else "【待填写：无偏离/正偏离/负偏离】"
+                        )
+                    line = "| " + " | ".join(cells) + " |"
+                    changed = True
                 elif current_table_mode == "evidence_mapping" and len(cells) >= 5:
                     parameter_idx = _find_table_column(current_table_header, ("技术参数项", "参数项"))
                     source_idx = _find_table_column(current_table_header, ("证据来源",))
@@ -1165,6 +1192,7 @@ def _materialize_section_content(
                     item_name = _safe_text(cells[item_idx]) if 0 <= item_idx < len(cells) else ""
                     requirement = _safe_text(cells[requirement_idx]) if 0 <= requirement_idx < len(cells) else ""
                     location = _resolve_review_location(item_name, requirement, row_package_id)
+                    review_match = _find_review_match(evidence_result, row_package_id, item_name, requirement)
                     evidence_ref = _resolve_review_evidence(
                         item_name,
                         requirement,
@@ -1181,7 +1209,19 @@ def _materialize_section_content(
                     if 0 <= self_idx < len(cells) and (
                         not cells[self_idx].strip() or "待填写" in cells[self_idx]
                     ):
-                        cells[self_idx] = "已按对应章节逐项响应"
+                        has_evidence_ref = bool(evidence_ref and evidence_ref != f"见{location}")
+                        has_proven_fact = bool(
+                            review_match and (
+                                bool(review_match.get("proven"))
+                                or _safe_text(review_match.get("deviation_status"), "") in {"无偏离", "有偏离"}
+                            )
+                        )
+                        if has_proven_fact:
+                            cells[self_idx] = "满足"
+                        elif has_evidence_ref:
+                            cells[self_idx] = "已形成章节定位，待核页码"
+                        else:
+                            cells[self_idx] = "待补证明材料/页码"
                         changed = True
                     if 0 <= evidence_idx < len(cells) and (
                         not cells[evidence_idx].strip() or "待填写" in cells[evidence_idx]

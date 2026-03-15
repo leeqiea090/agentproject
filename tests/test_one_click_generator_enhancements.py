@@ -651,6 +651,35 @@ def test_configuration_table_can_use_product_profile_config_items() -> None:
     assert "说明书 | 份 | 1 |" in table
 
 
+def test_configuration_table_prefers_pkg_quantity_over_raw_guess() -> None:
+    pkg = ProcurementPackage(
+        package_id="6",
+        item_name="进口流式细胞分析仪（2025349）",
+        quantity=1,
+        budget=2000000.0,
+        technical_requirements={},
+        delivery_time="合同签订后30日内",
+        delivery_place="采购人指定地点",
+    )
+    product = ProductSpecification(
+        product_name="进口流式细胞分析仪（2025349）",
+        manufacturer="某厂家",
+        model="FCM-9000",
+        origin="美国",
+        specifications={},
+        price=0.0,
+    )
+
+    table = _build_configuration_table(
+        pkg,
+        tender_raw="第6包 进口流式细胞分析仪（2025349） 数量：2",
+        product=product,
+    )
+
+    assert "| 1 | 进口流式细胞分析仪（2025349）主机 | 台 | 1 | 是 | 核心设备主机 |" in table
+    assert "| 1 | 进口流式细胞分析仪（2025349）主机 | 台 | 2 | 是 |" not in table
+
+
 def test_extract_package_scope_text_skips_multi_package_summary_lines() -> None:
     pkg = ProcurementPackage(
         package_id="1",
@@ -732,6 +761,20 @@ def test_main_parameter_table_filters_out_non_technical_rows() -> None:
     assert "激光器" in table
     assert "质保" not in table
     assert "装箱配置单" not in table
+
+
+def test_effective_requirements_clean_dirty_value_and_replace_generic_config_placeholder() -> None:
+    tender = _sample_tender()
+    pkg = tender.packages[0]
+    pkg.technical_requirements = {
+        "加样针": "、加样针",
+        "装箱配置单": "详见招标文件",
+    }
+
+    requirements = dict(_effective_requirements(pkg, tender_raw=""))
+
+    assert requirements["加样针"] == "加样针"
+    assert requirements["装箱配置单"] == "【待补充：配置清单】"
 
 
 def test_requirement_rows_trim_evidence_before_configuration_and_complaint_sections() -> None:

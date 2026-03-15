@@ -16,7 +16,6 @@ from app.services.one_click_generator.common import (
     _CONFIG_SECTION_HINTS,
     _as_text,
     _contains_any,
-    _infer_package_quantity,
     _safe_text,
 )
 from app.services.one_click_generator.response_tables import (
@@ -391,6 +390,8 @@ def _build_configuration_table(
     normalized_result: dict[str, Any] | None = None,
 ) -> str:
     """构建双层配置表：第一层配置明细表 + 第二层配置功能描述表。"""
+    package_qty = str(int(getattr(pkg, "quantity", 1) or 1))
+
     # ── 第一层：详细配置明细表（含是否标配、用途说明）──
     lines = [
         "### （二-A）详细配置明细表",
@@ -414,17 +415,16 @@ def _build_configuration_table(
             if p_origin:
                 identity_parts.append(f"产地：{p_origin}")
             product_identity_lines.append(
-                f"| 1 | {p_name or pkg.item_name}主机 | 台 | {_infer_package_quantity(pkg, tender_raw)} | 是 | 核心设备主机 | {'；'.join(identity_parts) if identity_parts else '核心设备'} |"
+                f"| 1 | {p_name or pkg.item_name}主机 | 台 | {package_qty} | 是 | 核心设备主机 | {'；'.join(identity_parts) if identity_parts else '核心设备'} |"
             )
 
     config_items = _profile_config_items(product_profile)
     if not config_items:
         config_items = _extract_configuration_items(pkg, tender_raw, normalized_result=normalized_result)
     if not config_items and not product_identity_lines:
-        quantity = _infer_package_quantity(pkg, tender_raw)
         lines.extend(
             [
-                f"| 1 | {pkg.item_name}主机 | 台 | {quantity} | 是 | 核心设备 | 核心模块；与第三章投标型号一致，如有子模块/附件差异再补充 |",
+                f"| 1 | {pkg.item_name}主机 | 台 | {package_qty} | 是 | 核心设备 | 核心模块；与第三章投标型号一致，如有子模块/附件差异再补充 |",
             ]
         )
         return "\n".join(lines)
@@ -436,7 +436,6 @@ def _build_configuration_table(
 
     # 收集配置项描述信息，用于第二层
     config_descriptions: list[tuple[str, str, str]] = []  # (name, usage, remark)
-    package_qty = str(_infer_package_quantity(pkg, tender_raw))
     for name, unit, qty, remark in config_items:
         # Enhance remark with product spec value if available
         matched_spec = _fuzzy_spec_lookup(product, name) if product else ""

@@ -464,8 +464,30 @@ _GENERIC_REQUIREMENT_VALUE_MARKERS = (
 )
 
 
-def _requirement_value_quality(key: str, value: str) -> int:
+def _clean_requirement_value(key: str, value: str) -> str:
     text = _safe_text(value, "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"^[、，；;:：\s]+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+
+    if re.fullmatch(r"[、，；;:：\-\s/\\|（）()【】\[\]]+", text):
+        return ""
+
+    if (
+        any(marker in _safe_text(key, "") for marker in _CONFIG_REQUIREMENT_KEYS)
+        and any(marker in text for marker in _GENERIC_REQUIREMENT_VALUE_MARKERS)
+    ):
+        return "【待补充：配置清单】"
+
+    return text
+
+
+def _requirement_value_quality(key: str, value: str) -> int:
+    text = _clean_requirement_value(key, _safe_text(value, ""))
     if not text:
         return -100
 
@@ -532,7 +554,10 @@ def _flatten_requirements(pkg: ProcurementPackage) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
     for key, value in pkg.technical_requirements.items():
         k = _safe_text(str(key), "技术参数")
-        v = _safe_text(_as_text(value), "详见招标文件")
+        raw_value = _as_text(value) or "详见招标文件"
+        v = _clean_requirement_value(k, raw_value)
+        if not v:
+            continue
         items.extend(_expand_requirement_entry(k, v))
     return _dedupe_requirement_pairs(items)
 
@@ -765,9 +790,12 @@ def _effective_requirements(pkg: ProcurementPackage, tender_raw: str) -> list[tu
     # ── 跨包词命中检测：含其他包产品名的条款直接标为噪音并剔除 ──
     cleaned: list[tuple[str, str]] = []
     for key, val in atomized:
+        normalized_val = _clean_requirement_value(key, val)
+        if not normalized_val:
+            continue
         cat = _classify_requirement_category(key, val)
         # 将分类信息嵌入 key 的前缀标记中，方便下游使用
-        cleaned.append((key, val))
+        cleaned.append((key, normalized_val))
     return cleaned
 
 
@@ -1021,6 +1049,9 @@ def normalize_requirements_to_objects(
 
     results: list[NormalizedRequirement] = []
     for idx, (key, val) in enumerate(requirements, start=1):
+        val = _clean_requirement_value(key, val)
+        if not val:
+            continue
         raw_text = f"{key}：{val}" if val else key
 
         # 坏名过滤
