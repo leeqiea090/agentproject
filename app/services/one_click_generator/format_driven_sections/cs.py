@@ -75,11 +75,41 @@ def _tpl_header_titles(tpl) -> list[str]:
     return headers
 
 
+def _is_valid_cs_header_set(attr_name: str, headers: list[str]) -> bool:
+    """校验 CS 评审表头是否可直接复用，避免误用脏表头。"""
+    normalized = [_norm_header(header) for header in headers if _norm_header(header)]
+    if not normalized or "序号" not in normalized[0]:
+        return False
+    if any(len(header) > 24 or any(token in header for token in ("。", "；", "：")) for header in normalized):
+        return False
+
+    required_groups = {
+        "qualification_review_table": [
+            ("审查项", "审查内容"),
+            ("采购文件要求", "招标文件要求", "磋商文件要求", "合格条件"),
+        ],
+        "compliance_review_table": [
+            ("审查项", "审查内容"),
+            ("采购文件要求", "招标文件要求", "磋商文件要求", "合格条件"),
+        ],
+        "detailed_review_table": [
+            ("评审项", "评审因素", "评分项目", "内容"),
+            ("采购文件评分要求", "评分要求", "评审标准", "评分标准"),
+        ],
+        "invalid_bid_table": [
+            ("无效情形",),
+            ("自检结果", "是否满足", "结果"),
+        ],
+    }
+    groups = required_groups.get(attr_name, [])
+    return all(any(any(token in header for token in group) for header in normalized) for group in groups)
+
+
 def _select_cs_headers(tender, attr_name: str, fallback_headers: list[str]) -> list[str]:
     """选择CS 格式表头。"""
     tpl = getattr(tender, attr_name, None)
     headers = _tpl_header_titles(tpl)
-    if len(headers) >= 2:
+    if _is_valid_cs_header_set(attr_name, headers):
         return headers
     return fallback_headers
 

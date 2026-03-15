@@ -296,6 +296,105 @@ def _set_repeat_table_header(row) -> None:
     tr_pr.append(tbl_header)
 
 
+def _section_content_width_twips(doc: Document) -> int:
+    """返回当前 section 可用版心宽度（twips）。"""
+    section = doc.sections[-1]
+    available = int(section.page_width) - int(section.left_margin) - int(section.right_margin)
+    return max(available // 635, 1)
+
+
+def _length_to_twips(length) -> int:
+    """把 python-docx 长度对象转换为 twips。"""
+    if hasattr(length, "twips"):
+        return int(getattr(length, "twips"))
+    return max(int(round(int(length) / 635)), 1)
+
+
+def _table_weight_for_header(header_text: str) -> float:
+    """根据表头语义估算列宽权重。"""
+    compact = re.sub(r"[\s\r\n\t]+", "", header_text or "")
+    if any(token in compact for token in ("序号", "包号")):
+        return 0.9
+    if any(token in compact for token in ("页码", "页次", "是否", "结果", "分值", "数量", "单位", "单价", "合计", "报价")):
+        return 1.2
+    if "备注" in compact:
+        return 1.4
+    return 3.0
+
+
+def _normalize_table_widths_twips(widths, available_width_twips: int) -> list[int]:
+    """把表格列宽缩放到版心内，避免 Word 中表格横向溢出。"""
+    normalized = [max(_length_to_twips(width), 1) for width in widths if width is not None]
+    if not normalized:
+        return []
+
+    total = sum(normalized)
+    if total <= 0:
+        return []
+    if total > available_width_twips:
+        scale = available_width_twips / total
+        normalized = [max(int(round(width * scale)), 1) for width in normalized]
+
+    diff = available_width_twips - sum(normalized)
+    if normalized:
+        normalized[-1] = max(normalized[-1] + diff, 1)
+    return normalized
+
+
+def _fallback_table_widths_twips(header_cells: list[str], available_width_twips: int) -> list[int]:
+    """在没有模板列宽时，按表头语义分配版心内宽度。"""
+    weights = [_table_weight_for_header(header) for header in header_cells]
+    total_weight = sum(weights) or float(len(header_cells) or 1)
+    widths = [max(int(round(available_width_twips * weight / total_weight)), 1) for weight in weights]
+    if widths:
+        widths[-1] = max(widths[-1] + (available_width_twips - sum(widths)), 1)
+    return widths
+
+
+def _set_table_width(table, width_twips: int) -> None:
+    """设置表格总宽度。"""
+    tbl_pr = table._tbl.tblPr
+    existing = tbl_pr.xpath("./w:tblW")
+    tbl_w = existing[0] if existing else OxmlElement("w:tblW")
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_w.set(qn("w:w"), str(max(width_twips, 1)))
+    if not existing:
+        tbl_pr.append(tbl_w)
+
+
+def _set_table_fixed_layout(table) -> None:
+    """强制 Word 使用固定表格布局。"""
+    tbl_pr = table._tbl.tblPr
+    existing = tbl_pr.xpath("./w:tblLayout")
+    layout = existing[0] if existing else OxmlElement("w:tblLayout")
+    layout.set(qn("w:type"), "fixed")
+    if not existing:
+        tbl_pr.append(layout)
+
+
+def _set_table_grid_widths(table, width_twips: list[int]) -> None:
+    """同步设置表格网格列宽，避免 Word 打开后按默认网格重算。"""
+    grid = getattr(table._tbl, "tblGrid", None)
+    if grid is None:
+        return
+    grid_cols = list(getattr(grid, "gridCol_lst", []) or [])
+    for idx, grid_col in enumerate(grid_cols):
+        if idx >= len(width_twips):
+            break
+        grid_col.w = Cm(width_twips[idx] / 567.0)
+
+
+def _set_cell_width(cell, width_twips: int) -> None:
+    """显式写入单元格宽度。"""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    existing = tc_pr.xpath("./w:tcW")
+    tc_w = existing[0] if existing else OxmlElement("w:tcW")
+    tc_w.set(qn("w:type"), "dxa")
+    tc_w.set(qn("w:w"), str(max(width_twips, 1)))
+    if not existing:
+        tc_pr.append(tc_w)
+
+
 def _cell_alignment_for_header(header_text: str, *, is_header: bool) -> WD_ALIGN_PARAGRAPH:
     """为表头和正文选择单元格对齐方式。"""
     if is_header:
@@ -455,16 +554,25 @@ def _render_markdown_table(
     table = doc.add_table(rows=len(normalized_rows), cols=col_count)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
+    content_width_twips = _section_content_width_twips(doc)
     widths = _select_table_layout_widths(tender, header_cells, section_title) or _get_fixed_table_widths(header_cells)
-    table.autofit = widths is None
+    width_twips = (
+        _normalize_table_widths_twips(widths, content_width_twips)
+        if widths
+        else _fallback_table_widths_twips(header_cells, content_width_twips)
+    )
+    table.autofit = False
     _style_table(table)
+    _set_table_fixed_layout(table)
+    _set_table_width(table, sum(width_twips))
     if table.rows:
         _set_repeat_table_header(table.rows[0])
 
-    if widths:
-        for col_idx, width in enumerate(widths):
+    if width_twips:
+        for col_idx, width in enumerate(width_twips):
             if col_idx < len(table.columns):
-                table.columns[col_idx].width = width
+                table.columns[col_idx].width = Cm(width / 567.0)
+        _set_table_grid_widths(table, width_twips)
 
     for i, row_data in enumerate(normalized_rows):
         for j, cell_text in enumerate(row_data):
@@ -483,8 +591,9 @@ def _render_markdown_table(
             p.alignment = _cell_alignment_for_header(header_cells[j], is_header=(i == 0))
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
-            if widths and j < len(widths):
-                cell.width = widths[j]
+            if width_twips and j < len(width_twips):
+                _set_cell_width(cell, width_twips[j])
+                cell.width = Cm(width_twips[j] / 567.0)
 
     doc.add_paragraph()
 
@@ -722,6 +831,7 @@ def _is_probable_zb_template_title(title: str) -> bool:
         "投标函",
         "开标一览表",
         "投标分项报价表",
+        "资格证明文件",
         "投标保证金说明函",
         "授权书",
         "投标人一般情况表",
@@ -729,10 +839,17 @@ def _is_probable_zb_template_title(title: str) -> bool:
         "中小企业声明函",
         "残疾人福利性单位声明函",
         "节能环保材料",
+        "商务条款响应及偏离表",
+        "商务条款偏离表",
         "采购需求响应及偏离表",
         "技术要求响应及偏离表",
         "技术支持资料",
         "其他技术方案",
+        "供货、安装调试、质量保障及售后服务方案",
+        "资格性审查响应对照表",
+        "符合性审查响应对照表",
+        "详细评审响应对照表",
+        "无效投标情形自检表",
         "制造商授权书",
         "售后服务承诺书",
         "招标代理服务费承诺",

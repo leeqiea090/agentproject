@@ -1078,9 +1078,12 @@ def _classify_clause_category(key: str, value: str) -> ClauseCategory:
 
     # 1) 配置类硬路由
     if any(tok in key_n for tok in (
-        "主要配置功能", "配置要求", "配置清单", "装箱配置", "易损件及耗材",
+        "设备配置", "设备配置与配件", "配置与配件", "主要配置", "主要配置功能",
+        "配置要求", "配置清单", "装箱配置", "装箱配置单", "易损件及耗材",
         "零配件清单", "随机附件", "标准配置", "选配", "标配",
     )):
+        return ClauseCategory.config_requirement
+    if re.fullmatch(r"(?:设备)?配置\s*\d+", key_n):
         return ClauseCategory.config_requirement
 
     # 2) 验收类硬路由
@@ -1596,6 +1599,33 @@ def _extract_package_scope_text(
             end += 1
 
         scope = "\n".join(lines[start:end]).strip()
+        if scope and (
+            len(scope) < 200
+            or not (
+                _contains_any(scope, _TECH_SECTION_HINTS)
+                or _contains_any(scope, _CONFIG_SECTION_HINTS)
+            )
+        ):
+            fallback_end = end
+            while fallback_end < len(lines) and fallback_end - idx < max(_PACKAGE_SCOPE_AFTER_LINES, 260):
+                following = _normalize_requirement_line(lines[fallback_end])
+                next_window = _scope_window_text(lines, fallback_end, span=2)
+                next_window_compact = _compact_scope_text(next_window)
+                if next_window and re.match(r"合同包\s*\d+", next_window):
+                    if not any(marker in next_window_compact for marker in package_markers_compact):
+                        break
+                if next_window and re.match(r"(?:包\s*\d+|第\s*\d+\s*包|\d+\s*包)", next_window) and not any(
+                    marker in next_window_compact for marker in package_markers_compact
+                ):
+                    break
+                if following and _contains_any(following, _PACKAGE_SCOPE_EXIT_HINTS):
+                    break
+                fallback_end += 1
+
+            expanded_scope = "\n".join(lines[start:fallback_end]).strip()
+            if expanded_scope and len(expanded_scope) > len(scope):
+                scope = expanded_scope
+
         if not scope or scope in seen_scopes:
             continue
         seen_scopes.add(scope)

@@ -4,7 +4,6 @@ from __future__ import annotations
 import re
 
 from app.schemas import BidDocumentSection, TenderDocument, ProcurementPackage
-
 __all__ = [
     "re",
     "BidDocumentSection",
@@ -99,7 +98,12 @@ def _extract_review_rows_from_block(block: str) -> list[str]:
 
 def _clean_text(value) -> str:
     """清理文本。"""
-    return " ".join(str(value or "").replace("|", "/").split())
+    text = str(value or "").replace("|", "/")
+    text = re.sub(r"[\u200b\ufeff]+", "", text)
+    text = re.sub(r"[-—–]?\s*第\s*\d+\s*页\s*[-—–]?", " ", text)
+    text = re.sub(r"[；;]{2,}", "；", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _md_table(headers: list[str], rows: list[list[str]]) -> str:
@@ -289,7 +293,8 @@ def _normalize_number_text(value) -> str:
 
 def _normalize_dense_text(text: str) -> str:
     """归一化紧凑文本，便于匹配。"""
-    return re.sub(r"\s+", " ", text or "").strip()
+    text = re.sub(r"[-—–]?\s*第\s*\d+\s*页\s*[-—–]?", " ", text or "")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _extract_front_matter_scope(tender_raw: str) -> str:

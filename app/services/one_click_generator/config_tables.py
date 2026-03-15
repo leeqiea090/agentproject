@@ -104,7 +104,22 @@ def _is_noise_config_item(name: str, remark: str = "") -> bool:
     normalized = _normalize_config_item_name(name)
     if not normalized:
         return True
-    if normalized in {"设备总台数", "总台数", "如有多个配置请另行加行", "序号", "要求", "备注说明"}:
+    if normalized in {
+        "设备总台数",
+        "总台数",
+        "如有多个配置请另行加行",
+        "序号",
+        "要求",
+        "备注说明",
+        "装箱配置单",
+        "装箱配置",
+        "配置清单",
+        "标准配置",
+        "设备配置",
+        "设备配置与配件",
+        "配置与配件",
+        "主要配置",
+    }:
         return True
     if re.fullmatch(r"配置\s*\d+", normalized):
         return True
@@ -112,9 +127,349 @@ def _is_noise_config_item(name: str, remark: str = "") -> bool:
         return True
     if "另行加行" in normalized:
         return True
+    if "待补充" in normalized or "待填写" in normalized:
+        return True
     if remark and "总台数" in remark:
         return True
     return False
+
+
+def _looks_like_config_requirement_key(key: str) -> bool:
+    """判断 technical_requirements 中的键是否表示配置清单/装箱配置。"""
+    normalized = _normalize_config_item_name(key)
+    if not normalized:
+        return False
+    if re.fullmatch(r"(?:设备)?配置\s*\d+", normalized):
+        return True
+    return any(
+        marker in normalized
+        for marker in (
+            "设备配置",
+            "设备配置与配件",
+            "配置与配件",
+            "装箱配置单",
+            "装箱配置",
+            "配置清单",
+            "主要配置",
+            "主要配置功能",
+            "标准配置",
+            "随机附件",
+            "零配件清单",
+        )
+    )
+
+
+def _default_config_unit(name: str) -> str:
+    """根据配置项名称推断默认单位。"""
+    normalized = _normalize_config_item_name(name)
+    if any(token in normalized for token in ("主机", "整机", "冷水机", "工作站", "显示器", "打印机", "UPS", "电源")):
+        return "台"
+    if any(token in normalized for token in ("软件",)):
+        return "套"
+    if any(token in normalized for token in ("系统", "模块", "组件")):
+        return "套"
+    if any(token in normalized for token in ("说明书", "文件", "手册", "装箱单", "合格证", "保修卡", "报告", "彩页")):
+        return "份"
+    if "扫码器" in normalized:
+        return "把"
+    if any(token in normalized for token in ("试剂", "微球")):
+        return "盒"
+    if any(token in normalized for token in ("头钉", "探头", "按钮", "报警仪", "底座", "头托", "连接器", "辐照杯", "板", "泵")):
+        return "个"
+    return "项"
+
+
+def _guess_config_qty_unit(name: str, raw_value: Any) -> tuple[str, str]:
+    """从配置值中推断数量与单位。"""
+    text = _safe_text(raw_value, "")
+    match = re.search(
+        r"(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>台|套|个|把|本|件|组|副|支|块|张|份|盒|台套)?",
+        text,
+    )
+    qty = "1"
+    unit = _default_config_unit(name)
+    if match and match.group("qty"):
+        qty = match.group("qty")
+        unit = match.group("unit") or unit
+    elif isinstance(raw_value, (int, float)):
+        qty = str(int(raw_value)) if float(raw_value).is_integer() else str(raw_value)
+    elif text:
+        qty = "1"
+    return qty, unit
+
+
+def _append_config_item(
+    parsed_items: list[tuple[str, str, str, str]],
+    seen_names: set[str],
+    *,
+    name: str,
+    unit: str,
+    qty: str,
+    remark: str,
+) -> None:
+    """统一追加配置项并做基础过滤。"""
+    normalized_name = _normalize_config_item_name(name)
+    if not normalized_name or normalized_name in seen_names:
+        if normalized_name and normalized_name in seen_names:
+            for idx, (existing_name, existing_unit, existing_qty, existing_remark) in enumerate(parsed_items):
+                if existing_name != normalized_name:
+                    continue
+                should_upgrade = (
+                    (existing_unit == "项" and unit and unit != "项")
+                    or (existing_qty in {"", "1"} and qty not in {"", "1"})
+                )
+                if should_upgrade:
+                    parsed_items[idx] = (
+                        normalized_name,
+                        unit or existing_unit,
+                        qty or existing_qty,
+                        remark or existing_remark,
+                    )
+                break
+        return
+    if not qty or not qty.replace(".", "", 1).isdigit():
+        qty = "1"
+    if not unit:
+        unit = _default_config_unit(normalized_name)
+    if _is_noise_config_item(normalized_name, remark):
+        return
+    seen_names.add(normalized_name)
+    parsed_items.append((normalized_name, unit, qty, remark))
+
+
+def _extract_config_items_from_package_requirements(
+    pkg: ProcurementPackage,
+    parsed_items: list[tuple[str, str, str, str]],
+    seen_names: set[str],
+) -> None:
+    """优先消费解析器已经提取到的 package-level 配置字典。"""
+    for key, raw_value in (getattr(pkg, "technical_requirements", None) or {}).items():
+        if not _looks_like_config_requirement_key(_safe_text(key, "")):
+            continue
+
+        if isinstance(raw_value, dict):
+            for item_name, item_value in raw_value.items():
+                normalized_name = _normalize_config_item_name(item_name)
+                qty, unit = _guess_config_qty_unit(normalized_name, item_value)
+                remark = _classify_config_item(normalized_name)
+                _append_config_item(
+                    parsed_items,
+                    seen_names,
+                    name=normalized_name,
+                    unit=unit,
+                    qty=qty,
+                    remark=remark,
+                )
+            continue
+
+        value_text = _as_text(raw_value)
+        if not value_text:
+            continue
+        for fragment in [frag.strip() for frag in re.split(r"[，,；;、]", value_text) if frag.strip()]:
+            normalized = _normalize_requirement_line(fragment)
+            if not normalized:
+                continue
+            match = re.match(
+                r"^(?P<name>.+?)(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>台|套|个|把|本|件|组|副|支|块|张|份|盒|台套)?$",
+                normalized,
+            )
+            if match:
+                name = _normalize_config_item_name(match.group("name"))
+                qty = match.group("qty")
+                unit = match.group("unit") or _default_config_unit(name)
+            else:
+                name = _normalize_config_item_name(normalized)
+                qty = "1"
+                unit = _default_config_unit(name)
+            remark = _classify_config_item(name)
+            _append_config_item(
+                parsed_items,
+                seen_names,
+                name=name,
+                unit=unit,
+                qty=qty,
+                remark=remark,
+            )
+
+
+_DERIVED_CONFIG_CANDIDATE_PATTERN = re.compile(
+    r"([A-Za-z0-9\u4e00-\u9fa5（）()\-+]{2,24}?"
+    r"(?:主机|工作站|软件系统|分析软件|应用软件|软件|系统|模块|组件|探头|扫码器|报警仪|冷水机|电源|UPS|"
+    r"显示器|打印机|按钮|门锁系统|底座手柄|底座|头托|头钉|连接器|球管|辐照杯|离子泵|面板|流动室|试剂架|比色杯))"
+)
+_DERIVED_CONFIG_EXCLUDE_TOKENS = (
+    "电压",
+    "功率",
+    "角度",
+    "剂量",
+    "剂量率",
+    "容量",
+    "范围",
+    "速度",
+    "时间",
+    "误差",
+    "直径",
+    "温度",
+    "用途",
+    "原理",
+    "方法",
+    "项目",
+    "通道",
+    "分辨率",
+    "污染率",
+    "样本位",
+    "试剂位",
+    "液面探测",
+    "流速模式",
+    "独立性",
+    "功能",
+    "要求",
+    "性能",
+    "兼容规格",
+    "控制范围",
+    "测试项目",
+    "检测原理",
+)
+_DERIVED_ACTION_CONFIG_MAP = (
+    ("自动加样", "自动加样工作站"),
+    ("自动加底物", "自动加底物模块"),
+    ("自动孵育", "自动孵育模块"),
+    ("自动染色", "自动染色模块"),
+    ("自动脱色", "自动脱色模块"),
+    ("LIS", "LIS接口模块"),
+    ("双向传输", "双向传输接口模块"),
+    ("可视面板", "可视面板"),
+)
+
+
+def _normalize_derived_config_name(name: str) -> str:
+    """清理从技术条款里反推出来的配置项名称。"""
+    normalized = _normalize_config_item_name(name)
+    normalized = re.sub(r"^[与及和]\s*", "", normalized)
+    normalized = re.sub(
+        r"^(?:(?:具备|配置|配备|采用|支持|可兼容|可选配|原厂配套的|原厂配套))+",
+        "",
+        normalized,
+    )
+    normalized = re.sub(r"[（(]\d+[）)]$", "", normalized)
+    normalized = re.sub(r"(相互独立|可同时连续工作或单独分开工作|可同时连续工作|单独分开工作)$", "", normalized)
+    normalized = normalized.strip(" ：:，,；;。")
+    return normalized
+
+
+def _is_derived_config_candidate(name: str) -> bool:
+    """判断技术条款里的短语是否可以视为配置项。"""
+    normalized = _normalize_derived_config_name(name)
+    if not normalized:
+        return False
+    if _is_noise_config_item(normalized):
+        return False
+    if any(token in normalized for token in _DERIVED_CONFIG_EXCLUDE_TOKENS):
+        return False
+    return bool(_DERIVED_CONFIG_CANDIDATE_PATTERN.search(normalized)) or any(
+        token in normalized
+        for token in ("工作站", "软件", "系统", "模块", "组件", "探头", "扫码器", "报警仪", "冷水机", "UPS", "底座", "头托", "头钉", "连接器")
+    )
+
+
+def _explode_derived_config_name(name: str) -> list[str]:
+    """把“电泳系统与染色系统”这类复合配置名拆成独立项。"""
+    normalized = _normalize_derived_config_name(name)
+    if not normalized:
+        return []
+    parts = [
+        _normalize_derived_config_name(part)
+        for part in re.split(r"[与及和、]", normalized)
+        if _normalize_derived_config_name(part)
+    ]
+    if len(parts) >= 2 and all(_is_derived_config_candidate(part) for part in parts):
+        return parts
+    return [normalized]
+
+
+def _extract_derived_config_names(text: str) -> list[str]:
+    """从技术条款文本中提取候选配置项名称。"""
+    candidates: list[str] = []
+    for match in _DERIVED_CONFIG_CANDIDATE_PATTERN.finditer(_safe_text(text, "")):
+        for candidate in _explode_derived_config_name(match.group(1)):
+            if _is_derived_config_candidate(candidate):
+                candidates.append(candidate)
+    normalized_text = _safe_text(text, "")
+    for token, mapped_name in _DERIVED_ACTION_CONFIG_MAP:
+        if token in normalized_text:
+            candidates.append(mapped_name)
+    return candidates
+
+
+def _config_items_need_enrichment(items: list[tuple[str, str, str, str]]) -> bool:
+    """判断配置表是否仍然过薄，需要从技术条款补项。"""
+    meaningful = [
+        item
+        for item in items
+        if not _is_noise_config_item(item[0], item[3])
+        and "待补充" not in item[0]
+    ]
+    return len(meaningful) < 2
+
+
+def _derive_config_items_from_technical_requirements(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    parsed_items: list[tuple[str, str, str, str]],
+    seen_names: set[str],
+) -> None:
+    """当招标文件没有显式装箱明细时，从技术条款反推关键配置项。"""
+    def _derived_remark(candidate_name: str, source_key: str, source_val: str) -> str:
+        """生成落地态备注，不再输出“反推/核对”提示。"""
+        category = _classify_config_item(candidate_name)
+        source_text = f"{_safe_text(source_key, '')} {_safe_text(source_val, '')}"
+        if "自动" in source_text:
+            return f"{category}；用于实现自动化处理流程"
+        if "独立" in source_text:
+            return f"{category}；用于满足独立运行要求"
+        if "温控" in source_text:
+            return f"{category}；用于温度控制"
+        if "LIS" in source_text or "双向传输" in source_text:
+            return f"{category}；用于数据传输及系统对接"
+        if "观察" in source_text or "可视" in source_text:
+            return f"{category}；用于过程观察"
+        normalized_key = _normalize_config_item_name(source_key)
+        if normalized_key:
+            return f"{category}；满足{normalized_key}要求"
+        return category
+
+    source_pairs: list[tuple[str, str]] = []
+    for key, raw_value in (getattr(pkg, "technical_requirements", None) or {}).items():
+        if isinstance(raw_value, dict):
+            for sub_key, sub_value in raw_value.items():
+                source_pairs.append((_safe_text(sub_key, ""), _as_text(sub_value)))
+            continue
+        source_pairs.append((_safe_text(key, ""), _as_text(raw_value)))
+
+    source_pairs.extend(_effective_requirements(pkg, tender_raw))
+
+    seen_pairs: set[str] = set()
+    for key, val in source_pairs:
+        pair_signature = f"{key}::{val}"
+        if pair_signature in seen_pairs:
+            continue
+        seen_pairs.add(pair_signature)
+        candidate_names: list[str] = []
+        for key_name in _explode_derived_config_name(key):
+            if _is_derived_config_candidate(key_name):
+                candidate_names.append(key_name)
+        candidate_names.extend(_extract_derived_config_names(val))
+
+        for candidate_name in candidate_names:
+            remark = _derived_remark(candidate_name, key, val)
+            _append_config_item(
+                parsed_items,
+                seen_names,
+                name=candidate_name,
+                unit=_default_config_unit(candidate_name),
+                qty="1",
+                remark=remark,
+            )
 
 
 def _extract_configuration_items(
@@ -136,19 +491,21 @@ def _extract_configuration_items(
     parsed_items: list[tuple[str, str, str, str]] = []
     _seen_names: set[str] = set()
 
+    _extract_config_items_from_package_requirements(pkg, parsed_items, _seen_names)
+
     for req in structured_config:
         name = _normalize_config_item_name(_safe_text(req.get("param_name") or req.get("parameter_name"), ""))
-        if not name or name in _seen_names:
-            continue
-        _seen_names.add(name)
         unit = _safe_text(req.get("unit"), "项")
         qty = _safe_text(req.get("threshold"), "1")
-        if not qty or not qty.replace(".", "").isdigit():
-            qty = "1"
         remark = _classify_config_item(name)
-        if _is_noise_config_item(name, remark):
-            continue
-        parsed_items.append((name, unit, qty, remark))
+        _append_config_item(
+            parsed_items,
+            _seen_names,
+            name=name,
+            unit=unit,
+            qty=qty,
+            remark=remark,
+        )
 
     # ── 兜底：关键词匹配提取（仅在结构化结果不足时）──
     requirements = _effective_requirements(pkg, tender_raw)
@@ -178,13 +535,40 @@ def _extract_configuration_items(
                 continue
 
             remark = _classify_config_item(name)
-            if _is_noise_config_item(name, remark):
-                continue
-            parsed_items.append((name, unit, qty, remark))
+            _append_config_item(
+                parsed_items,
+                _seen_names,
+                name=name,
+                unit=unit,
+                qty=qty,
+                remark=remark,
+            )
 
     config_scope = _extract_package_configuration_scope_text(pkg, tender_raw)
     if config_scope:
+        heading_matches = list(
+            re.finditer(
+                r"(?:主要配置、功能|主要配置功能|装箱配置单|装箱配置|配置清单|设备配置与配件|设备配置|配置与配件|主要配置|标准配置)[:：]?\s*",
+                config_scope,
+            )
+        )
+        if heading_matches:
+            config_scope = config_scope[heading_matches[-1].end() :]
         unit_pattern = "|".join(re.escape(unit) for unit in _CONFIG_ITEM_UNITS)
+        normalized_scope_lines = [
+            re.sub(
+                r"^(?:装箱配置单|装箱配置|配置清单|设备配置与配件|设备配置|配置与配件|主要配置|标准配置)[:：]?\s*",
+                "",
+                _normalize_requirement_line(raw_line),
+            ).strip(" ：:;；,，。")
+            for raw_line in config_scope.splitlines()
+        ]
+        normalized_scope_lines = [
+            line
+            for line in normalized_scope_lines
+            if line and not _contains_any(line, _CONFIG_EXIT_HINTS)
+        ]
+
         for raw_line in config_scope.splitlines():
             normalized_line = _normalize_requirement_line(raw_line)
             normalized_line = re.sub(
@@ -227,9 +611,70 @@ def _extract_configuration_items(
                     continue
 
                 remark = _classify_config_item(name)
-                if _is_noise_config_item(name, remark):
+                _append_config_item(
+                    parsed_items,
+                    _seen_names,
+                    name=name,
+                    unit=unit,
+                    qty=qty,
+                    remark=remark,
+                )
+
+        idx = 0
+        while idx < len(normalized_scope_lines):
+            current = normalized_scope_lines[idx]
+            next_line = normalized_scope_lines[idx + 1] if idx + 1 < len(normalized_scope_lines) else ""
+            third_line = normalized_scope_lines[idx + 2] if idx + 2 < len(normalized_scope_lines) else ""
+            fourth_line = normalized_scope_lines[idx + 3] if idx + 3 < len(normalized_scope_lines) else ""
+
+            if re.fullmatch(r"\d+", current):
+                if (
+                    next_line
+                    and third_line
+                    and fourth_line in _CONFIG_ITEM_UNITS
+                    and not re.fullmatch(r"\d+(?:\.\d+)?", next_line)
+                    and re.fullmatch(r"\d+(?:\.\d+)?", third_line)
+                ):
+                    name = _normalize_config_item_name(next_line)
+                    qty = third_line
+                    unit = fourth_line
+                    remark = _classify_config_item(name)
+                    _append_config_item(
+                        parsed_items,
+                        _seen_names,
+                        name=name,
+                        unit=unit,
+                        qty=qty,
+                        remark=remark,
+                    )
+                    idx += 4
                     continue
-                parsed_items.append((name, unit, qty, remark))
+                idx += 1
+                continue
+
+            if (
+                current
+                and next_line
+                and third_line in _CONFIG_ITEM_UNITS
+                and not re.fullmatch(r"\d+(?:\.\d+)?", current)
+                and re.fullmatch(r"\d+(?:\.\d+)?", next_line)
+            ):
+                name = _normalize_config_item_name(current)
+                qty = next_line
+                unit = third_line
+                remark = _classify_config_item(name)
+                _append_config_item(
+                    parsed_items,
+                    _seen_names,
+                    name=name,
+                    unit=unit,
+                    qty=qty,
+                    remark=remark,
+                )
+                idx += 3
+                continue
+
+            idx += 1
 
         flat_scope = " ".join(
             _normalize_requirement_line(line)
@@ -256,9 +701,17 @@ def _extract_configuration_items(
                 continue
             name, qty, unit = pieces
             remark = _classify_config_item(name)
-            if _is_noise_config_item(name, remark):
-                continue
-            parsed_items.append((name, unit, qty, remark))
+            _append_config_item(
+                parsed_items,
+                _seen_names,
+                name=name,
+                unit=unit,
+                qty=qty,
+                remark=remark,
+            )
+
+    if _config_items_need_enrichment(parsed_items):
+        _derive_config_items_from_technical_requirements(pkg, tender_raw, parsed_items, _seen_names)
 
     # 智能去重：基于 token Jaccard 相似度而非简单子串匹配
     parsed_items.sort(
@@ -294,14 +747,28 @@ def _extract_configuration_items(
     cleaned = _clean_config_items(deduped, pkg.package_id, pkg.item_name)
 
     # 不再强行补“标准附件 / 配套软件 / 随机文件 / 安装培训 / 初始耗材”等 6 类通用占位项。
-    # 只在完全提取不到任何配置时，保留一条最小骨架，方便人工从“主机”开始补。
+    # 只在完全提取不到任何配置时，补一组可直接落表的最小成品清单。
     if not cleaned:
-        cleaned.append((
-            f"{pkg.item_name}主机",
-            "台",
-            "1",
-            "核心模块；与第三章投标型号一致，如有子模块/附件差异再补充",
-        ))
+        cleaned.extend([
+            (
+                f"{pkg.item_name}主机",
+                "台",
+                "1",
+                "核心模块",
+            ),
+            (
+                "随机附件",
+                "套",
+                "1",
+                "标准附件",
+            ),
+            (
+                "随机文件",
+                "份",
+                "1",
+                "说明书、合格证、装箱单",
+            ),
+        ])
 
     return cleaned
 

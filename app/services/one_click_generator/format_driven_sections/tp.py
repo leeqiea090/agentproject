@@ -120,6 +120,23 @@ def _tidy_extracted_text(text: str) -> str:
     return value.strip()
 
 
+def _normalize_tp_procurement_terms(text: str) -> str:
+    """统一 TP 文本中的采购方式术语，避免串入磋商用语。"""
+    value = _tidy_extracted_text(text)
+    if not value:
+        return ""
+    replacements = (
+        ("竞争性磋商文件", "竞争性谈判文件"),
+        ("磋商文件", "谈判文件"),
+        ("磋商小组", "谈判小组"),
+        ("磋商过程", "谈判过程"),
+        ("磋商依据", "谈判依据"),
+    )
+    for source, target in replacements:
+        value = value.replace(source, target)
+    return value
+
+
 def _tpl_header_titles(tpl) -> list[str]:
     """返回模板中的表头标题列表。"""
     columns = list(getattr(tpl, "columns", None) or [])
@@ -127,11 +144,41 @@ def _tpl_header_titles(tpl) -> list[str]:
     return [header for header in headers if header]
 
 
+def _is_valid_tp_header_set(attr_name: str, headers: list[str]) -> bool:
+    """校验 TP 评审表头是否可直接复用，避免误用脏表头。"""
+    normalized = [_norm_header(header) for header in headers if _norm_header(header)]
+    if not normalized or "序号" not in normalized[0]:
+        return False
+    if any(len(header) > 24 or any(token in header for token in ("。", "；", "：")) for header in normalized):
+        return False
+
+    required_groups = {
+        "qualification_review_table": [
+            ("审查项", "审查内容"),
+            ("招标文件要求", "采购文件要求", "合格条件"),
+        ],
+        "compliance_review_table": [
+            ("审查项", "审查内容"),
+            ("招标文件要求", "采购文件要求", "合格条件"),
+        ],
+        "detailed_review_table": [
+            ("评审项", "评审因素", "评分项目", "内容"),
+            ("采购文件评分要求", "评分要求", "评审标准", "评分标准"),
+        ],
+        "invalid_bid_table": [
+            ("无效情形",),
+            ("自检结果", "是否满足", "结果"),
+        ],
+    }
+    groups = required_groups.get(attr_name, [])
+    return all(any(any(token in header for token in group) for header in normalized) for group in groups)
+
+
 def _select_tp_headers(tender, attr_name: str, fallback_headers: list[str]) -> list[str]:
     """选择TP 格式表头。"""
     tpl = getattr(tender, attr_name, None)
     headers = _tpl_header_titles(tpl)
-    if len(headers) >= 2:
+    if _is_valid_tp_header_set(attr_name, headers):
         return headers
     return fallback_headers
 
@@ -913,7 +960,7 @@ def _extract_tp_invalid_items(tender_raw: str) -> list[str]:
     cleaned: list[str] = []
     seen: set[str] = set()
     for item in items:
-        compact = _tidy_extracted_text(item)
+        compact = _normalize_tp_procurement_terms(item)
         compact = re.split(r"\s*7\s*[．.]\s*供应商必须保证", compact, maxsplit=1)[0].strip()
         if not compact or compact in seen:
             continue
@@ -946,7 +993,7 @@ def _build_tp_invalid_bid_checklist(tender, tender_raw: str) -> str:
         "所报项目在实际运行中，其使用成本过高、使用条件苛刻的需经谈判小组确定后不能被采购人接受的。",
         "法定代表人/单位负责人授权书无法定代表人/单位负责人签字或没有加盖公章的。",
         "参加政府采购活动前三年内，在经营活动中有重大违法记录的。",
-        "供应商对采购人、代理机构、磋商小组及其工作人员施加影响，有碍公平、公正的。",
+        "供应商对采购人、代理机构、谈判小组及其工作人员施加影响，有碍公平、公正的。",
         "单位负责人为同一人或者存在直接控股、管理关系的不同供应商参与本项目同一合同项下的投标的，其相关投标将被认定为投标无效。",
         "属于串通投标，或者依法被视为串通投标的。",
         "按有关法律、法规、规章规定属于响应无效的。",
@@ -1182,6 +1229,8 @@ def _extract_tp_service_points(pkg, tender_raw: str) -> list[str]:
         value = re.sub(r"\s*/\s*", "/", value)
         value = re.sub(r"([\u4e00-\u9fff])\s+([A-Z]{2,})", r"\1\2", value)
         value = re.sub(r"([A-Z]{2,})\s+([\u4e00-\u9fff])", r"\1\2", value)
+        value = re.sub(r"[；;]{2,}", "；", value)
+        value = _normalize_tp_procurement_terms(value)
         if value:
             points.append(value)
     return points

@@ -13,7 +13,6 @@ from app.services.one_click_generator.common import (
     _HARD_REQUIREMENT_MARKERS,
     _MAX_TECH_ROWS_PER_PACKAGE,
     _PENDING_BIDDER_RESPONSE,
-    _RICH_EXPANSION_MODE,
     _as_text,
     _safe_text,
 )
@@ -107,9 +106,6 @@ def _fuzzy_spec_lookup(product: Any, req_key: str) -> str:
     return ""
 
 
-_CAPABILITY_MARKERS = ("具备", "支持", "可", "能够", "提供", "配备", "配置", "采用", "满足", "兼容", "允许")
-
-
 def _extract_numeric_with_unit(text: str) -> tuple[float | None, str]:
     """从文本中提取数值和单位。"""
     match = re.search(r"(-?\d+(?:\.\d+)?)\s*([^\d\s，,；;。、≥≤><]+)?", _as_text(text))
@@ -173,11 +169,7 @@ def _try_numeric_threshold_match(req_val: str, product: Any) -> str:
 
 
 def _build_response_value(req_val: str, *, req_key: str = "", product: Any = None) -> str:
-    """Return product spec value if available, with multiple fallback strategies to avoid '待核实'.
-
-    When _RICH_EXPANSION_MODE is enabled, exhausts all product context before falling back to
-    pending placeholders.
-    """
+    """优先使用已核验的产品规格值；否则返回待补实参占位。"""
     if product is None:
         return _PENDING_BIDDER_RESPONSE
 
@@ -199,46 +191,56 @@ def _build_response_value(req_val: str, *, req_key: str = "", product: Any = Non
         if numeric_match:
             return numeric_match
 
-    # 策略4: 布尔/能力类推断 — "具备"/"支持" 类条款
-    combined = f"{req_key} {req_val}"
-    if any(marker in combined for marker in _CAPABILITY_MARKERS):
-        p_name = _as_text(getattr(product, "product_name", ""))
-        p_mfr = _as_text(getattr(product, "manufacturer", ""))
-        if p_name:
-            return f"满足，投标产品（{p_mfr} {p_name}）具备该功能"
-
-    # 策略5: 富展开模式 — 产品信息充分时给出描述而非空白占位符
-    if _RICH_EXPANSION_MODE:
-        specs = getattr(product, "specifications", None) or {}
-        p_name = _as_text(getattr(product, "product_name", ""))
-        p_mfr = _as_text(getattr(product, "manufacturer", ""))
-        p_model = _as_text(getattr(product, "model", ""))
-
-        # 策略5a: 找到任意相关 spec 值进行关联
-        if req_key and specs:
-            req_tokens = [t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", req_key) if len(t) >= 2]
-            for spec_key, spec_val in specs.items():
-                k = _as_text(spec_key)
-                if k and req_tokens and any(t in k for t in req_tokens):
-                    return _as_text(spec_val)
-
-        # 策略5b: 产品信息充分时给出上下文描述
-        if p_name and len(specs) >= 3:
-            identity = f"{p_mfr} {p_model}" if p_model else p_mfr
-            return f"响应，投标产品（{identity.strip()} {p_name}）满足该项要求，详见技术偏离表"
-
-        # 策略5c: 即使信息不够充分，有产品名时也给出承诺式响应
-        if p_name:
-            return f"响应，投标产品（{p_name}）满足招标要求"
-
-    # 策略6: 兜底（原始模式）
-    specs = getattr(product, "specifications", None) or {}
-    p_name = _as_text(getattr(product, "product_name", ""))
-    p_mfr = _as_text(getattr(product, "manufacturer", ""))
-    if p_name and len(specs) >= 3:
-        return f"响应，详见投标产品（{p_mfr} {p_name}）技术偏离表"
-
     return _PENDING_BIDDER_RESPONSE
+
+
+_CONFIG_PLACEHOLDER_KEYS = (
+    "装箱配置",
+    "装箱配置单",
+    "配置清单",
+    "标准配置",
+    "设备配置",
+    "主要配置",
+)
+_CONFIG_PLACEHOLDER_VALUES = (
+    "待补充",
+    "待填写",
+    "详见招标文件",
+    "详见采购文件",
+    "按招标文件",
+    "按采购文件",
+)
+
+
+def _split_requirement_text(req_key: str, req_val: str) -> tuple[str, str]:
+    """把“参数：取值”格式统一拆成 key/value。"""
+    key = _normalized_optional_text(req_key, "")
+    value = _normalized_optional_text(req_val, "")
+
+    if key and value:
+        return key, value
+
+    text = value or key
+    if not text:
+        return "", ""
+
+    if "：" in text:
+        maybe_key, maybe_value = [part.strip() for part in text.split("：", 1)]
+        if maybe_key and maybe_value and len(maybe_key) <= 32:
+            return maybe_key, maybe_value
+    if ":" in text:
+        maybe_key, maybe_value = [part.strip() for part in text.split(":", 1)]
+        if maybe_key and maybe_value and len(maybe_key) <= 32:
+            return maybe_key, maybe_value
+    return key, text
+
+
+def _looks_like_placeholder_config_requirement(req_key: str, req_val: str) -> bool:
+    """识别“装箱配置单：待补充”这类不应进入技术响应表的壳行。"""
+    key, value = _split_requirement_text(req_key, req_val)
+    if not any(token in key for token in _CONFIG_PLACEHOLDER_KEYS):
+        return False
+    return not value or any(marker in value for marker in _CONFIG_PLACEHOLDER_VALUES)
 
 
 def _structured_requirements_for_package(
@@ -620,6 +622,8 @@ def _build_fallback_requirement_rows(
     rows: list[dict[str, Any]] = []
 
     for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
+        if _looks_like_placeholder_config_requirement(req_key, req_val):
+            continue
         req_category = _fallback_requirement_category(req_key, req_val)
         if not _fallback_requirement_matches_category(req_category, category_filter):
             continue
@@ -703,6 +707,8 @@ def _build_requirement_rows(
                 requirement.get("normalized_value") or requirement.get("raw_text") or requirement.get("source_text"),
                 "",
             )
+            if _looks_like_placeholder_config_requirement(req_key, req_val):
+                continue
             if category_filter is None and req_category in {
                 "service_requirement",
                 "acceptance_requirement",
@@ -895,6 +901,31 @@ def _display_model_cell(model_text: str, row_index: int) -> str:
         return model_text if row_index == 1 else "同上"
     return "【待填写：投标型号】" if row_index == 1 else "同上"
 
+
+def _build_pending_response_guidance(req_key: str, req_val: str) -> str:
+    """为未绑定产品事实的技术条款生成可执行的回填指引。"""
+    key = _normalized_optional_text(req_key, "")
+    value = _normalized_optional_text(req_val, "")
+    combined = f"{key} {value}"
+
+    if any(token in combined for token in ("软件", "工作站", "LIS", "系统")):
+        return "请填写对应软件/模块名称、版本或实现方式，并补充说明书/截图页码。"
+    if any(marker in combined for marker in _HARD_REQUIREMENT_MARKERS) or re.search(r"\d", combined):
+        reference = value or key or "招标要求"
+        return f"请填写与“{reference}”逐项对应的实际响应值，并标注说明书/彩页页码。"
+    if any(token in combined for token in ("具备", "支持", "提供", "配置", "配备", "兼容", "采用")):
+        return "请填写对应功能/模块名称及实现方式，并补充证明材料页码。"
+    return "请填写实际配置或功能描述，并补充对应证明材料页码。"
+
+
+def _build_pending_bid_response(req_key: str, req_val: str, model_identity: str = "") -> str:
+    """为未绑定产品事实的技术表响应列生成非空壳的回填骨架。"""
+    guidance = _build_pending_response_guidance(req_key, req_val)
+    if model_identity:
+        return f"品牌/型号：{model_identity}；【待填写：对应参数实测值/配置情况】；{guidance}"
+    return f"【待填写：品牌/型号/规格/配置及逐条响应】；{guidance}"
+
+
 def _build_deviation_table(
     tender,
     pkg,
@@ -953,10 +984,7 @@ def _build_deviation_table(
         if has_real_response:
             real_response_count += 1
         if not has_real_response:
-            if model_identity:
-                bid_response = f"品牌/型号：{_md(model_identity)}；【待填写：对应参数实测值/配置情况】"
-            else:
-                bid_response = "【待填写：品牌/型号/规格/配置及逐条响应】"
+            bid_response = _md(_build_pending_bid_response(service_name, tender_requirement, model_identity))
         else:
             if model_identity and model_identity not in raw_response:
                 bid_response = f"品牌/型号：{_md(model_identity)}；{_md(raw_response)}"

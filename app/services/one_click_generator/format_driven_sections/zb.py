@@ -1,8 +1,24 @@
 """公开招标格式驱动章节生成。"""
 from __future__ import annotations
 
-from .common import *  # noqa: F401,F403
+from typing import Any
 
+from app.services.one_click_generator.config_tables import (
+    _classify_config_item,
+    _extract_configuration_items,
+    _profile_config_items,
+)
+from app.services.one_click_generator.response_tables import (
+    _build_pending_response_guidance,
+    _build_requirement_rows,
+    _display_bidder_response,
+    _has_real_bidder_response,
+    _normalize_deviation_status,
+    _recommended_evidence_label,
+    _split_requirement_text,
+)
+
+from .common import *  # noqa: F401,F403
 
 def _title_semantic_key(title: str) -> str:
     """提取标题的语义匹配键。"""
@@ -519,6 +535,442 @@ def _project_goods_name(packages: list) -> str:
     return "、".join(names) if names else "【待填写：货物名称】"
 
 
+def _profile_payload_for_package(
+    package_id: str,
+    product_profiles: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """返回指定包件的画像字典。"""
+    if not isinstance(product_profiles, dict):
+        return None
+    profile = product_profiles.get(package_id)
+    if profile is None:
+        return None
+    if isinstance(profile, dict):
+        return profile
+    if hasattr(profile, "model_dump"):
+        return profile.model_dump()
+    return None
+
+
+def _product_for_package(
+    package_id: str,
+    products: dict[str, Any] | None,
+):
+    """返回指定包件的产品对象。"""
+    if not isinstance(products, dict):
+        return None
+    return products.get(package_id)
+
+
+def _product_identity_text(
+    product=None,
+    product_profile: dict[str, Any] | None = None,
+) -> str:
+    """返回品牌/型号识别文本。"""
+    product_profile = product_profile or {}
+    brand = _clean_text(
+        getattr(product, "brand", "")
+        or product_profile.get("brand")
+        or getattr(product, "manufacturer", "")
+        or product_profile.get("manufacturer")
+    )
+    model = _clean_text(
+        getattr(product, "model", "")
+        or product_profile.get("model")
+    )
+    manufacturer = _clean_text(
+        getattr(product, "manufacturer", "")
+        or product_profile.get("manufacturer")
+    )
+    identity_parts = [part for part in (brand, model) if part]
+    if identity_parts:
+        return " / ".join(identity_parts)
+    if manufacturer and model:
+        return f"{manufacturer} / {model}"
+    return manufacturer or model
+
+
+def _normalize_recommended_evidence_text(req_key: str, requirement: str = "") -> str:
+    """把待补证提示转成可直接落表的建议资料文本。"""
+    label = _recommended_evidence_label(req_key, requirement)
+    normalized = _clean_text(label.replace("【待补证：", "").replace("】", ""))
+    return normalized or "产品说明书/彩页/厂家参数表"
+
+
+def _build_zb_pending_response_text(
+    req_key: str,
+    req_val: str,
+    model_identity: str = "",
+) -> str:
+    """生成 ZB 格式技术表的非空待补响应文本。"""
+    guidance = _clean_text(_build_pending_response_guidance(req_key, req_val))
+    prefix = f"拟投产品（{model_identity}）" if model_identity else "拟投产品"
+    return f"{prefix}将对照本条逐项响应；{guidance or '请补充实际响应值和对应证明材料页码。'}"
+
+
+def _normalize_zb_requirement_fields(requirement: str) -> tuple[str, str]:
+    """把 ZB 原子条款拆成参数名和要求值。"""
+    normalized = _clean_text(requirement)
+    key, value = _split_requirement_text("", normalized)
+    key = _clean_text(key)
+    value = _clean_text(value)
+    if key and value and key != value:
+        return key, value
+    for sep in ("：", ":"):
+        if sep in normalized:
+            left, right = [part.strip() for part in normalized.split(sep, 1)]
+            if left and right:
+                return _clean_text(left), _clean_text(right)
+    return normalized, normalized
+
+
+def _zb_requirement_tokens(text: str) -> set[str]:
+    """返回用于模糊匹配的 token 集合。"""
+    return {
+        token
+        for token in re.split(r"[，,、；;：:（）()\[\]\s/]+", _clean_text(text))
+        if len(token) >= 2
+    }
+
+
+def _zb_requirement_match_score(
+    requirement: str,
+    row: dict[str, Any],
+) -> int:
+    """为原子条款与结构化需求行计算匹配分值。"""
+    req_key, req_val = _normalize_zb_requirement_fields(requirement)
+    row_key = _clean_text(row.get("key") or row.get("parameter_name") or "")
+    row_req = _clean_text(row.get("requirement") or row.get("value") or row.get("requirement_value") or "")
+    row_full = _clean_text(" ".join(part for part in (row_key, row_req) if part))
+    requirement_full = _clean_text(requirement)
+    if not row_key and not row_req:
+        return 0
+
+    score = 0
+    if row_full and row_full == requirement_full:
+        score += 12
+    if row_key and req_key and row_key == req_key:
+        score += 8
+    if row_req and req_val and row_req == req_val:
+        score += 6
+    if row_key and req_key and (row_key in req_key or req_key in row_key):
+        score += 4
+    if row_req and req_val and (row_req in req_val or req_val in row_req):
+        score += 3
+
+    req_tokens = _zb_requirement_tokens(req_key) | _zb_requirement_tokens(req_val)
+    row_tokens = _zb_requirement_tokens(row_key) | _zb_requirement_tokens(row_req)
+    overlap = len(req_tokens & row_tokens)
+    score += min(overlap, 4)
+    return score
+
+
+def _match_requirement_row_for_zb(
+    requirement: str,
+    requirement_rows: list[dict[str, Any]],
+    used_signatures: set[str],
+) -> dict[str, Any] | None:
+    """为 ZB 原子条款匹配最合适的结构化需求行。"""
+    best_row: dict[str, Any] | None = None
+    best_signature = ""
+    best_score = 0
+    for row in requirement_rows:
+        signature = _clean_text(
+            str(row.get("requirement_id") or f"{row.get('key', '')}::{row.get('requirement', '')}")
+        )
+        if signature and signature in used_signatures:
+            continue
+        score = _zb_requirement_match_score(requirement, row)
+        if score > best_score:
+            best_score = score
+            best_row = row
+            best_signature = signature
+    if best_row is None or best_score < 3:
+        return None
+    if best_signature:
+        used_signatures.add(best_signature)
+    return best_row
+
+
+def _fallback_atomic_rows_from_requirement_rows(
+    requirement_rows: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """当未抽出 ZB 原子条款时，从结构化需求行回退生成表格行。"""
+    rows: list[tuple[str, str]] = []
+    for idx, row in enumerate(requirement_rows, start=1):
+        key = _clean_text(row.get("key") or "")
+        requirement = _clean_text(row.get("requirement") or row.get("value") or "")
+        if not key and not requirement:
+            continue
+        if key and requirement and key != requirement:
+            rows.append((str(idx), f"{key}：{requirement}"))
+        else:
+            rows.append((str(idx), key or requirement))
+    return rows
+
+
+def _format_zb_evidence_text(
+    req_key: str,
+    requirement: str,
+    row: dict[str, Any] | None,
+) -> str:
+    """格式化 ZB 技术支持资料说明列。"""
+    if row:
+        sources = _dedupe_keep_order(
+            [
+                _clean_text(row.get("bidder_evidence_source") or ""),
+                _clean_text(row.get("bid_evidence_file") or ""),
+                _clean_text(row.get("evidence_source") or ""),
+            ]
+        )
+        page = row.get("bidder_evidence_page") or row.get("bid_evidence_page")
+        if sources:
+            source_text = " / ".join(sources[:2])
+            if page not in (None, "", 0):
+                return f"{source_text}（P{page}）"
+            if _has_real_bidder_response(row.get("response")):
+                return f"{source_text}（页码待补）"
+
+    recommended = _normalize_recommended_evidence_text(req_key, requirement)
+    return f"{recommended}（页码待补）"
+
+
+def _build_zb_config_items(
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    product_profile: dict[str, Any] | None = None,
+    normalized_result: dict[str, Any] | None = None,
+) -> list[tuple[str, str, str, str]]:
+    """优先用产品画像，否则从招标文件中提取配置项。"""
+    items = _profile_config_items(product_profile) if product_profile else []
+    if items:
+        return items
+    return _extract_configuration_items(pkg, tender_raw, normalized_result=normalized_result)
+
+
+def _build_zb_packaging_sample_rows(
+    packages: list,
+    tender_raw: str,
+    *,
+    products: dict[str, Any] | None = None,
+    product_profiles: dict[str, Any] | None = None,
+    normalized_result: dict[str, Any] | None = None,
+) -> list[list[str]]:
+    """生成配货单样本行。"""
+    rows: list[list[str]] = []
+    seq = 1
+    for pkg in packages:
+        product = _product_for_package(pkg.package_id, products)
+        profile = _profile_payload_for_package(pkg.package_id, product_profiles)
+        identity = _product_identity_text(product, profile) or "按投标品牌/型号填写"
+        config_items = _build_zb_config_items(
+            pkg,
+            tender_raw,
+            product=product,
+            product_profile=profile,
+            normalized_result=normalized_result,
+        )
+        total_boxes = 3 if len(config_items) >= 4 else 2
+
+        accessory_names = [
+            name
+            for name, _, _, remark in config_items
+            if _classify_config_item(name) in {"核心模块", "标准附件", "配套软件", "初始耗材"}
+            and pkg.item_name not in name
+        ]
+        doc_names = [
+            name
+            for name, _, _, remark in config_items
+            if _classify_config_item(name) in {"随机文件", "安装/培训资料"}
+        ]
+        accessory_text = "、".join(accessory_names[:4]) or "随机附件、专用工具"
+        doc_text = "、".join(doc_names[:4]) or "说明书、合格证、装箱单"
+
+        rows.append(
+            [
+                str(seq),
+                f"{pkg.item_name}主机",
+                identity,
+                f"{_extract_package_quantity(pkg, tender_raw)}/台",
+                f"1/共{total_boxes}箱",
+                doc_text,
+                "到货时核对主机型号、序列号、外观及核心配置",
+            ]
+        )
+        seq += 1
+        rows.append(
+            [
+                str(seq),
+                f"{pkg.item_name}配套附件",
+                "与主机配套",
+                "1批",
+                f"2/共{total_boxes}箱",
+                accessory_text,
+                "按装箱清单逐项点验数量和状态",
+            ]
+        )
+        seq += 1
+        if doc_text:
+            rows.append(
+                [
+                    str(seq),
+                    f"{pkg.item_name}随机资料/授权文件",
+                    "与主机配套",
+                    "1批",
+                    f"{total_boxes}/共{total_boxes}箱",
+                    doc_text,
+                    "随货移交，用于到货验收、安装调试和培训留档",
+                ]
+            )
+            seq += 1
+    return rows or [
+        ["1", "设备主机", "按投标品牌/型号填写", "1台", "1/共2箱", "说明书、合格证、装箱单", "到货时核对品牌、型号和外观"],
+        ["2", "配套附件", "与主机配套", "1批", "2/共2箱", "随机附件/资料", "按装箱清单逐项点验"],
+    ]
+
+
+def _build_zb_acceptance_doc_rows(tender_raw: str) -> list[list[str]]:
+    """生成验收资料清单行。"""
+    service_details = _collect_zb_service_requirement_points(tender_raw)
+    rows: list[list[str]] = [
+        ["1", "产品合格证/出厂检验资料", "是，随货提供", "用于到货验收和合规留档"],
+        ["2", "装箱清单/配货单", "是，随货提供", "用于到货开箱、数量核对和附件点验"],
+        ["3", "安装调试记录", "是，安装调试完成后形成", "记录安装、调试、试运行和异常处理情况"],
+        ["4", "培训记录", "是，培训完成后形成", "记录培训时间、对象、内容和签到信息"],
+        ["5", "使用说明书/维护手册", "是，随货提供", "用于操作、维护保养和后续复核"],
+        ["6", "售后服务联系方式", "是，交付时提供", "明确报修渠道、联系人和响应方式"],
+        ["7", "验收报告/功能确认记录", "是，验收阶段形成", "结合功能测试结果完成签署"],
+    ]
+
+    acceptance_text = " ".join(service_details.get("acceptance", []))
+    if any(token in acceptance_text for token in ("计量", "检测", "测试报告")):
+        rows.append(["8", "计量检测/测试报告", "按采购要求提供", "属于计量设备或验收要求明确提出时提交"])
+    if any(token in acceptance_text for token in ("注册证", "备案凭证", "技术支持资料", "证明材料")):
+        rows.append(["9", "注册证/备案凭证及技术支持资料", "按验收节点提交", "与投标型号、附件资料保持一致"])
+    return rows
+
+
+def _build_zb_technical_doc_index_rows(
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profile: dict[str, Any] | None = None,
+) -> list[list[str]]:
+    """生成格式9里的技术支持资料与条款对应索引。"""
+    requirement_rows, _ = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+    )
+    atomic_rows = (
+        _extract_zb_atomic_technical_rows(pkg, tender_raw)
+        or _extract_zb_rows_from_pkg_requirements(pkg)
+        or _fallback_atomic_rows_from_requirement_rows(requirement_rows)
+    )
+
+    rows: list[list[str]] = []
+    used_signatures: set[str] = set()
+    for idx, (clause_no, requirement) in enumerate(atomic_rows, start=1):
+        matched_row = _match_requirement_row_for_zb(requirement, requirement_rows, used_signatures)
+        req_key, _ = _normalize_zb_requirement_fields(requirement)
+        evidence_text = _format_zb_evidence_text(req_key, requirement, matched_row)
+        page = None
+        if matched_row:
+            page = matched_row.get("bidder_evidence_page") or matched_row.get("bid_evidence_page")
+        location = f"对应格式8第{idx}行"
+        if page not in (None, "", 0):
+            location = f"{location}；证据页码P{page}"
+        else:
+            location = f"{location}；页码待补"
+        rows.append([str(idx), clause_no, requirement, evidence_text, location])
+    return rows or [["1", "1", "核心技术条款", "产品说明书/彩页/厂家参数表（页码待补）", "对应格式8第1行；页码待补"]]
+
+
+def _build_zb_supporting_material_rows(
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    product_profile: dict[str, Any] | None = None,
+    normalized_result: dict[str, Any] | None = None,
+) -> list[list[str]]:
+    """生成配置清单、随机附件和专用工具清单。"""
+    config_items = _build_zb_config_items(
+        pkg,
+        tender_raw,
+        product=product,
+        product_profile=product_profile,
+        normalized_result=normalized_result,
+    )
+    rows: list[list[str]] = []
+    for idx, (name, unit, qty, remark) in enumerate(config_items, start=1):
+        rows.append(
+            [
+                str(idx),
+                _classify_config_item(name),
+                name,
+                f"{qty}{unit}",
+                remark or _classify_config_item(name),
+            ]
+        )
+    return rows or [[
+        "1",
+        "核心模块",
+        f"{pkg.item_name}主机",
+        f"{_extract_package_quantity(pkg, tender_raw)}台",
+        "结合投标型号补充主机、附件、随机文件和专用工具明细",
+    ]]
+
+
+def _build_zb_service_material_rows(tender_raw: str) -> list[list[str]]:
+    """生成安装调试、培训和验收资料清单。"""
+    service_details = _collect_zb_service_requirement_points(tender_raw)
+    install_digest = "；".join(service_details.get("install", [])[:2]) or "覆盖开箱点验、安装、调试、试运行和问题处理。"
+    training_digest = "；".join(
+        [item for item in service_details.get("install", []) if "培训" in item][:2]
+    ) or "覆盖设备操作、日常维护、注意事项和培训签到记录。"
+    acceptance_digest = "；".join(service_details.get("acceptance", [])[:2]) or "包括到货验收、安装验收、功能验收及资料移交。"
+    rows = [
+        ["1", "安装调试方案", "设备到货后实施", install_digest],
+        ["2", "培训方案", "安装调试完成后实施", training_digest],
+        ["3", "验收资料清单", "到货验收/安装验收阶段", acceptance_digest],
+        ["4", "随货技术资料移交清单", "随货提供", "包括说明书、合格证、装箱单、维护手册等随机资料。"],
+    ]
+    if any(token in acceptance_digest for token in ("计量", "检测", "测试报告")):
+        rows.append(["5", "计量检测/测试报告", "按采购要求提供", "涉及计量或测试要求时与验收资料同步提交。"])
+    return rows
+
+
+def _build_zb_authorization_rows(
+    pkg,
+    tender_raw: str,
+    *,
+    product=None,
+    product_profile: dict[str, Any] | None = None,
+) -> list[list[str]]:
+    """生成合法来源及授权证明清单。"""
+    _ = (product, product_profile)
+    requirement_text = " ".join(
+        [tender_raw, " ".join(str(v) for v in (getattr(pkg, "technical_requirements", None) or {}).values())]
+    )
+    rows = [
+        ["1", "产品合法来源证明", "制造商授权书/合法来源说明", "代理投标或招标文件要求授权时提供。"],
+        ["2", "医疗器械注册证/备案凭证", "注册证/备案凭证复印件", "名称、型号、适用范围应与拟投产品一致。"],
+        ["3", "软件/硬件授权证明", "软件授权文件/许可证明", "涉及应用软件、工作站软件、接口模块时提供。"],
+        ["4", "其他合法性文件", "按第五章要求补充的节能环保/检测/能力验证资料", "结合项目评审项和采购需求补充。"],
+    ]
+    if "逐级授权" in requirement_text:
+        rows.append(["5", "进口产品逐级授权", "逐级授权文件", "招标文件明确要求逐级授权时逐级提供。"])
+    return rows
+
 def _single_package_id(packages: list) -> str:
     """在单包场景下返回唯一包号。"""
     if len(packages or []) == 1:
@@ -771,10 +1223,20 @@ def _extract_zb_rows_from_pkg_requirements(pkg) -> list[tuple[str, str]]:
     return rows
 
 
-def _build_zb_service_section(tender, tender_raw: str = "", package_index: int = 1) -> str:
+def _build_zb_service_section(
+    tender,
+    tender_raw: str = "",
+    package_index: int = 1,
+    *,
+    packages: list | None = None,
+    products: dict[str, Any] | None = None,
+    product_profiles: dict[str, Any] | None = None,
+    normalized_result: dict[str, Any] | None = None,
+) -> str:
     """构建ZB 格式服务章节。"""
+    _ = package_index
     project_name = getattr(tender, "project_name", "") or "本项目"
-    packages = list(getattr(tender, "packages", None) or [])
+    packages = packages or list(getattr(tender, "packages", None) or [])
     delivery_requirement = _build_delivery_commitment_text(packages, tender_raw)
     delivery_places = "；".join(
         _dedupe_keep_order([_extract_delivery_place(pkg, tender_raw) for pkg in packages])
@@ -829,11 +1291,13 @@ def _build_zb_service_section(tender, tender_raw: str = "", package_index: int =
         "四、配货单样本\n\n"
         + _md_table(
             ["序号", "货物名称", "品牌/型号", "数量", "包装箱号", "随机附件/资料", "备注"],
-            [
-                ["1", "流式细胞仪主机", "【待填写】", "1台", "【待填写】", "主机资料、合格证", "【待填写】"],
-                ["2", "配套附件", "【待填写】", "【待填写】", "【待填写】", "装箱清单", "【待填写】"],
-                ["3", "随机软件/授权资料", "【待填写】", "【待填写】", "【待填写】", "授权文件", "【待填写】"],
-            ],
+            _build_zb_packaging_sample_rows(
+                packages,
+                tender_raw,
+                products=products,
+                product_profiles=product_profiles,
+                normalized_result=normalized_result,
+            ),
         )
     )
 
@@ -862,15 +1326,7 @@ def _build_zb_service_section(tender, tender_raw: str = "", package_index: int =
         "七、验收资料清单\n\n"
         + _md_table(
             ["序号", "资料名称", "是否提供", "备注"],
-            [
-                ["1", "产品合格证/出厂检验资料", "【待填写】", "【待填写】"],
-                ["2", "装箱清单/配货单", "【待填写】", "【待填写】"],
-                ["3", "安装调试记录", "【待填写】", "【待填写】"],
-                ["4", "培训记录", "【待填写】", "【待填写】"],
-                ["5", "使用说明书/维护手册", "【待填写】", "【待填写】"],
-                ["6", "售后服务联系方式", "【待填写】", "【待填写】"],
-                ["7", "验收所需其他资料", "【待填写】", "【待填写】"],
-            ],
+            _build_zb_acceptance_doc_rows(tender_raw),
         )
     )
 
@@ -914,7 +1370,17 @@ def _normalize_procurement_terms_for_zb(text: str) -> str:
     return text
 
 
-def _build_zb_technical_response_table(tender, pkg, tender_raw: str, raw_block: str = "") -> str:
+def _build_zb_technical_response_table(
+    tender,
+    pkg,
+    tender_raw: str,
+    raw_block: str = "",
+    *,
+    product=None,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profile: dict[str, Any] | None = None,
+) -> str:
     """构建ZB 格式技术响应表。"""
     headers = _extract_table_headers_from_raw_block(raw_block) or [
         "招标文件条目号",
@@ -931,25 +1397,57 @@ def _build_zb_technical_response_table(tender, pkg, tender_raw: str, raw_block: 
         or "【待填写：招标编号】"
     )
 
-    requirement_rows = _extract_zb_atomic_technical_rows(pkg, tender_raw) or _extract_zb_rows_from_pkg_requirements(pkg)
-    if requirement_rows:
-        rows = [
-            [
-                clause_no,
-                requirement,
-                "【待填写：结合投标产品逐条响应，不得直接复制招标要求】",
-                "【待填写：无偏离/正偏离/负偏离】",
-                "【待填写：技术支持资料名称 + 所在页码/位置】",
-            ]
-            for clause_no, requirement in requirement_rows
-        ]
-    else:
+    structured_rows, _ = _build_requirement_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+    )
+    atomic_rows = (
+        _extract_zb_atomic_technical_rows(pkg, tender_raw)
+        or _extract_zb_rows_from_pkg_requirements(pkg)
+        or _fallback_atomic_rows_from_requirement_rows(structured_rows)
+    )
+
+    rows: list[list[str]] = []
+    used_signatures: set[str] = set()
+    model_identity = _product_identity_text(product, product_profile)
+
+    for clause_no, requirement in atomic_rows:
+        req_key, req_val = _normalize_zb_requirement_fields(requirement)
+        matched_row = _match_requirement_row_for_zb(requirement, structured_rows, used_signatures)
+
+        raw_response = matched_row.get("response") if matched_row else ""
+        has_real_response = bool(matched_row) and _has_real_bidder_response(raw_response)
+        if has_real_response:
+            response_text = _display_bidder_response(raw_response)
+        else:
+            response_text = _build_zb_pending_response_text(req_key, req_val, model_identity)
+
+        if has_real_response:
+            deviation_text = _normalize_deviation_status(
+                (matched_row or {}).get("deviation_status"),
+                has_real=True,
+            )
+            if "【待填写" in deviation_text:
+                deviation_text = "拟无偏离，待证据复核"
+        elif matched_row and _clean_text(raw_response):
+            deviation_text = "响应值已提取，待证据复核"
+        else:
+            deviation_text = "待结合投标型号确认"
+
+        evidence_text = _format_zb_evidence_text(req_key, requirement, matched_row)
+        rows.append([clause_no, requirement, response_text, deviation_text, evidence_text])
+
+    if not rows:
         rows = [[
-            "【待填写】",
-            "【待按招标文件第五章逐条填写，不得照抄招标要求原文】",
-            "【待填写：投标产品实际响应内容与具体参数数值】",
-            "【待填写：无偏离/正偏离/负偏离】",
-            "【待填写：证明材料名称 + 所在页码/位置】",
+            "1",
+            "请按招标文件第五章逐条补录采购需求条款",
+            "拟投产品将对照每条技术要求逐项响应，并补充实际参数值、功能实现方式和配置情况。",
+            "待结合投标型号确认",
+            "产品说明书/彩页/厂家参数表（页码待补）",
         ]]
 
     return "\n".join([
@@ -1295,12 +1793,12 @@ def _build_zb_business_deviation_table(tender, packages, tender_raw: str) -> str
     ct = getattr(tender, "commercial_terms", None)
 
     rows = [
-        ["1", "交货期", "；".join(f"包{p.package_id}：{_extract_delivery_time(p, tender_raw)}" for p in packages), "【待填写】", "【待填写：无偏离/正偏离/负偏离】"],
-        ["2", "交货地点", "；".join(f"包{p.package_id}：{_extract_delivery_place(p, tender_raw)}" for p in packages), "【待填写】", "【待填写】"],
-        ["3", "投标有效期", getattr(ct, "validity_period", "") or "【待填写】", "【待填写】", "【待填写】"],
-        ["4", "付款方式", getattr(ct, "payment_method", "") or "【待填写】", "【待填写】", "【待填写】"],
-        ["5", "质保期", getattr(ct, "warranty_period", "") or "【待填写】", "【待填写】", "【待填写】"],
-        ["6", "履约保证金", getattr(ct, "performance_bond", "") or "【待填写】", "【待填写】", "【待填写】"],
+        ["1", "交货期", "；".join(f"包{p.package_id}：{_extract_delivery_time(p, tender_raw)}" for p in packages), "按招标文件约定执行", "无偏离"],
+        ["2", "交货地点", "；".join(f"包{p.package_id}：{_extract_delivery_place(p, tender_raw)}" for p in packages), "按招标文件约定执行", "无偏离"],
+        ["3", "投标有效期", getattr(ct, "validity_period", "") or "按招标文件要求执行", "按招标文件要求执行", "无偏离"],
+        ["4", "付款方式", getattr(ct, "payment_method", "") or "按招标文件及合同约定执行", "按招标文件及合同约定执行", "无偏离"],
+        ["5", "质保期", getattr(ct, "warranty_period", "") or "按招标文件要求执行", "按招标文件要求执行", "无偏离"],
+        ["6", "履约保证金", getattr(ct, "performance_bond", "") or "按招标文件要求执行", "按招标文件要求执行", "无偏离"],
     ]
 
     return _md_table(headers, rows)
@@ -1461,26 +1959,101 @@ def _build_zb_manufacturer_authorization(tender, packages) -> str:
 """.strip()
 
 
-def _build_zb_other_technical_docs_section(tender, packages, tender_raw: str) -> str:
+def _build_zb_other_technical_docs_section(
+    tender,
+    packages,
+    tender_raw: str,
+    *,
+    products: dict[str, Any] | None = None,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, Any] | None = None,
+) -> str:
     """构建ZB 格式other技术docs章节。"""
     pkg = packages[0] if packages else None
     goods = getattr(pkg, "item_name", "【待填写：货物名称】") if pkg else "【待填写：货物名称】"
+    if pkg is None:
+        return "\n".join([
+            "格式 9.第五章规定的证明文件和其他技术方案",
+            f"项目名称：{tender.project_name or '【待填写：项目名称】'}",
+            f"项目编号：{tender.project_number or '【待填写】'}",
+            "对应货物：请根据实际投标包件补充",
+            "",
+            "请补充产品彩页、配置清单、安装调试方案、培训方案、验收资料清单及合法来源证明。",
+        ])
+
+    product = _product_for_package(pkg.package_id, products)
+    product_profile = _profile_payload_for_package(pkg.package_id, product_profiles)
+    technical_doc_rows = _build_zb_technical_doc_index_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        normalized_result=normalized_result,
+        evidence_result=evidence_result,
+        product_profile=product_profile,
+    )
+    supporting_rows = _build_zb_supporting_material_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        product_profile=product_profile,
+        normalized_result=normalized_result,
+    )
+    service_rows = _build_zb_service_material_rows(tender_raw)
+    authorization_rows = _build_zb_authorization_rows(
+        pkg,
+        tender_raw,
+        product=product,
+        product_profile=product_profile,
+    )
+
     return "\n".join([
         "格式 9.第五章规定的证明文件和其他技术方案",
         f"项目名称：{tender.project_name or '【待填写：项目名称】'}",
         f"项目编号：{tender.project_number or '【待填写】'}",
         f"对应货物：{goods}",
         "",
-        "请按招标文件第五章逐项补充以下内容：",
-        "1. 产品彩页/技术白皮书/官网参数页；",
-        "2. 技术支持资料（或证明材料）与技术响应表逐条对应页码；",
-        "3. 配置清单、随机附件、备件及专用工具清单；",
-        "4. 安装调试方案、培训方案、验收资料清单；",
-        "5. 软件/硬件合法来源及授权证明；",
-        "6. 招标文件要求的其他技术性文件。",
+        "技术支持资料通常包括产品彩页/技术白皮书/官网参数页，并应与格式8逐条对应。",
+        "",
+        "一、技术支持资料与技术响应对应索引",
+        _md_table(
+            ["序号", "对应条款", "采购需求摘要", "建议提供资料/已绑定证据", "页码/位置说明"],
+            technical_doc_rows,
+        ),
+        "",
+        "二、配置清单、随机附件、备件及专用工具清单",
+        _md_table(
+            ["序号", "类别", "名称", "数量", "说明"],
+            supporting_rows,
+        ),
+        "",
+        "三、安装调试、培训与验收资料清单",
+        _md_table(
+            ["序号", "资料/方案", "形成时点", "关键内容"],
+            service_rows,
+        ),
+        "",
+        "四、软件/硬件合法来源及授权证明",
+        _md_table(
+            ["序号", "证明事项", "建议文件", "适用说明"],
+            authorization_rows,
+        ),
+        "",
+        "说明：技术支持资料应与格式8逐条对应；最终成稿时请将实际证据页码、型号对应关系和授权文件编号补齐。",
     ])
 
-def _build_zb_section_content(title: str, raw_block: str, tender, tender_raw: str, packages: list) -> str:
+def _build_zb_section_content(
+    title: str,
+    raw_block: str,
+    tender,
+    tender_raw: str,
+    packages: list,
+    *,
+    products: dict[str, Any] | None = None,
+    normalized_result: dict[str, Any] | None = None,
+    evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, Any] | None = None,
+) -> str:
     """构建ZB 格式章节内容。"""
     raw = (raw_block or "").strip()
 
@@ -1497,20 +2070,44 @@ def _build_zb_section_content(title: str, raw_block: str, tender, tender_raw: st
         return _build_zb_invalid_bid_checklist(tender, tender_raw)
 
     if _title_has_any(title, ("第五章", "其他技术响应文件", "其他技术方案", "技术支持资料")):
-        return _build_zb_other_technical_docs_section(tender, packages, tender_raw)
+        return _build_zb_other_technical_docs_section(
+            tender,
+            packages,
+            tender_raw,
+            products=products,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
+        )
 
     if (
         _title_has_any(title, ("供货", "安装", "调试", "质量保障", "服务方案", "技术方案", "保障承诺"))
         or (_title_has_any(title, ("售后服务",)) and not _title_has_any(title, ("售后服务承诺书",)))
     ):
-        content = _build_zb_service_section(tender, tender_raw)
+        content = _build_zb_service_section(
+            tender,
+            tender_raw,
+            packages=packages,
+            products=products,
+            product_profiles=product_profiles,
+            normalized_result=normalized_result,
+        )
         return _normalize_procurement_terms_for_zb(content)
 
     if _title_has_any(title, ("技术要求响应", "技术响应", "技术偏离", "采购需求响应")):
         pkg = packages[0] if packages else None
         if pkg is None:
             return "【待补：技术要求响应及偏离表】"
-        return _build_zb_technical_response_table(tender, pkg, tender_raw, raw_block=raw)
+        return _build_zb_technical_response_table(
+            tender,
+            pkg,
+            tender_raw,
+            raw_block=raw,
+            product=_product_for_package(pkg.package_id, products),
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profile=_profile_payload_for_package(pkg.package_id, product_profiles),
+        )
 
     # 第六章原格式优先：只有标题本身像“真实模板标题”，且未命中特殊生成章节时，才直接按原模板落。
     if raw and _looks_like_safe_zb_template_title(title):
@@ -1644,6 +2241,7 @@ def _standardize_invalid_reason(text: str) -> str | None:
         (r"恶意地提供错误事实", "恶意提供货物合法来源或授权错误事实的"),
         (r"影响或试图影响采购人.*?评标.*?授予合同", "投标人在开标后到中标结果确定期间，影响或试图影响采购人、采购代理机构、评标委员会工作的"),
         (r"投标人在本项目的竞争中有腐败或欺诈行为", "投标人在本项目的竞争中有腐败或欺诈行为的"),
+        (r"腐败或欺诈行为.*?被拒绝", "投标人在本项目的竞争中有腐败或欺诈行为的"),
         (r"不符合法律、法规和招标文件.*?其他无效投标情形", "不符合法律、法规和招标文件规定的其他无效投标情形的"),
     ]
     for pattern, replacement in replacements:
@@ -1719,12 +2317,43 @@ def _extract_zb_invalid_items(text: str) -> list[str]:
     return items
 
 
+def _extract_zb_explicit_invalid_items(text: str) -> list[str]:
+    """优先提取 26.5/“其他无效投标情况”中明示列出的无效条款。"""
+    source = text or ""
+    items: list[str] = []
+
+    block_patterns = [
+        r"26\.5[^\n。；]{0,120}(?:无效投标情况|无效投标处理|其他无效投标情况)[：:]?(?P<body>[\s\S]{0,1800}?)(?=(?:\|\s*\d+\s*\||26\.6\b|27\.\d\b|投标人须知|第六章|$))",
+        r"本项目规定的其他无效投标情况[：:]?(?P<body>[\s\S]{0,1800}?)(?=(?:\|\s*\d+\s*\||26\.6\b|27\.\d\b|投标人须知|第六章|$))",
+    ]
+    enum_pat = re.compile(r"[（(]\s*\d+\s*[）)]\s*(.+?)(?=(?:[（(]\s*\d+\s*[）)])|$)", re.S)
+
+    for pattern in block_patterns:
+        for match in re.finditer(pattern, source):
+            block = match.group("body")
+            for enum_match in enum_pat.finditer(block):
+                _append_invalid_item(items, _standardize_invalid_reason(enum_match.group(1)))
+
+    return items
+
+
 def _build_zb_invalid_bid_checklist(tender, tender_raw: str = "") -> str:
     """构建ZB 格式无效投标checklist。"""
     text = tender_raw or getattr(tender, "source_text", "") or ""
+    invalid_tpl = getattr(tender, "invalid_bid_table", None)
+    template_block = getattr(invalid_tpl, "raw_block", "") or ""
+    explicit_items = _extract_zb_explicit_invalid_items(template_block) or _extract_zb_explicit_invalid_items(text)
+    if len(explicit_items) >= 5:
+        items = explicit_items
+    elif explicit_items:
+        items = list(explicit_items)
+        for item in _extract_zb_invalid_items(text):
+            _append_invalid_item(items, item)
+    else:
+        items = _extract_zb_invalid_items(text)
     rows = [
         [str(i), item, "【待填写：符合/不符合】", "【待填写】"]
-        for i, item in enumerate(_extract_zb_invalid_items(text), start=1)
+        for i, item in enumerate(items, start=1)
     ]
     return "无效投标情形自检表\n" + _md_table(
         ["序号", "无效投标情形", "自检结果", "备注"],
@@ -1835,7 +2464,6 @@ def _build_zb_sections(
     product_profiles: dict | None = None,
 ) -> list:
     """构建ZB 格式章节。"""
-    _ = (products, normalized_result, evidence_result, product_profiles)
     packages = active_packages or tender.packages
     entries = _get_zb_template_entries(tender)
 
@@ -1885,7 +2513,17 @@ def _build_zb_sections(
         sections.append(
             BidDocumentSection(
                 section_title=title,
-                content=_build_zb_section_content(title, "", tender, tender_raw, packages),
+                content=_build_zb_section_content(
+                    title,
+                    "",
+                    tender,
+                    tender_raw,
+                    packages,
+                    products=products,
+                    normalized_result=normalized_result,
+                    evidence_result=evidence_result,
+                    product_profiles=product_profiles,
+                ),
             )
         )
 
@@ -1893,7 +2531,17 @@ def _build_zb_sections(
         sections.append(
             BidDocumentSection(
                 section_title=title,
-                content=_build_zb_section_content(title, raw_block, tender, tender_raw, packages),
+                content=_build_zb_section_content(
+                    title,
+                    raw_block,
+                    tender,
+                    tender_raw,
+                    packages,
+                    products=products,
+                    normalized_result=normalized_result,
+                    evidence_result=evidence_result,
+                    product_profiles=product_profiles,
+                ),
             )
         )
 
@@ -1907,7 +2555,17 @@ def _build_zb_sections(
         sections.append(
             BidDocumentSection(
                 section_title=title,
-                content=_build_zb_section_content(title, "", tender, tender_raw, packages),
+                content=_build_zb_section_content(
+                    title,
+                    "",
+                    tender,
+                    tender_raw,
+                    packages,
+                    products=products,
+                    normalized_result=normalized_result,
+                    evidence_result=evidence_result,
+                    product_profiles=product_profiles,
+                ),
             )
         )
 

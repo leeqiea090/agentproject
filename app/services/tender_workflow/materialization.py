@@ -1139,8 +1139,6 @@ def _materialize_section_content(
                             cells[model_idx] = p_model
                             changed = True
 
-                    response_value = _resolve_materialized_response_value(product, match, parameter_name)
-                    evaluation = _evaluate_requirement_response(requirement_value, response_value)
                     is_proven = bool(match and match.get("proven"))
                     has_fact = bool(response_value)
 
