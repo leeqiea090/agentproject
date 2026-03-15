@@ -717,7 +717,7 @@ def test_materialize_sections_writes_bidder_evidence_into_mapping_rows() -> None
     content = materialized[0].content
     assert "投标方证据：激光器：3个独立激光器" in content
     assert "招标原文 / 产品参数库 / 包1 产品参数" in content
-    assert "| 1 | 激光器：≥3 | 3个独立激光器 | 无偏离 |" in content
+    assert "| 1 | 激光器：≥3 | 3个独立激光器 | 【待填写：无偏离/正偏离/负偏离】 |" in content
     assert report["changed_sections"] == ["第三章 商务及技术部分"]
 
 
@@ -776,7 +776,7 @@ def test_materialize_sections_can_fill_truth_from_evidence_binding() -> None:
     )
 
     content = materialized[0].content
-    assert "| 1 | 原产地：美国 | 美国 | 无偏离 |" in content
+    assert "| 1 | 原产地：美国 | 美国 | 【待填写：无偏离/正偏离/负偏离】 |" in content
     assert "投标方证据：原产地：美国" in content
 
 
@@ -932,9 +932,9 @@ def test_materialize_sections_rebuilds_coarse_deviation_table_with_evidence_page
 
     content = materialized[0].content
     assert "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 说明/验收备注 |" in content
-    assert "| 1 | 激光器 | ≥3 | FC5000 | 3个独立激光器 | 无偏离 | 产品彩页.pdf | 5 |" in content
-    assert "| 2 | 荧光通道 | ≥11 | 同上 | 12个检测通道 | 无偏离 | 厂家参数页.pdf | 6 |" in content
-    assert "| 3 | 分析速度 | 不少于10000个事件/秒 | 同上 | 12000个事件/秒 | 无偏离 | 产品说明书.pdf | 8 |" in content
+    assert "| 1 | 激光器 | ≥3 | FC5000 | 3个独立激光器 | 【待填写：无偏离/正偏离/负偏离】 | 产品彩页.pdf | 5 |" in content
+    assert "| 2 | 荧光通道 | ≥11 | 同上 | 12个检测通道 | 【待填写：无偏离/正偏离/负偏离】 | 厂家参数页.pdf | 6 |" in content
+    assert "| 3 | 分析速度 | 不少于10000个事件/秒 | 同上 | 12000个事件/秒 | 【待填写：无偏离/正偏离/负偏离】 | 产品说明书.pdf | 8 |" in content
     assert "配置功能描述" in content
     assert "主机" in content
     assert "工作站" in content
@@ -1143,3 +1143,36 @@ def test_materialize_sections_route_five_column_parameter_table_to_deviation_log
     assert "| 1 | 激光器 | ≥3 | 3个独立激光器 | 【待填写：无偏离/正偏离/负偏离】 |" in content
     assert "待核实（未匹配到已证实产品事实）" not in content
     assert "| 1 | 激光器 | ≥3 | 3个独立激光器 | 待核实 |" not in content
+
+
+def test_materialize_sections_preserves_rich_pending_guidance_in_deviation_rows() -> None:
+    """已有逐条引导语时，不应在物化阶段回写成统一空壳占位。"""
+    tender = _sample_tender()
+    sections = [
+        BidDocumentSection(
+            section_title="五、技术偏离及详细配置明细表",
+            content=(
+                "| 条款编号 | 招标要求 | 投标型号 | 实际响应值 | 偏离情况 | 证据材料 | 页码 | 说明/验收备注 |\n"
+                "|---:|---|---|---|---|---|---:|---|\n"
+                "| 1 | X射线球管最大电压≥150kV | 待定型号 | "
+                "【待填写：品牌/型号/规格/配置及逐条响应】；请填写与“≥150kV”逐项对应的实际响应值，并标注说明书/彩页页码。"
+                " | 【待填写：无偏离/正偏离/负偏离】 | 说明书/彩页/厂家参数表（页码待补） | 待补页码 | 请补充实际响应值及对应页码后复核 |\n"
+            ),
+            attachments=[],
+        )
+    ]
+
+    materialized, _ = _materialize_sections(
+        sections=sections,
+        tender=tender,
+        company=None,
+        products={},
+        evidence_result=None,
+    )
+
+    content = materialized[0].content
+    assert "【待填写：品牌/型号/规格/配置及逐条响应】；请填写与“≥150kV”逐项对应的实际响应值，并标注说明书/彩页页码。" in content
+    assert "【待填写：无偏离/正偏离/负偏离】" in content
+    assert "说明书/彩页/厂家参数表（页码待补）" in content
+    assert "请补充实际响应值及对应页码后复核" in content
+    assert "【待填写：实际响应值】" not in content

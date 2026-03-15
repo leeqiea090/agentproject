@@ -84,6 +84,80 @@ def _fallback_single_product(products: dict[str, ProductSpecification]) -> Produ
     return None
 
 
+def _compact_cell_text(value: str) -> str:
+    """压缩单元格文本，便于识别通用空壳占位。"""
+    return re.sub(r"\s+", "", _safe_text(value))
+
+
+_DEVIATION_PLACEHOLDER = "【待填写：无偏离/正偏离/负偏离】"
+
+
+_GENERIC_TABLE_CELL_SHELLS = frozenset(
+    _compact_cell_text(item)
+    for item in (
+        "",
+        "[待填写]",
+        "【待填写】",
+        "待核实",
+        "待补证",
+        "待补页码",
+        "待补实际响应值与证据",
+        "待核实（未匹配到已证实产品事实）",
+        "待核实（需填入投标产品实参）",
+        "【待填写：实际响应值】",
+        _DEVIATION_PLACEHOLDER,
+        "【待补证：说明书/彩页/厂家参数表】",
+        "招标原文片段",
+    )
+)
+
+
+def _is_shell_table_cell(value: str) -> bool:
+    """判断表格单元格是否仍是通用空壳占位。"""
+    compact = _compact_cell_text(value)
+    if compact in _GENERIC_TABLE_CELL_SHELLS:
+        return True
+
+    text = _safe_text(value)
+    if re.fullmatch(r"[【\[][^】\]]*待(?:填写|核实|补证|补充|确认)[^】\]]*[】\]]", text):
+        return True
+    return False
+
+
+def _prefer_existing_table_cell(existing: str, fallback: str) -> str:
+    """优先保留已有的逐条引导语，仅在空壳单元格时才回退。"""
+    existing_text = _safe_text(existing)
+    if existing_text and not _is_shell_table_cell(existing_text):
+        return existing_text
+    return _safe_text(fallback, existing_text)
+
+
+def _is_shell_deviation_cell(value: str) -> bool:
+    """判断偏离列是否仍为待人工确认的占位文本。"""
+    text = _safe_text(value)
+    compact = _compact_cell_text(text)
+    if compact in _GENERIC_TABLE_CELL_SHELLS:
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "无偏离",
+            "拟无偏离",
+            "待证据复核",
+            "待结合投标型号确认",
+            "待核实",
+        )
+    )
+
+
+def _prefer_existing_deviation_cell(existing: str, fallback: str) -> str:
+    """偏离列优先保留人工填写内容，不保留自动生成的“无偏离”类文案。"""
+    existing_text = _safe_text(existing)
+    if existing_text and not _is_shell_deviation_cell(existing_text):
+        return existing_text
+    return _safe_text(fallback, existing_text)
+
+
 
 def _resolve_materialized_response_value(
     product: ProductSpecification | None,
@@ -205,17 +279,15 @@ def _resolve_materialized_deviation_status(
 ) -> str:
     """解析并返回materializeddeviation状态。"""
     evaluation_status = _safe_text(evaluation.get("deviation_status"), "待核实")
-    if evaluation_status == "有偏离":
-        return "有偏离"
-
     if match:
         match_status = _safe_text(match.get("deviation_status"))
-        if match_status == "有偏离":
-            return "有偏离"
-        if match_status == "无偏离" and bool(match.get("proven")):
-            return "无偏离"
+        if any(marker in match_status for marker in ("有偏离", "负偏离", "正偏离")):
+            return match_status
 
-    return "待核实"
+    if any(marker in evaluation_status for marker in ("有偏离", "负偏离", "正偏离")):
+        return evaluation_status
+
+    return _DEVIATION_PLACEHOLDER
 
 
 def _company_credit_date(company: CompanyProfile | None) -> str:
@@ -490,8 +562,8 @@ def _fallback_requirement_rows(
                 "bid_evidence_file": "",
                 "bid_evidence_page": None,
                 "comparison_reason": "",
-                "deviation_status": "无偏离" if product and _lookup_product_spec_value(product, _safe_text(key)) else "待核实",
-                "proven": bool(product and _lookup_product_spec_value(product, _safe_text(key))),
+                "deviation_status": "待核实",
+                "proven": False,
             }
         )
     return rows
@@ -587,7 +659,7 @@ def _build_materialized_technical_section(
             deviation = (
                 _resolve_materialized_deviation_status(match, evaluation)
                 if response_value and is_proven
-                else "【待填写：无偏离/正偏离/负偏离】"
+                else _DEVIATION_PLACEHOLDER
             )
             evidence_label = _resolve_match_evidence_label(match)
             evidence_page = _resolve_match_evidence_page(product, match, parameter_name)
@@ -1114,6 +1186,7 @@ def _materialize_section_content(
                         changed = True
                 elif current_table_mode == "deviation" and len(cells) >= 5:
                     # Support both legacy 5-column and new 8-column deviation tables
+                    original_cells = list(cells)
                     parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
                     requirement_idx = _find_table_column(current_table_header, ("采购文件技术要求", "采购文件要求", "招标要求", "招标技术参数要求"))
                     response_idx = _find_table_column(current_table_header, ("响应文件响应情况", "投标产品响应参数", "响应情况", "实际响应值"))
@@ -1137,7 +1210,6 @@ def _materialize_section_content(
                         p_model = _safe_text(product.model) or _safe_text(product.product_name)
                         if p_model and (not cells[model_idx].strip() or cells[model_idx].strip() == "[待填写]"):
                             cells[model_idx] = p_model
-                            changed = True
 
                     is_proven = bool(match and match.get("proven"))
                     has_fact = bool(response_value)
@@ -1147,14 +1219,20 @@ def _materialize_section_content(
                         if has_fact:
                             cells[response_idx] = response_value
                         else:
-                            cells[response_idx] = "【待填写：实际响应值】"
+                            cells[response_idx] = _prefer_existing_table_cell(
+                                cells[response_idx],
+                                "【待填写：实际响应值】",
+                            )
 
                     # 偏离列
                     if 0 <= deviation_idx < len(cells):
+                        resolved_deviation = _DEVIATION_PLACEHOLDER
                         if has_fact and is_proven:
-                            cells[deviation_idx] = _resolve_materialized_deviation_status(match, evaluation)
-                        else:
-                            cells[deviation_idx] = "【待填写：无偏离/正偏离/负偏离】"
+                            resolved_deviation = _resolve_materialized_deviation_status(match, evaluation)
+                        cells[deviation_idx] = _prefer_existing_deviation_cell(
+                            cells[deviation_idx],
+                            resolved_deviation,
+                        )
 
                     # 证据列
                     if 0 <= evidence_idx < len(cells):
@@ -1166,19 +1244,32 @@ def _materialize_section_content(
                                 fallback_response_value=response_value,
                             )
                         else:
-                            cells[evidence_idx] = "【待补证：说明书/彩页/厂家参数表】"
+                            cells[evidence_idx] = _prefer_existing_table_cell(
+                                cells[evidence_idx],
+                                "【待补证：说明书/彩页/厂家参数表】",
+                            )
 
                     # 备注列
                     if 0 <= remark_idx < len(cells):
                         if is_proven and has_fact:
-                            cells[remark_idx] = "已完成参数与投标证据闭环"
+                            cells[remark_idx] = _prefer_existing_table_cell(
+                                cells[remark_idx],
+                                "已完成参数与投标证据闭环",
+                            )
                         elif has_fact:
-                            cells[remark_idx] = "已写入实参，待补投标方证据页码"
+                            cells[remark_idx] = _prefer_existing_table_cell(
+                                cells[remark_idx],
+                                "已写入实参，待补投标方证据页码",
+                            )
                         else:
-                            cells[remark_idx] = "待补实际响应值与证据"
+                            cells[remark_idx] = _prefer_existing_table_cell(
+                                cells[remark_idx],
+                                "待补实际响应值与证据",
+                            )
 
-                    line = "| " + " | ".join(cells) + " |"
-                    changed = True
+                    if cells != original_cells:
+                        line = "| " + " | ".join(cells) + " |"
+                        changed = True
 
                 # elif current_table_mode == "main_parameter" and len(cells) >= 5:
                 #     current_table_mode = "deviation"

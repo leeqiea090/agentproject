@@ -764,7 +764,7 @@ def _build_zb_packaging_sample_rows(
     for pkg in packages:
         product = _product_for_package(pkg.package_id, products)
         profile = _profile_payload_for_package(pkg.package_id, product_profiles)
-        identity = _product_identity_text(product, profile) or "按投标品牌/型号填写"
+        identity = _product_identity_text(product, profile) or f"{_clean_text(pkg.item_name) or '设备主机'} / 型号待补"
         config_items = _build_zb_config_items(
             pkg,
             tender_raw,
@@ -826,7 +826,7 @@ def _build_zb_packaging_sample_rows(
             )
             seq += 1
     return rows or [
-        ["1", "设备主机", "按投标品牌/型号填写", "1台", "1/共2箱", "说明书、合格证、装箱单", "到货时核对品牌、型号和外观"],
+        ["1", "设备主机", "设备主机 / 型号待补", "1台", "1/共2箱", "说明书、合格证、装箱单", "到货时核对品牌、型号和外观"],
         ["2", "配套附件", "与主机配套", "1批", "2/共2箱", "随机附件/资料", "按装箱清单逐项点验"],
     ]
 
@@ -1426,17 +1426,10 @@ def _build_zb_technical_response_table(
         else:
             response_text = _build_zb_pending_response_text(req_key, req_val, model_identity)
 
-        if has_real_response:
-            deviation_text = _normalize_deviation_status(
-                (matched_row or {}).get("deviation_status"),
-                has_real=True,
-            )
-            if "【待填写" in deviation_text:
-                deviation_text = "拟无偏离，待证据复核"
-        elif matched_row and _clean_text(raw_response):
-            deviation_text = "响应值已提取，待证据复核"
-        else:
-            deviation_text = "待结合投标型号确认"
+        deviation_text = _normalize_deviation_status(
+            (matched_row or {}).get("deviation_status"),
+            has_real=has_real_response,
+        )
 
         evidence_text = _format_zb_evidence_text(req_key, requirement, matched_row)
         rows.append([clause_no, requirement, response_text, deviation_text, evidence_text])
@@ -1446,7 +1439,7 @@ def _build_zb_technical_response_table(
             "1",
             "请按招标文件第五章逐条补录采购需求条款",
             "拟投产品将对照每条技术要求逐项响应，并补充实际参数值、功能实现方式和配置情况。",
-            "待结合投标型号确认",
+            "【待填写：无偏离/正偏离/负偏离】",
             "产品说明书/彩页/厂家参数表（页码待补）",
         ]]
 

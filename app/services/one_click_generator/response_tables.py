@@ -408,6 +408,8 @@ _SOFT_RESPONSE_MARKERS = (
     "交付时提供",
 )
 
+_DEVIATION_PLACEHOLDER = "【待填写：无偏离/正偏离/负偏离】"
+
 def _response_kind(value: Any) -> str:
     """判断响应值属于待补、软响应还是实值类型。"""
     text = _normalized_optional_text(value, "")
@@ -868,12 +870,14 @@ def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
     """归一化deviation状态。"""
     text = _normalized_optional_text(raw_value, "")
     if not has_real:
-        return "【待填写：无偏离/正偏离/负偏离】"
+        return _DEVIATION_PLACEHOLDER
     bad_values = {
         "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充", "待核对",
     }
     if text in bad_values or "待填写" in text:
-        return "【待填写：无偏离/正偏离/负偏离】"
+        return _DEVIATION_PLACEHOLDER
+    if any(marker in text for marker in ("无偏离", "拟无偏离", "待证据复核", "待结合投标型号确认")):
+        return _DEVIATION_PLACEHOLDER
     return text
 
 
