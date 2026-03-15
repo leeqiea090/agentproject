@@ -6,7 +6,9 @@ import app.services.tender_workflow.common as _common
 import app.services.tender_workflow.classification as _classification
 import app.services.tender_workflow.product_facts as _product_facts
 import app.services.tender_workflow.evidence as _evidence
-
+_lookup_product_spec_value = _common._lookup_product_spec_value
+_parameter_name_matches = _common._parameter_name_matches
+_extract_fact_value_from_quote = _common._extract_fact_value_from_quote
 def __reexport_all(module) -> None:
     for name, value in vars(module).items():
         if name.startswith("__"):
@@ -53,34 +55,6 @@ def _fallback_single_product(products: dict[str, ProductSpecification]) -> Produ
     return None
 
 
-def _lookup_product_spec_value(product: ProductSpecification, parameter_name: str) -> str:
-    normalized = _safe_text(parameter_name)
-    if not normalized:
-        return ""
-
-    specs = product.specifications or {}
-    if normalized in specs:
-        return _safe_text(specs[normalized])
-
-    short_name = normalized.split("：", 1)[0].strip()
-    if short_name in specs:
-        return _safe_text(specs[short_name])
-
-    for key, value in specs.items():
-        key_text = _safe_text(key)
-        if not key_text:
-            continue
-        if key_text in normalized or normalized in key_text:
-            return _safe_text(value)
-
-    key_tokens = [token for token in re.split(r"[，,、；;：:（）()\[\]\s/]+", short_name) if len(token) >= 2]
-    for key, value in specs.items():
-        key_text = _safe_text(key)
-        if key_tokens and all(token in key_text or token in normalized for token in key_tokens[:3]):
-            return _safe_text(value)
-
-    return ""
-
 
 def _resolve_materialized_response_value(
     product: ProductSpecification | None,
@@ -112,12 +86,6 @@ def _resolve_materialized_response_value(
     # 4) 技术表里拿不到事实值，就返回空，不再伪造“满足要求”
     return ""
 
-def _parameter_name_tokens(value: str) -> list[str]:
-    return [
-        token
-        for token in re.split(r"[，,、；;：:（）()\[\]\s/]+", _safe_text(value))
-        if len(token) >= 2 and not token.isdigit()
-    ]
 
 
 def _parameter_name_matches(left: str, right: str) -> bool:
@@ -134,28 +102,6 @@ def _parameter_name_matches(left: str, right: str) -> bool:
     return all(token in right_text for token in left_tokens[:3]) or all(token in left_text for token in right_tokens[:3])
 
 
-def _find_technical_match(
-    evidence_result: dict[str, Any] | None,
-    package_id: str | None,
-    parameter_name: str,
-) -> dict[str, Any] | None:
-    if not evidence_result:
-        return None
-
-    normalized_package_id = _safe_text(package_id)
-    normalized_parameter = _safe_text(parameter_name)
-    if not normalized_parameter:
-        return None
-
-    for item in evidence_result.get("technical_matches", []):
-        if not isinstance(item, dict):
-            continue
-        item_package_id = _safe_text(item.get("package_id"))
-        if normalized_package_id and item_package_id and item_package_id != normalized_package_id:
-            continue
-        if _parameter_name_matches(_safe_text(item.get("parameter_name")), normalized_parameter):
-            return item
-    return None
 
 
 def _package_technical_matches(
@@ -918,6 +864,74 @@ def _resolve_row_package_id(
             return pkg.package_id
     return current_package_id
 
+def _parameter_match_score(left: str, right: str) -> float:
+    left_text = _safe_text(left, "")
+    right_text = _safe_text(right, "")
+    if not left_text or not right_text:
+        return 0.0
+
+    if left_text == right_text:
+        return 1.0
+
+    if left_text in right_text or right_text in left_text:
+        return 0.85
+
+    left_tokens = [t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", left_text) if len(t) >= 2]
+    right_tokens = [t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", right_text) if len(t) >= 2]
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    inter = len(set(left_tokens) & set(right_tokens))
+    union = len(set(left_tokens) | set(right_tokens))
+    if union == 0:
+        return 0.0
+    return inter / union
+
+
+def _find_technical_match(
+    evidence_result: dict[str, Any] | None,
+    package_id: str | None,
+    parameter_name: str,
+) -> dict[str, Any] | None:
+    if not evidence_result:
+        return None
+
+    normalized_package_id = _safe_text(package_id, "")
+    normalized_parameter = _safe_text(parameter_name, "")
+    if not normalized_parameter:
+        return None
+
+    best_item = None
+    best_score = 0.0
+
+    for item in evidence_result.get("technical_matches", []):
+        if not isinstance(item, dict):
+            continue
+
+        item_package_id = _safe_text(item.get("package_id"), "")
+        if normalized_package_id and item_package_id and item_package_id != normalized_package_id:
+            continue
+
+        score = _parameter_match_score(
+            _safe_text(item.get("parameter_name"), ""),
+            normalized_parameter,
+        )
+
+        if score <= 0:
+            continue
+
+        if item.get("matched_fact_value"):
+            score += 0.10
+        if item.get("response_value"):
+            score += 0.05
+        if item.get("proven"):
+            score += 0.15
+
+        if score > best_score:
+            best_score = score
+            best_item = item
+
+    return best_item if best_score >= 0.55 else None
 
 def _materialize_section_content(
     section: BidDocumentSection,
@@ -1105,6 +1119,7 @@ def _materialize_section_content(
                     changed = True
 
                 elif current_table_mode == "main_parameter" and len(cells) >= 5:
+                    current_table_mode = "deviation"
                     parameter_idx = _find_table_column(current_table_header, ("参数项", "技术参数项", "招标技术参数要求", "招标要求"))
                     requirement_idx = _find_table_column(current_table_header, ("采购文件技术要求", "采购文件要求", "招标要求", "招标技术参数要求"))
                     response_idx = _find_table_column(current_table_header, ("响应文件响应情况", "投标产品响应参数", "响应情况", "实际响应值"))

@@ -380,6 +380,22 @@ def _profile_config_items(product_profile: dict[str, Any] | None) -> list[tuple[
 
     return _clean_config_items(parsed)
 
+def _is_main_device_item(name: str, pkg: ProcurementPackage, product: Any = None) -> bool:
+    text = _as_text(name).strip()
+    if not text:
+        return False
+
+    candidates = {
+        _as_text(pkg.item_name).strip(),
+        _as_text(getattr(product, "product_name", "")).strip() if product else "",
+        _as_text(getattr(product, "model", "")).strip() if product else "",
+    }
+    candidates = {c for c in candidates if c}
+
+    if any(c and (c in text or text in c) for c in candidates):
+        return True
+
+    return any(k in text for k in ("主机", "整机", "设备主机", "分析仪主机"))
 
 def _build_configuration_table(
     pkg: ProcurementPackage,
@@ -436,13 +452,19 @@ def _build_configuration_table(
 
     # 收集配置项描述信息，用于第二层
     config_descriptions: list[tuple[str, str, str]] = []  # (name, usage, remark)
+    seen_main_device = bool(product_identity_lines)
     for name, unit, qty, remark in config_items:
         # Enhance remark with product spec value if available
         matched_spec = _fuzzy_spec_lookup(product, name) if product else ""
         usage = _infer_config_usage(name)
         is_standard = "是" if _is_standard_config(name) else "选配"
-
-        if _classify_config_item(name) == "核心模块":
+        if _is_main_device_item(name, pkg, product):
+            if seen_main_device:
+                continue
+            seen_main_device = True
+            qty = package_qty
+            unit = "台"
+        elif _classify_config_item(name) == "核心模块":
             qty = package_qty
 
         if matched_spec:

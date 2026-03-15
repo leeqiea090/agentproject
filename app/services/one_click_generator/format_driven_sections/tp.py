@@ -459,6 +459,8 @@ def _structured_tp_service_points(
         combined = f"{key} {requirement}".strip()
         if not _is_tp_service_or_acceptance_clause(combined):
             continue
+        if _looks_like_pure_technical_clause(combined):
+            continue
         response = _clean_text(row.get("response") or "")
         if response and _has_real_bidder_response(response):
             points.append(f"{key}：{requirement}；我方响应：{response}".strip("："))
@@ -1040,6 +1042,25 @@ def _extract_tp_detail_rows(block: str, pkg) -> list[dict]:
         if matched:
             rows.append({"name": matched.group(1).strip(), "qty": matched.group(2).strip(), "remark": ""})
     return rows
+
+def _looks_like_pure_technical_clause(text: str) -> bool:
+    normalized = _clean_text(text)
+    if not normalized:
+        return False
+
+    tech_keywords = (
+        "设备名称", "检测原理", "检测方法", "激光器", "通道", "FITC", "PE", "APC",
+        "CV", "样本位", "试剂位", "分析速度", "检测速度", "光源输出",
+        "温度范围", "电压范围", "功率", "灵敏度", "分辨率", "精密度",
+    )
+
+    if any(k in normalized for k in tech_keywords):
+        return True
+
+    if re.search(r"\d", normalized) and any(k in normalized for k in ("℃", "V", "W", "%", "nm", "μL", "mL", "min", "秒")):
+        return True
+
+    return False
 
 
 def _extract_tp_requirement_rows(block: str, pkg) -> list[dict]:

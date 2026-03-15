@@ -89,6 +89,15 @@ def _fake_pipeline_result(
     )
 
 
+def test_root_serves_static_index() -> None:
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "")
+
+
 def test_workflow_run_api_returns_ten_stages_and_dual_outputs() -> None:
     tender = _sample_tender()
     raw_text = (
