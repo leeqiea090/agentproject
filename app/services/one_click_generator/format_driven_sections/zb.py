@@ -1048,23 +1048,17 @@ def _is_title_only_zb_template(raw_block: str) -> bool:
 
 
 def _zb_template_guidance_text(title: str) -> str:
-    """返回模板guidance文本。"""
+    """返回模板guidance文本，仅保留必要的操作性提示，删除重复说明。"""
     compact = re.sub(r"\s+", "", title or "")
+    # 保留必要的操作性提示（粘贴/放置类）
     if "身份证正反面复印件" in compact:
         return "本页用于粘贴对应身份证正反面复印件，并加盖投标人公章。"
     if "制造商授权书" in compact:
         return "本页用于放置制造商授权文件原件或复印件，并按招标文件要求签章。"
     if "类似项目业绩表" in compact:
         return "请按招标文件要求填写类似项目业绩，并在表后附业绩证明材料。"
-    if "声明函" in compact:
-        return "请按招标文件原格式填写声明内容，并完成签字盖章。"
-    if "承诺书" in compact:
-        return "请按招标文件原格式填写承诺内容，并完成签字盖章。"
-    if any(token in compact for token in ("偏离表", "响应表", "响应及偏离表", "响应对照表")):
-        return "请按招标文件要求逐项填写，不得漏项、缺项或仅复制招标要求原文。"
-    if any(token in compact for token in ("明细表", "报价表", "一览表", "申请表")):
-        return "请按招标文件原格式填写本表内容，并保留原有列项。"
-    return "请按招标文件原格式填写本节内容。"
+    # 删除重复的模板提示语，已有具体表格/章节引导
+    return ""
 
 
 def _is_zb_tech_block_start(line: str) -> bool:
@@ -1937,19 +1931,7 @@ def _build_zb_performance_table(tender) -> str:
 
 def _build_zb_manufacturer_authorization(tender, packages) -> str:
     """构建ZB 格式厂家authorization。"""
-    goods = "、".join(getattr(p, "item_name", "") or "【待填写：货物名称】" for p in (packages or [])) or "【待填写：货物名称】"
-    return f"""
-7.12制造商授权书（格式自拟）
-
-致：{tender.purchaser or '采购人'}
-
-作为【待填写：制造商名称】，现授权【待填写：投标人名称】参加 {tender.project_name or '【待填写：项目名称】'}
-（项目编号：{tender.project_number or '【待填写】'}）投标，就 {goods} 提供投标、供货、安装调试、售后服务等相关支持。
-
-制造商名称（盖章）：【待填写】
-法定代表人或授权代表：【待填写】
-日期：【待填写】
-""".strip()
+    return _build_manufacturer_authorization_template(tender, packages)
 
 
 def _build_zb_other_technical_docs_section(
@@ -2102,15 +2084,27 @@ def _build_zb_section_content(
             product_profile=_profile_payload_for_package(pkg.package_id, product_profiles),
         )
 
+    if _title_has_any(title, ("中小企业声明函",)):
+        return _build_small_enterprise_declaration_template(tender, packages)
+
+    if _title_has_any(title, ("残疾人福利性单位声明函",)):
+        return _build_disabled_unit_declaration_template(tender, packages)
+
+    if _title_has_any(title, ("关联单位的说明", "关联关系说明")):
+        return _build_affiliated_units_statement_template(tender)
+
+    if _title_has_any(title, ("制造商授权书",)):
+        return _build_zb_manufacturer_authorization(tender, packages)
+
+    if _title_has_any(title, ("招标代理服务费承诺", "中标服务费承诺")):
+        return _build_service_fee_commitment_template(tender)
+
     # 第六章原格式优先：只有标题本身像“真实模板标题”，且未命中特殊生成章节时，才直接按原模板落。
     if raw and _looks_like_safe_zb_template_title(title):
         return _zb_render_template_content(title, raw, tender, packages, tender_raw)
 
     if _title_has_any(title, ("投标保证金说明函",)):
         return _build_zb_bid_bond_letter(tender)
-
-    if _title_has_any(title, ("制造商授权书",)):
-        return _build_zb_manufacturer_authorization(tender, packages)
 
     if _title_has_any(title, ("投标人一般情况表",)):
         return _build_zb_general_info_table(tender)

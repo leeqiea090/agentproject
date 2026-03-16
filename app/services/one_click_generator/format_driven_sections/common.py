@@ -9,6 +9,21 @@ __all__ = [
     "BidDocumentSection",
     "TenderDocument",
     "ProcurementPackage",
+    "_build_affiliated_units_statement_template",
+    "_build_hlj_supplier_qualification_commitment_template",
+    "_build_manufacturer_authorization_template",
+    "_build_service_fee_commitment_template",
+    "_build_small_enterprise_declaration_template",
+    "_build_disabled_unit_declaration_template",
+    "_build_service_supply_points",
+    "_build_service_packaging_points",
+    "_build_service_installation_points",
+    "_build_service_training_points",
+    "_build_service_acceptance_points",
+    "_build_service_after_sales_points",
+    "_build_service_quality_points",
+    "_renumber_numbered_points",
+    "_normalize_hlj_supplier_qualification_template",
     "_extract_review_block",
     "_extract_review_rows_from_block",
     "_clean_text",
@@ -46,6 +61,402 @@ __all__ = [
     "_extract_scoring_items",
     "_build_detailed_review_section",
 ]
+
+
+def _project_name_text(tender) -> str:
+    return getattr(tender, "project_name", "") or "【待填写：项目名称】"
+
+
+def _project_number_text(tender) -> str:
+    return getattr(tender, "project_number", "") or getattr(tender, "project_no", "") or "【待填写：项目编号】"
+
+
+def _purchaser_text(tender) -> str:
+    return getattr(tender, "purchaser", "") or "【待填写：采购人】"
+
+
+def _agency_text(tender) -> str:
+    return getattr(tender, "agency", "") or "【待填写：代理机构】"
+
+
+def _goods_names_text(packages: list[ProcurementPackage] | None = None) -> str:
+    names = [getattr(pkg, "item_name", "") for pkg in (packages or []) if getattr(pkg, "item_name", "")]
+    return "、".join(names) if names else "【待填写：货物名称】"
+
+
+def _service_plan_text(value: str, fallback: str) -> str:
+    text = _clean_text(value)
+    return text if text else fallback
+
+
+def _build_service_supply_points(
+    item_name: str,
+    delivery_time: str,
+    delivery_place: str,
+    *,
+    product_identity: str = "",
+    spec_digest: str = "",
+) -> list[str]:
+    item = _service_plan_text(item_name, "本包设备")
+    goods = _service_plan_text(product_identity, item)
+    schedule = _service_plan_text(delivery_time, "采购文件约定时限")
+    place = _service_plan_text(delivery_place, "采购人指定地点")
+    specs = _service_plan_text(spec_digest, "采购文件及投标响应确认的配置、附件和随机资料")
+    return [
+        f"1）项目组织与职责分工：围绕{goods}成立专项实施小组，配置项目负责人、商务对接、物流协调、安装调试工程师、培训工程师和售后服务负责人，形成供货、安装、培训、验收、维保一体化工作机制。",
+        f"2）进度计划与节点控制：以“{schedule}”为总控目标，收到中标/合同通知后立即启动锁货、备货复核、发运审批、到货预约和现场进场计划，确保{item}按期送达{place}。",
+        f"3）发货前复核：发运前逐项核对货物名称、型号规格、数量、序列号/批号、随机附件、随机文件和外观状态，确保{specs}与投标响应保持一致。",
+        "4）协调机制与进度风险预警：到货前与采购人、使用科室及相关保障部门确认卸货时间、搬运路线、暂存位置和进场窗口；如遇排产延迟、物流拥堵、天气异常等情况，立即启动改线运输、优先发运、加派人员或分批到货等补救措施。",
+    ]
+
+
+def _build_service_packaging_points(
+    item_name: str,
+    *,
+    product_identity: str = "",
+) -> list[str]:
+    item = _service_plan_text(item_name, "本包设备")
+    goods = _service_plan_text(product_identity, item)
+    return [
+        f"1）包装标准与加固要求：{goods}按原厂标准包装或不低于原厂标准的加固方案实施，落实防震、防潮、防雨、防压、防倒置、防碰撞等措施，对精密部件、易损部件和随机附件分别进行缓冲、防护和固定。",
+        f"2）外箱标识与单据管理：外包装清晰标注项目名称、设备名称、型号规格、数量、收货单位、收货地址、重心方向及轻放防潮等运输标识，并随货附装箱单、配货单、附件清单和必要的交接单据。",
+        f"3）运输组织与在途监控：根据{item}体积、重量、时效和防护要求选择合规车辆或物流渠道，发运后持续跟踪运输节点，确保途中搬运、装卸、转运和临时存放环节受控。",
+        "4）到货保护与异常处理：货物到场后先核查外包装完整性、封签状态、箱号数量和外观情况，再组织开箱点验；如发现破损、受潮、缺件、短少或异常污染，立即拍照留痕并启动补发、换货、维修或整改流程，未完成处置前不转入正式验收。",
+    ]
+
+
+def _build_service_installation_points(
+    item_name: str,
+    *,
+    delivery_place: str = "",
+    functional_notes: str = "",
+) -> list[str]:
+    item = _service_plan_text(item_name, "本包设备")
+    place = _service_plan_text(delivery_place, "采购人指定地点")
+    functional = _service_plan_text(functional_notes, f"围绕{item}的关键功能、联动要求和试运行指标组织安装调试。")
+    return [
+        f"1）场地勘查与条件确认：设备进场前提前核对{place}的电源、接地、网络、温湿度、承重、给排水、排风及净化等条件（如适用），并与采购人确认安装窗口、施工边界和现场配合事项。",
+        f"2）开箱点验与设备定位：货物运抵现场后组织卸货、开箱点验、设备定位和部件组装，逐项核对主机、附件、耗材、工具及随机资料，确认无误后再进入通电和联机阶段。",
+        f"3）安装调试与场地联动：按照随机技术文件、标准操作规程和采购文件要求完成安装、初始化设置、功能调试、参数校准和联动测试。{functional}",
+        "4）试运行与问题闭环：安装调试完成后安排试运行和结果确认，对接口异常、报警提示、配件缺失、环境不匹配等问题建立现场整改清单，落实责任人、完成时限和复测要求，确保设备具备正式交付条件。",
+    ]
+
+
+def _build_service_training_points(
+    item_name: str,
+    *,
+    training_notes: str = "",
+) -> list[str]:
+    item = _service_plan_text(item_name, "本包设备")
+    training = _service_plan_text(training_notes, f"围绕{item}开展分层培训和实操演练。")
+    return [
+        f"1）培训对象与分层安排：面向操作人员、科室管理人员和院方设备联络人员分别组织培训，确保使用、管理和日常联络三个层面的受训人员均明确职责和操作边界。",
+        f"2）培训内容：覆盖{item}的开关机流程、标准操作步骤、参数设置、样本/试剂/附件使用、日常清洁保养、常见告警识别、简单故障排查和安全注意事项。",
+        "3）培训方式与记录：采用现场讲解、上机演示、实操跟训和问答复盘相结合的方式实施，培训完成后形成培训签到、培训课件、培训记录和必要的考核确认材料。",
+        f"4）效果确认与持续支持：以现场演示、独立操作、答疑复核等方式确认培训效果，必要时安排二次培训或补充交底。{training}",
+    ]
+
+
+def _build_service_acceptance_points(
+    item_name: str,
+    *,
+    acceptance_notes: str = "",
+    support_digest: str = "",
+) -> list[str]:
+    item = _service_plan_text(item_name, "本包设备")
+    acceptance = _service_plan_text(acceptance_notes, f"按采购文件、投标响应、合同约定以及国家和行业标准对{item}进行验收。")
+    docs = _service_plan_text(
+        support_digest,
+        "产品合格证、装箱单、说明书、配置清单、出厂检验资料及注册/备案资料（如适用）",
+    )
+    return [
+        f"1）验收依据与流程：{acceptance} 验收按到货验收、安装验收、功能/性能验收和试运行确认等步骤推进，确保实物、资料和响应承诺一致。",
+        f"2）资料移交：同步移交并说明{docs}，保证资料版本完整、内容可核、与实物对应，便于采购人留档和后续管理。",
+        f"3）技术核验与试运行：围绕{item}的配置、参数、功能、接口联动和运行稳定性逐项核验，必要时配合采购人开展现场测试、结果记录和复核确认。",
+        "4）整改闭环与正式交付：对验收中发现的问题形成书面清单，明确整改措施、责任人和完成时限；整改完成后再次确认，达到交付条件后办理正式签收和交付手续。",
+    ]
+
+
+def _build_service_after_sales_points(
+    item_name: str,
+    *,
+    spec_digest: str = "",
+) -> list[str]:
+    item = _service_plan_text(item_name, "本包设备")
+    specs = _service_plan_text(spec_digest, "本项目所投配置、随机附件和配套资料")
+    return [
+        f"1）服务组织与报修渠道：围绕{item}建立固定服务联系人、电话/邮件等报修渠道和问题跟踪台账；如采购文件对响应时限有明确要求，我方完全按其执行，未明确事项按“先远程诊断、后现场处理、全过程回访闭环”的原则实施。",
+        f"2）质保期内服务：在质保期内对设备本体及合同约定范围内的配件、附件提供维修维护、技术咨询、故障排查和必要的更换支持，保证{specs}持续满足正常使用要求。",
+        f"3）巡检保养与备件保障：结合{item}使用频率制定预防性维护计划，按需开展巡检、校准、清洁保养和运行状态检查；同步建立常用备件和关键耗材保障机制，减少停机风险。",
+        "4）远程支持与升级服务：在采购文件和厂家政策允许范围内提供远程技术支持、使用指导、软件参数优化、版本升级建议及安全使用提醒，确保用户持续掌握设备运行状态。",
+        "5）质保期外延续服务：质保期届满后继续提供有偿维保、配件供应、技术咨询和升级支持，服务标准保持连续一致，不因质保期结束中断正常使用保障。",
+    ]
+
+
+def _build_service_quality_points(
+    item_name: str,
+    *,
+    spec_digest: str = "",
+    support_digest: str = "",
+) -> list[str]:
+    item = _service_plan_text(item_name, "本包设备")
+    specs = _service_plan_text(spec_digest, "采购文件技术要求和投标响应配置")
+    docs = _service_plan_text(support_digest, "随机文件和验收资料")
+    return [
+        f"1）质量保证管理体系：围绕{item}建立项目负责人总负责、商务物流协同、技术工程师分工实施的质量管理机制，对供货、安装、培训、验收、维保全过程实施责任到人。",
+        f"2）关键节点复核：对备货、出库、包装、到货、安装、调试和试运行等节点设置复核要求，确保{specs}与实际交付一致，避免错发、漏发和错误安装。",
+        f"3）记录留存与可追溯管理：对发货通知、物流信息、开箱点验、安装调试、培训签到、验收记录及{docs}进行归档留存，保证项目过程可追溯、可复核。",
+        "4）异常处置与纠正预防：发现质量异常、功能偏差或资料不一致时，立即启动隔离、原因分析、纠正处理和复核确认机制，必要时安排补发、更换或现场整改，防止同类问题重复发生。",
+    ]
+
+
+def _renumber_numbered_points(points: list[str], start: int = 1) -> list[str]:
+    result: list[str] = []
+    for idx, point in enumerate(points, start=start):
+        body = re.sub(r"^\d+[）)]\s*", "", _clean_text(point))
+        result.append(f"{idx}）{body}")
+    return result
+
+
+def _build_small_enterprise_declaration_template(tender, packages: list[ProcurementPackage] | None = None) -> str:
+    """返回中小企业声明函（货物）模板。"""
+    goods = _goods_names_text(packages)
+    purchaser = _purchaser_text(tender)
+    project_name = _project_name_text(tender)
+    rows = []
+    for idx, pkg in enumerate(packages or [], start=1):
+        rows.append(
+            f"{idx}. {getattr(pkg, 'item_name', '') or '【待填写：标的名称】'}，属于【待填写：采购文件明确的所属行业】行业；"
+            "制造商为【待填写：企业名称】；从业人员【待填写】人，营业收入为【待填写】万元，资产总额为【待填写】万元，"
+            "属于【待填写：中型企业/小型企业/微型企业】。"
+        )
+    if not rows:
+        rows.append(
+            "1. 【待填写：标的名称】，属于【待填写：采购文件明确的所属行业】行业；制造商为【待填写：企业名称】；"
+            "从业人员【待填写】人，营业收入为【待填写】万元，资产总额为【待填写】万元，"
+            "属于【待填写：中型企业/小型企业/微型企业】。"
+        )
+
+    details = "\n".join(rows)
+    return f"""
+中小企业声明函（货物）
+
+本公司（联合体）郑重声明，根据《政府采购促进中小企业发展管理办法》（财库〔2020〕46号）的规定，本公司（联合体）参加 {purchaser} 的 {project_name} 采购活动，提供的货物全部由符合政策要求的中小企业制造。相关企业（含联合体中的中小企业、签订分包意向协议的中小企业）的具体情况如下：
+
+{details}
+
+以上企业，不属于大企业的分支机构，不存在控股股东为大企业的情形，也不存在与大企业的负责人为同一人的情形。
+本企业对上述声明内容的真实性负责。如有虚假，将依法承担相应责任。
+
+填写说明：
+1. 本项目为货物采购时，保留本《中小企业声明函（货物）》正文；如本项目不适用，请在正式稿按采购文件要求删除或注明“本项不适用”。
+2. 从业人员、营业收入、资产总额填报上一年度数据；无上一年度数据的新成立企业可不填报。
+3. 如存在多个标的，可按上述格式逐项续写，不得只保留标题。
+
+企业名称（盖章）：【待填写：投标人名称】
+日期：【待填写：年 月 日】
+对应货物：{goods}
+""".strip()
+
+
+def _build_disabled_unit_declaration_template(tender, packages: list[ProcurementPackage] | None = None) -> str:
+    """返回残疾人福利性单位声明函模板。"""
+    goods = _goods_names_text(packages)
+    purchaser = _purchaser_text(tender)
+    project_name = _project_name_text(tender)
+    return f"""
+残疾人福利性单位声明函
+
+本单位郑重声明，根据《财政部 民政部 中国残疾人联合会关于促进残疾人就业政府采购政策的通知》（财库〔2017〕141号）的规定，本单位为符合条件的残疾人福利性单位，且本单位参加 {purchaser} 的 {project_name} 采购活动，提供本单位制造的货物（或由本单位承担的工程、提供的服务），或者提供其他残疾人福利性单位制造的货物（不包括使用非残疾人福利性单位注册商标的货物）。
+
+如本单位不属于残疾人福利性单位，请在正式稿按采购文件要求删除本页或注明“本项不适用”；如属于，请同步附与声明内容一致的证明材料。
+
+本单位对上述声明的真实性负责。如有虚假，将依法承担相应责任。
+
+残疾人福利性单位（盖章）：【待填写：投标人名称】
+法定代表人或授权代表：【待填写】
+日期：【待填写：年 月 日】
+对应货物：{goods}
+""".strip()
+
+
+def _build_affiliated_units_statement_template(tender) -> str:
+    """返回投标人关联单位说明模板。"""
+    project_name = _project_name_text(tender)
+    return f"""
+投标人关联单位的说明
+
+为参加 {project_name} 投标/响应活动，现就与本单位存在关联关系的单位说明如下：
+
+1. 与投标人单位负责人为同一人的其他单位：
+【待填写：无；如有请填写单位名称、统一社会信用代码及关系说明】
+
+2. 与投标人存在直接控股、管理关系的其他单位：
+【待填写：无；如有请填写单位名称、统一社会信用代码及关系说明】
+
+3. 如经核查不存在上述情形，请直接填写“无”；如存在，请如实逐项列明，不得遗漏。
+
+供应商全称（公章）：【待填写：投标人名称】
+法定代表人或授权代表：【待填写】
+日期：【待填写：年 月 日】
+""".strip()
+
+
+def _build_manufacturer_authorization_template(tender, packages: list[ProcurementPackage] | None = None) -> str:
+    """返回制造商授权书模板。"""
+    purchaser = _purchaser_text(tender)
+    project_name = _project_name_text(tender)
+    project_no = _project_number_text(tender)
+    goods = _goods_names_text(packages)
+    return f"""
+制造商授权书
+
+致：{purchaser}
+
+作为【待填写：制造商名称】，现授权【待填写：投标人名称】作为我方就 {project_name}（项目编号：{project_no}）的合法投标人与供货服务实施主体，代表我方参加与 {goods} 相关的投标、供货、安装调试、验收配合、培训及售后服务等工作。
+
+授权范围包括但不限于：
+1. 以授权投标人名义参与本项目投标、澄清、答疑及合同洽谈；
+2. 按投标承诺及合同约定供应授权产品，并提供原厂或制造商认可的安装调试、培训和售后服务；
+3. 在项目实施及质保服务期间，提供必要的技术支持、备件供应和质量保障。
+
+我方承诺：
+1. 本授权真实、合法、有效，不存在重复冲突授权；
+2. 授权产品来源合法，质量符合国家及行业规范要求；
+3. 如项目中标，将配合授权投标人完成本项目履约和售后服务工作。
+
+授权产品：{goods}
+制造商名称（盖章）：【待填写：制造商名称】
+法定代表人或授权代表：【待填写】
+日期：【待填写：年 月 日】
+""".strip()
+
+
+def _build_service_fee_commitment_template(tender) -> str:
+    """返回招标代理服务费承诺模板。"""
+    agency = _agency_text(tender)
+    project_name = _project_name_text(tender)
+    project_no = _project_number_text(tender)
+    return f"""
+招标代理服务费承诺
+
+致：{agency}
+
+如我方在 {project_name}（项目编号：{project_no}）项目中中标/成交，我方承诺在收到中标（成交）通知书后，严格按照招标文件、采购文件及相关约定的收费标准和支付时限，向贵公司一次性足额支付招标代理服务费，并配合完成发票开具和财务对接工作。
+
+中标服务费发票开具方式：请在下列两种方式中二选一保留，其余选项删除。
+
+① 增值税专用发票
+公司名称：【待填写】
+公司税号：【待填写】
+公司地址：【待填写】
+公司电话：【待填写】
+开户行名称：【待填写】
+开户行账号：【待填写】
+
+② 增值税普通发票
+公司名称：【待填写】
+公司税号：【待填写】
+
+我方保证所提供的开票信息真实、准确、完整。如因信息有误导致发票无法开具、无法认证抵扣或无法入账，由此产生的一切后果由我方自行承担。
+
+承诺方名称（盖章）：【待填写：投标人名称】
+法定代表人或授权代表：【待填写】
+地址：【待填写：公司注册地址】
+电话：【待填写：联系电话】
+邮箱：【待填写】
+日期：【待填写：年 月 日】
+""".strip()
+
+
+def _build_hlj_supplier_qualification_commitment_template() -> str:
+    """返回黑龙江省政府采购供应商资格承诺函的完整可编辑模板。"""
+    return """
+黑龙江省政府采购供应商资格承诺函
+
+我方作为政府采购供应商，类型为：▢企业 ▢事业单位 ▢社会团体 ▢非企业专业服务机构 ▢个体工商户 ▢自然人（请据实在对应选项中勾选），现郑重承诺如下：
+
+一、承诺具有独立承担民事责任的能力。
+（一）供应商类型为企业的，承诺通过合法渠道可查证的信息为：
+1. “类型”为“有限责任公司”“股份有限公司”“股份合作制”“集体所有制”“联营”“合伙企业”“其他”等法人企业或合伙企业。
+2. “登记状态”为“存续（在营、开业、在册）”。
+3. “经营期限”不早于投标截止日期，或长期有效。
+（二）供应商类型为事业单位或团体组织的，承诺通过合法渠道可查证的信息为：
+1. “类型”为“事业单位”或“社会团体”。
+2. “事业单位法人证书或社会团体法人登记证书有效期”不早于投标截止日期。
+（三）供应商类型为非企业专业服务机构的，承诺通过合法渠道可查证“执业状态”为“正常”。
+（四）供应商类型为自然人的，承诺满足《中华人民共和国民法典》第二章、第六章、第八章等相关条款规定，可独立承担民事责任。
+
+二、承诺具有良好的商业信誉和健全的财务会计制度。
+承诺通过合法渠道可查证的信息为：
+（一）未被列入失信被执行人。
+（二）未被列入税收违法黑名单。
+
+三、承诺具有履行合同所必需的设备和专业技术能力。
+承诺按照采购文件要求可提供相关设备和人员清单，以及辅助证明材料。
+
+四、承诺有依法缴纳税收的良好记录。
+承诺通过合法渠道可查证的信息为：
+（一）不存在欠税信息。
+（二）不存在重大税收违法。
+（三）不属于纳税“非正常户”（供应商类型为自然人的不适用本条）。
+
+五、承诺有依法缴纳社会保障资金的良好记录。
+在承诺函中以附件形式提供至少开标前三个月依法缴纳社会保障资金的证明材料，其中基本养老保险、基本医疗保险（含生育保险）、工伤保险、失业保险均须依法缴纳。
+
+六、承诺参加本次政府采购活动前三年内，在经营活动中没有重大违法记录（处罚期限已经届满的视同没有重大违法记录）。
+供应商需承诺通过合法渠道可查证的信息为：
+（一）在投标截止日期前三年内未因违法经营受到刑事处罚。
+（二）在投标截止日期前三年内未因违法经营受到县级以上行政机关作出的较大金额罚款（二百万元以上）的行政处罚。
+（三）在投标截止日期前三年内未因违法经营受到县级以上行政机关作出的责令停产停业、吊销许可证或者执照等行政处罚。
+
+七、承诺参加本次政府采购活动不存在下列情形。
+（一）单位负责人为同一人或者存在直接控股、管理关系的不同供应商，不得参加同一合同项下的政府采购活动。除单一来源采购项目外，为采购项目提供整体设计、规范编制或者项目管理、监理、检测等服务的供应商，不得再参加该采购项目的其他采购活动。
+（二）承诺通过合法渠道可查证未被列入失信被执行人名单、重大税收违法案件当事人名单、政府采购严重违法失信行为记录名单。
+
+八、承诺通过下列合法渠道，可查证在投标截止日期前一至七款承诺信息真实有效：
+（一）国家企业信用信息公示系统（https://www.gsxt.gov.cn）；
+（二）中国执行信息公开网（http://zxgk.court.gov.cn）；
+（三）中国裁判文书网（https://wenshu.court.gov.cn）；
+（四）信用中国（https://www.creditchina.gov.cn）；
+（五）中国政府采购网（https://www.ccgp.gov.cn）；
+（六）其他具备法律效力的合法渠道。
+
+我方对上述承诺事项的真实性负责，授权并配合采购人所在同级财政部门及其委托机构，对上述承诺事项进行查证。如不属实，属于供应商提供虚假材料谋取中标、成交的情形，按照《中华人民共和国政府采购法》第七十七条第一款的规定，接受相应行政处罚；有违法所得的，并处没收违法所得；情节严重的，由市场监督管理部门吊销营业执照；构成犯罪的，依法追究刑事责任。
+
+附件：缴纳社会保障资金的证明材料清单
+一、社保经办机构出具的本单位职工社会保障资金缴纳证明。
+（一）基本养老保险缴纳证明或基本养老保险缴费清单。
+（二）基本医疗保险及生育保险缴纳证明或缴费清单。
+（三）工伤保险缴纳证明或缴费清单。
+（四）失业保险缴纳证明或缴费清单。
+二、新成立的企业或在法规范围内不需提供相关证明的机构，应另附书面说明，写明成立时间、适用依据及不能提供对应证明材料的原因，并附营业执照、主管部门说明或其他佐证材料。
+
+承诺人（供应商或自然人CA签章）：【待填写：投标人名称】
+日期：【待填写：年 月 日】
+""".strip()
+
+
+def _normalize_hlj_supplier_qualification_template(text: str) -> str:
+    """标准化黑龙江资格承诺函文本；抽取失败时回退到完整模板。"""
+    body = "\n".join(line.strip() for line in (text or "").splitlines() if line.strip())
+    compact = _clean_text(body)
+    required_tokens = (
+        "黑龙江省政府采购供应商资格承诺函",
+        "承诺具有独立承担民事责任的能力",
+        "承诺有依法缴纳社会保障资金的良好记录",
+        "附件：缴纳社会保障资金的证明材料清单",
+    )
+    if not compact:
+        return _build_hlj_supplier_qualification_commitment_template()
+    # 黑龙江资格承诺函属于全省通用模板，优先使用标准化正文，避免 OCR 粘连/重复句污染底稿。
+    if "黑龙江省政府采购供应商资格承诺函" in compact:
+        return _build_hlj_supplier_qualification_commitment_template()
+    if compact.count("请按招标文件原格式填写本节内容") >= 2:
+        return _build_hlj_supplier_qualification_commitment_template()
+    if sum(1 for token in required_tokens if token in compact) < 3:
+        return _build_hlj_supplier_qualification_commitment_template()
+    return body
 
 def _extract_review_block(tender_raw: str, title_keywords: list[str], stop_keywords: list[str] | None = None) -> str:
     """提取评审块。"""

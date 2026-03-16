@@ -88,12 +88,37 @@ def _classify_config_item(name: str) -> str:
     return "标准附件"
 
 def _looks_like_service_config_noise(name: str, remark: str = "") -> bool:
+    """过滤服务项/承诺项，这些不应该出现在配置清单中"""
     text = f"{_as_text(name)} {_as_text(remark)}"
-    bad_tokens = (
+    # 扩展服务噪音识别词汇
+    service_tokens = (
         "售后", "服务要求", "免费更新", "响应速度", "维护保养",
         "培训", "安装调试", "验收", "送货", "卸货", "技术服务人员",
+        "质保期", "保修", "上门服务", "巡检", "保养频次",
+        "响应时限", "到场时间", "故障响应", "技术支持",
+        "更新服务", "升级服务", "系统升级", "软件升级",
+        "远程支持", "电话支持", "在线支持", "培训计划",
+        "操作培训", "维修培训", "使用培训", "现场培训",
+        "备件储备", "配件供应", "耗材供应", "试剂供应",
+        "承担费用", "免费", "不收费", "包含", "含在",
+        "双向LIS", "LIS接口费用", "接口费用", "对接费用",
+        "运输费用", "包装费用", "安装费", "调试费",
     )
-    return any(token in text for token in bad_tokens)
+    # 纯服务描述模式
+    pure_service_patterns = (
+        r"^.{0,3}(提供|承诺|负责|保证|确保).{1,15}(服务|支持|维护|保养|培训|验收)",
+        r"^.{0,3}(免费|不收费).{1,20}",
+        r"^.{0,3}(售后|质保|保修|维修).{1,15}(要求|标准|方案|计划)",
+    )
+
+    if any(token in text for token in service_tokens):
+        return True
+
+    import re
+    if any(re.search(pattern, text) for pattern in pure_service_patterns):
+        return True
+
+    return False
 
 def _config_dedup_tokens(name: str) -> set[str]:
     """提取配置项名称的 token 集合用于 Jaccard 去重。"""
@@ -305,8 +330,18 @@ def _extract_config_items_from_package_requirements(
 
 _DERIVED_CONFIG_CANDIDATE_PATTERN = re.compile(
     r"([A-Za-z0-9\u4e00-\u9fa5（）()\-+]{2,24}?"
-    r"(?:主机|工作站|软件系统|分析软件|应用软件|软件|系统|模块|组件|探头|扫码器|报警仪|冷水机|电源|UPS|"
-    r"显示器|打印机|按钮|门锁系统|底座手柄|底座|头托|头钉|连接器|球管|辐照杯|离子泵|面板|流动室|试剂架|比色杯))"
+    r"(?:主机|整机|检测主机|分析主机|检测单元|"
+    r"工作站|数据工作站|分析工作站|"
+    r"软件系统|分析软件|应用软件|管理软件|控制软件|软件|"
+    r"系统|模块|单元|组件|部件|"
+    r"探头|扫码器|报警仪|传感器|检测器|"
+    r"冷水机|稳压电源|UPS|不间断电源|电源|"
+    r"显示器|打印机|触摸屏|液晶屏|"
+    r"按钮|门锁系统|底座手柄|底座|支架|台车|推车|"
+    r"头托|头钉|连接器|接口|适配器|"
+    r"球管|辐照杯|离子泵|面板|控制面板|"
+    r"流动室|试剂架|比色杯|样品架|试剂位|"
+    r"数据线|电源线|连接线|电缆|网线))"
 )
 _DERIVED_CONFIG_EXCLUDE_TOKENS = (
     "电压",
@@ -431,23 +466,31 @@ def _derive_config_items_from_technical_requirements(
 ) -> None:
     """当招标文件没有显式装箱明细时，从技术条款反推关键配置项。"""
     def _derived_remark(candidate_name: str, source_key: str, source_val: str) -> str:
-        """生成落地态备注，不再输出“反推/核对”提示。"""
+        """生成标准化备注，明确标注为反推项并提示核对。"""
         category = _classify_config_item(candidate_name)
         source_text = f"{_safe_text(source_key, '')} {_safe_text(source_val, '')}"
+
+        # 明确标注反推来源，方便人工核对
+        purpose = ""
         if "自动" in source_text:
-            return f"{category}；用于实现自动化处理流程"
-        if "独立" in source_text:
-            return f"{category}；用于满足独立运行要求"
-        if "温控" in source_text:
-            return f"{category}；用于温度控制"
-        if "LIS" in source_text or "双向传输" in source_text:
-            return f"{category}；用于数据传输及系统对接"
-        if "观察" in source_text or "可视" in source_text:
-            return f"{category}；用于过程观察"
-        normalized_key = _normalize_config_item_name(source_key)
-        if normalized_key:
-            return f"{category}；满足{normalized_key}要求"
-        return category
+            purpose = "用于实现自动化处理流程"
+        elif "独立" in source_text:
+            purpose = "用于满足独立运行要求"
+        elif "温控" in source_text:
+            purpose = "用于温度控制"
+        elif "LIS" in source_text or "双向传输" in source_text:
+            purpose = "用于数据传输及系统对接"
+        elif "观察" in source_text or "可视" in source_text:
+            purpose = "用于过程观察"
+        else:
+            normalized_key = _normalize_config_item_name(source_key)
+            if normalized_key:
+                purpose = f"满足{normalized_key}要求"
+
+        # 统一格式：分类 + 用途 + 反推标注
+        if purpose:
+            return f"{category}；{purpose}（由招标条款反推，需与装箱清单核对）"
+        return f"{category}（由招标条款反推，需与装箱清单核对）"
 
     source_pairs: list[tuple[str, str]] = []
     for key, raw_value in (getattr(pkg, "technical_requirements", None) or {}).items():
@@ -757,11 +800,15 @@ def _extract_configuration_items(
         deduped_token_sets.append(item_tokens)
 
     # Config pollution cleaning — remove non-config items that leaked through boundary detection
+    # 先进行二次服务项过滤，然后再做通用清理
+    deduped = [(n, u, q, r) for n, u, q, r in deduped if not _looks_like_service_config_noise(n, r)]
     cleaned = _clean_config_items(deduped, pkg.package_id, pkg.item_name)
 
     # 完全提取不到任何配置时，尝试从技术条款反推
     if not cleaned:
         _derive_config_items_from_technical_requirements(pkg, tender_raw, deduped, _seen_names)
+        # 再次过滤服务项
+        deduped = [(n, u, q, r) for n, u, q, r in deduped if not _looks_like_service_config_noise(n, r)]
         cleaned = _clean_config_items(deduped, pkg.package_id, pkg.item_name)
 
     # 如果仍然提取不到，保留一条占位提示

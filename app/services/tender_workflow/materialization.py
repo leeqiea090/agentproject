@@ -30,6 +30,14 @@ import app.services.tender_workflow.common as _common
 import app.services.tender_workflow.classification as _classification
 import app.services.tender_workflow.product_facts as _product_facts
 import app.services.tender_workflow.evidence as _evidence
+from app.services.one_click_generator.format_driven_sections.common import (
+    _build_service_acceptance_points,
+    _build_service_after_sales_points,
+    _build_service_installation_points,
+    _build_service_packaging_points,
+    _build_service_supply_points,
+    _build_service_training_points,
+)
 
 
 def __reexport_all(module) -> None:
@@ -769,22 +777,45 @@ def _build_materialized_service_section(
                 f"- 交货地点：{pkg.delivery_place or '采购人指定地点'}",
                 "",
                 "#### 1. 供货组织与进度安排",
-                f"围绕{pkg.item_name}建立专项交付计划，按“备货复核-发运预约-到货签收-安装调试-培训验收”五个节点推进，本包拟投产品为{product_identity}，重点跟踪{spec_digest}等关键交付信息。",
+                *_build_service_supply_points(
+                    pkg.item_name,
+                    pkg.delivery_time or "按采购文件约定",
+                    pkg.delivery_place or "采购人指定地点",
+                    product_identity=product_identity,
+                    spec_digest=spec_digest,
+                ),
                 "",
                 "#### 2. 包装运输与到货保护",
-                f"结合{pkg.item_name}的运输特性执行原厂包装、防震防潮和到货外观检查；到货后按装箱清单、随机附件和关键部件逐项点验，异常情况第一时间留痕并启动补发或整改。",
+                *_build_service_packaging_points(
+                    pkg.item_name,
+                    product_identity=product_identity,
+                ),
                 "",
                 "#### 3. 安装调试与场地联动",
-                functional_notes,
+                *_build_service_installation_points(
+                    pkg.item_name,
+                    delivery_place=pkg.delivery_place or "采购人指定地点",
+                    functional_notes=functional_notes,
+                ),
                 "",
                 "#### 4. 培训实施",
-                training_notes,
+                *_build_service_training_points(
+                    pkg.item_name,
+                    training_notes=training_notes,
+                ),
                 "",
                 "#### 5. 验收与资料移交",
-                f"{acceptance_notes}；同步移交{support_digest}。",
+                *_build_service_acceptance_points(
+                    pkg.item_name,
+                    acceptance_notes=acceptance_notes,
+                    support_digest=support_digest,
+                ),
                 "",
                 "#### 6. 售后与维保安排",
-                f"针对{pkg.item_name}安排项目联系人、安装调试工程师和售后支持人员，围绕{spec_digest}建立巡检、故障响应、备件支持和版本升级的服务闭环。",
+                *_build_service_after_sales_points(
+                    pkg.item_name,
+                    spec_digest=spec_digest,
+                ),
                 "",
             ]
         )

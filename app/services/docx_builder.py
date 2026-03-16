@@ -10,6 +10,12 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from app.schemas import BidDocumentSection, TenderDocument, CompanyProfile, DraftLevel
+from app.services.one_click_generator.format_driven_sections.common import (
+    _build_affiliated_units_statement_template,
+    _build_disabled_unit_declaration_template,
+    _build_hlj_supplier_qualification_commitment_template,
+    _build_small_enterprise_declaration_template,
+)
 
 
 def _set_cell_bg(cell, hex_color: str) -> None:
@@ -444,24 +450,48 @@ def _extract_outline_items(content: str) -> list[str]:
     return items[:20]
 
 
-def _markdown_heading_info(stripped: str) -> tuple[int, str] | None:
-    """解析 Markdown 标题级别和标题文本。"""
+def _is_outline_heading_candidate(stripped: str, *, parenthetical: bool) -> bool:
+    """判断自动编号行是否适合作为 Word 子标题，而不是普通正文。"""
+    compact = re.sub(r"\s+", "", stripped or "")
+    if not compact:
+        return False
+
+    if parenthetical:
+        compact = re.sub(r"^[（(][一二三四五六七八九十]+[）)]", "", compact)
+        max_length = 16
+    else:
+        compact = re.sub(r"^[一二三四五六七八九十]+、", "", compact)
+        max_length = 24
+
+    if not compact:
+        return False
+    if len(compact) > max_length:
+        return False
+    if any(token in compact for token in ("。", "；", "：", "，", "？", "！", ":", ";", "?", "!")):
+        return False
+    if "http" in compact or "https" in compact or "www." in compact:
+        return False
+    return True
+
+
+def _markdown_heading_info(stripped: str) -> tuple[int, str, str] | None:
+    """解析 Markdown 标题级别、标题文本及来源类型。"""
     if stripped.startswith(">"):
         stripped = re.sub(r"^>\s*", "", stripped)
     if stripped.startswith("### "):
-        return 3, stripped[4:].strip()
+        return 3, stripped[4:].strip(), "markdown"
     if stripped.startswith("#### "):
-        return 3, stripped[5:].strip()
+        return 3, stripped[5:].strip(), "markdown"
     if stripped.startswith("## "):
-        return 2, stripped[3:].strip()
+        return 2, stripped[3:].strip(), "markdown"
     if stripped.startswith("# "):
-        return 1, stripped[2:].strip()
+        return 1, stripped[2:].strip(), "markdown"
     if re.match(r"^第[一二三四五六七八九十]+章[、\s]", stripped):
-        return 1, stripped
-    if re.match(r"^[一二三四五六七八九十]+、", stripped):
-        return 2, stripped
-    if re.match(r"^[（(][一二三四五六七八九十]+[）)]", stripped):
-        return 3, stripped
+        return 1, stripped, "chapter"
+    if re.match(r"^[一二三四五六七八九十]+、", stripped) and _is_outline_heading_candidate(stripped, parenthetical=False):
+        return 2, stripped, "outline"
+    if re.match(r"^[（(][一二三四五六七八九十]+[）)]", stripped) and _is_outline_heading_candidate(stripped, parenthetical=True):
+        return 3, stripped, "outline"
     return None
 
 
@@ -614,6 +644,7 @@ def _parse_and_render_markdown(
     seen_inner_heading = False
     body_since_heading = False
     last_heading_text = ""
+    last_heading_source = ""
 
     while i < len(lines):
         line = lines[i]
@@ -632,17 +663,28 @@ def _parse_and_render_markdown(
         # 标题
         heading_info = _markdown_heading_info(stripped)
         if heading_info:
-            level, heading_text = heading_info
-            if seen_inner_heading and not body_since_heading and last_heading_text:
+            level, heading_text, heading_source = heading_info
+            if (
+                seen_inner_heading
+                and not body_since_heading
+                and last_heading_text
+                and last_heading_source != "outline"
+            ):
                 _append_heading_body_fallback(doc, last_heading_text)
                 rendered_body = True
                 body_since_heading = True
-            if seen_inner_heading and body_since_heading:
+            if (
+                seen_inner_heading
+                and body_since_heading
+                and heading_source != "outline"
+                and last_heading_source != "outline"
+            ):
                 doc.add_page_break()
             _add_heading(doc, heading_text, level)
             seen_inner_heading = True
             body_since_heading = False
             last_heading_text = heading_text
+            last_heading_source = heading_source
 
         # 分割线
         elif stripped.startswith("---"):
@@ -665,7 +707,12 @@ def _parse_and_render_markdown(
             body_since_heading = True
 
         elif stripped in {"[PAGE_BREAK]", "[[PAGE_BREAK]]", "<PAGE_BREAK>", "\f"}:
-            if seen_inner_heading and not body_since_heading and last_heading_text:
+            if (
+                seen_inner_heading
+                and not body_since_heading
+                and last_heading_text
+                and last_heading_source != "outline"
+            ):
                 _append_heading_body_fallback(doc, last_heading_text)
                 rendered_body = True
                 body_since_heading = True
@@ -693,7 +740,12 @@ def _parse_and_render_markdown(
 
         i += 1
 
-    if seen_inner_heading and not body_since_heading and last_heading_text:
+    if (
+        seen_inner_heading
+        and not body_since_heading
+        and last_heading_text
+        and last_heading_source != "outline"
+    ):
         _append_heading_body_fallback(doc, last_heading_text)
         rendered_body = True
 
@@ -988,27 +1040,28 @@ def _required_titles_for_tender(tender=None, sections=None) -> list[str]:
 
 def _backfill_required_sections(sections, tender=None):
     """补齐缺失的必需章节占位内容。"""
+    packages = list(getattr(tender, "packages", []) or []) if tender is not None else []
     placeholder_map = {
         "二、报价书": "【待人工补齐：按招标文件原格式填写报价书】",
         "三、报价一览表": "【待人工补齐：按招标文件原格式填写报价一览表】",
-        "四、资格承诺函": "【待人工补齐：黑龙江省政府采购供应商资格承诺函】",
+        "四、资格承诺函": _build_hlj_supplier_qualification_commitment_template(),
         "五、技术偏离及详细配置明细表": "【待人工补齐：按采购文件逐条填写技术偏离及详细配置明细】",
         "六、技术服务和售后服务的内容及措施": "【待人工补齐：按采购文件补齐供货、安装调试、验收、售后服务方案】",
         "七、法定代表人/单位负责人授权书": "【待人工补齐：法定代表人/单位负责人授权书】",
         "八、法定代表人/单位负责人和授权代表身份证明": "【待人工补齐：法定代表人/单位负责人和授权代表身份证明】",
-        "九、小微企业声明函": "【待人工补齐：按招标文件原格式保留小微企业声明函；不适用时注明“本项不适用”】",
-        "十、残疾人福利性单位声明函": "【待人工补齐：按招标文件原格式保留残疾人福利性单位声明函；不适用时注明“本项不适用”】",
-        "十一、投标人关联单位的说明": "【待人工补齐：投标人关联单位说明】",
+        "九、小微企业声明函": _build_small_enterprise_declaration_template(tender, packages),
+        "十、残疾人福利性单位声明函": _build_disabled_unit_declaration_template(tender, packages),
+        "十一、投标人关联单位的说明": _build_affiliated_units_statement_template(tender),
         "二、首轮报价表": "采用电子招投标的项目无需编制该表格，按投标客户端报价部分填写。",
         "三、分项报价表": "采用电子招投标的项目无需编制该表格，按投标客户端报价部分填写。",
         "四、技术偏离及详细配置明细表": "【待人工补齐：按采购文件逐条填写技术偏离及详细配置明细】",
         "五、技术服务和售后服务的内容及措施": "【待人工补齐：按评分项展开供货、安装调试、质量保证、售后服务方案】",
         "六、法定代表人/单位负责人授权书": "【待人工补齐：法定代表人/单位负责人授权书】",
         "七、法定代表人/单位负责人和授权代表身份证明": "【待人工补齐：法定代表人/单位负责人和授权代表身份证明】",
-        "八、小微企业声明函": "【待人工补齐：按招标文件原格式保留小微企业声明函；不适用时注明“本项不适用”】",
-        "九、残疾人福利性单位声明函": "【待人工补齐：按招标文件原格式保留残疾人福利性单位声明函；不适用时注明“本项不适用”】",
-        "十、投标人关联单位的说明": "【待人工补齐：投标人关联单位说明】",
-        "十一、资格承诺函": "【待人工补齐：黑龙江省政府采购供应商资格承诺函】",
+        "八、小微企业声明函": _build_small_enterprise_declaration_template(tender, packages),
+        "九、残疾人福利性单位声明函": _build_disabled_unit_declaration_template(tender, packages),
+        "十、投标人关联单位的说明": _build_affiliated_units_statement_template(tender),
+        "十一、资格承诺函": _build_hlj_supplier_qualification_commitment_template(),
     }
 
     existing = {

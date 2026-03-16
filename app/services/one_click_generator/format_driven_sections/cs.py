@@ -871,17 +871,83 @@ def _build_cs_service_section(
     parts: list[str] = []
 
     for pkg in packages:
+        product = (products or {}).get(pkg.package_id)
+        product_profile = (product_profiles or {}).get(pkg.package_id) or {}
         qty = _extract_package_quantity(pkg, tender_raw)
         delivery_time = _extract_delivery_time(pkg, tender_raw)
         delivery_place = _extract_delivery_place(pkg, tender_raw)
         raw_service_points = _structured_cs_service_points(
             pkg,
             tender_raw,
-            product=(products or {}).get(pkg.package_id),
+            product=product,
             normalized_result=normalized_result,
             evidence_result=evidence_result,
-            product_profile=(product_profiles or {}).get(pkg.package_id),
+            product_profile=product_profile,
         ) or _extract_cs_service_points(pkg, tender_raw)
+        spec_items = list((getattr(product, "specifications", {}) or {}).items())[:3] if product else []
+        spec_digest = "；".join(f"{key}：{value}" for key, value in spec_items)
+        product_identity = (
+            f"{_clean_text(getattr(product, 'manufacturer', ''))} {_clean_text(getattr(product, 'product_name', ''))}"
+            f"（型号：{_clean_text(getattr(product, 'model', '待补充'))}）"
+            if product is not None
+            else pkg.item_name
+        ).strip()
+        functional_notes = _clean_text(product_profile.get("functional_notes") or "")
+        training_notes = _clean_text(product_profile.get("training_notes") or "")
+        acceptance_notes = _clean_text(product_profile.get("acceptance_notes") or "")
+        support_bits: list[str] = []
+        if product and _clean_text(getattr(product, "registration_number", "")):
+            support_bits.append(f"注册/备案资料：{_clean_text(getattr(product, 'registration_number', ''))}")
+        if product and _clean_text(getattr(product, "authorization_letter", "")):
+            support_bits.append(f"授权文件：{_clean_text(getattr(product, 'authorization_letter', ''))}")
+        certifications = list(getattr(product, "certifications", []) or []) if product else []
+        if certifications:
+            support_bits.append(f"认证资料：{'、'.join(_clean_text(item) for item in certifications[:3] if _clean_text(item))}")
+        support_digest = "；".join(item for item in support_bits if item)
+        supply_points = _renumber_numbered_points(
+            _build_service_supply_points(
+                pkg.item_name,
+                delivery_time,
+                delivery_place,
+                product_identity=product_identity,
+                spec_digest=spec_digest,
+            )
+            + _build_service_packaging_points(
+                pkg.item_name,
+                product_identity=product_identity,
+            )
+        )
+        install_points = _renumber_numbered_points(
+            _build_service_installation_points(
+                pkg.item_name,
+                delivery_place=delivery_place,
+                functional_notes=functional_notes,
+            )
+        )
+        quality_points = _renumber_numbered_points(
+            _build_service_quality_points(
+                pkg.item_name,
+                spec_digest=spec_digest,
+                support_digest=support_digest,
+            )
+        )
+        after_sales_points = _renumber_numbered_points(
+            _build_service_after_sales_points(
+                pkg.item_name,
+                spec_digest=spec_digest,
+            )
+        )
+        training_acceptance_points = _renumber_numbered_points(
+            _build_service_training_points(
+                pkg.item_name,
+                training_notes=training_notes,
+            )
+            + _build_service_acceptance_points(
+                pkg.item_name,
+                acceptance_notes=acceptance_notes,
+                support_digest=support_digest,
+            )
+        )
 
         parts.extend([
             f"### 包{pkg.package_id}：{pkg.item_name}",
@@ -890,31 +956,16 @@ def _build_cs_service_section(
             f"交货地点：{delivery_place}",
             "",
             "#### 1. 供货保证措施及运输方案",
-            "1）供货流程及时间安排：中标后立即启动合同分解、排产锁货、发运审批、到货预约四级计划，形成节点进度表并明确责任人。",
-            "2）产品的出库、包装措施：发货前完成数量、型号、外观、随机附件复核；包装按原厂标准执行，落实防震、防潮、防压、防磕碰措施。",
-            "3）产品的运输方案及应急措施：采用专车或合规物流运输，全程跟踪；如遇天气、道路、航班等异常情况，立即启动改期或备用线路方案。",
-            "4）产品的运输风险预防措施及运输过程中出现损坏的处理方案：投保运输险，到货发现破损、受潮、缺件时，现场拍照取证并同步启动补发、换货或整改流程。",
-            "5）产品到达指定地点后交接、签收验货方案：设备到达后由项目经理会同采购人完成数量清点、外观检查、随机资料核验及签收确认。",
+            *supply_points,
             "",
             "#### 2. 安装调试阶段方案",
-            "1）人员配备：安排项目经理、安装工程师、调试工程师、培训工程师，明确岗位职责和联系方式。",
-            "2）安装措施：按场地条件进行开箱核验、设备定位、部件组装、通电前检查，确保安装过程规范可控。",
-            "3）调试措施：完成功能调试、参数校准、联机测试和试运行，形成调试记录。",
-            "4）安装调试的工期保障措施：设备到货后按采购人通知及时进场，倒排安装调试计划，保障在约定时限内完成。",
-            "5）安装调试的应急预案：对场地条件异常、配件缺失、电源环境不符、联机故障等情况设置应急处理机制。",
+            *install_points,
             "",
             "#### 3. 质量保证及技术措施",
-            "1）质量保证管理体系：建立项目质量保证管理体系，明确项目经理总负责制。",
-            "2）质量技术人员方案及职责分工：明确安装、调试、培训、售后岗位责任表与人员分工。",
-            "3）监督机制：对发货、到货、安装、调试、验收等关键节点设置复核机制和责任追踪。",
-            "4）质量问题应急处理方案：如发生质量问题，第一时间隔离问题设备/配件、分析原因并落实纠正和补救措施。",
+            *quality_points,
             "",
             "#### 4. 售后服务方案",
-            "1）售后服务方案：结合本包设备特点制定维保、巡检、备件和升级保障方案。",
-            "2）售后服务流程：报修受理→远程诊断→现场服务→故障排除→回访闭环。",
-            "3）售后服务标准：按厂家及行业规范提供维保、巡检、升级和备件保障服务。",
-            "4）售后服务人员安排：明确售后负责人、工程师及联系电话。",
-            "5）售后应急处理方案：对停机、核心部件异常等情况启动快速响应机制。",
+            *after_sales_points,
             "",
             "#### 5. 采购文件原始售后要求逐项承诺",
         ])
@@ -928,11 +979,7 @@ def _build_cs_service_section(
         parts.extend([
             "",
             "#### 6. 培训与验收配合措施",
-            "1）对操作人员开展开关机、标准操作流程、注意事项、常见问题处理等培训。",
-            "2）对管理人员开展设备管理、维护要求、风险控制、记录留存等培训。",
-            "3）到货验收：配合采购人对外包装、数量、随机附件、资料进行验收。",
-            "4）安装验收：提交安装调试记录，配合完成功能配置验收。",
-            "5）技术验收：按招标文件技术参数逐项核验，并提供相应证明资料。",
+            *training_acceptance_points,
             "",
         ])
 
@@ -1127,47 +1174,33 @@ def _build_cs_sections(
     sections.append(
         BidDocumentSection(
             section_title="八、小微企业声明函",
-            content=_build_cs_template_section(
-                tender_raw,
-                "八、小微企业声明函",
-                "按招标文件原格式保留《中小企业声明函（货物）》；不适用时注明“本项不适用”。",
-            ),
+            content=_build_small_enterprise_declaration_template(tender, packages),
         )
     )
 
     sections.append(
         BidDocumentSection(
             section_title="九、残疾人福利性单位声明函",
-            content=_build_cs_template_section(
-                tender_raw,
-                "九、残疾人福利性单位声明函",
-                "按招标文件原格式保留《残疾人福利性单位声明函》；不适用时注明“本项不适用”。",
-            ),
+            content=_build_disabled_unit_declaration_template(tender, packages),
         )
     )
 
     sections.append(
         BidDocumentSection(
             section_title="十、投标人关联单位的说明",
-            content=_build_cs_template_section(
-                tender_raw,
-                "十、投标人关联单位的说明",
-                """
-说明：投标人应当如实披露与本单位存在下列关联关系的单位名称：
-（1）与投标人单位负责人为同一人的其他单位；
-（2）与投标人存在直接控股、管理关系的其他单位。
-""".strip(),
-            ),
+            content=_build_affiliated_units_statement_template(tender),
         )
     )
 
     sections.append(
         BidDocumentSection(
             section_title="十一、资格承诺函",
-            content=_build_cs_template_section(
-                tender_raw,
-                "十一、资格承诺函",
-                "按招标文件原格式保留《黑龙江省政府采购供应商资格承诺函》及社保缴纳证明材料清单。",
+            content=_normalize_hlj_supplier_qualification_template(
+                _build_cs_template_section(
+                    tender_raw,
+                    "十一、资格承诺函",
+                    _build_hlj_supplier_qualification_commitment_template(),
+                )
             ),
         )
     )

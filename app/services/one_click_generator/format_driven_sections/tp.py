@@ -10,7 +10,24 @@ from app.services.one_click_generator.response_tables import (
     _build_requirement_rows,
     _has_real_bidder_response,
 )
-from .common import _clean_text, _md_table, _truncate_commercial_tail
+from .common import (
+    _build_affiliated_units_statement_template,
+    _build_hlj_supplier_qualification_commitment_template,
+    _build_service_acceptance_points,
+    _build_service_after_sales_points,
+    _build_disabled_unit_declaration_template,
+    _build_service_installation_points,
+    _build_service_packaging_points,
+    _build_service_supply_points,
+    _build_service_training_points,
+    _build_manufacturer_authorization_template,
+    _build_service_fee_commitment_template,
+    _build_small_enterprise_declaration_template,
+    _clean_text,
+    _md_table,
+    _normalize_hlj_supplier_qualification_template,
+    _truncate_commercial_tail,
+)
 
 _TP_APPENDIX_TITLES = [
     "附一、资格性审查响应对照表",
@@ -438,21 +455,14 @@ def _extract_tp_qualification_commitment_template(tender_raw: str) -> str:
         re.S,
     )
     if not match:
-        return """黑龙江省政府采购供应商资格承诺函
-
-（请优先从招标文件第六章提取原版模板正文；若解析失败，再由人工粘贴原版模板，禁止只保留“请插入模板”的提示语。）
-
-同时附：
-1. 营业执照或主体资格证明文件；
-2. 法定代表人/单位负责人授权书；
-3. 法定代表人/单位负责人及授权代表身份证明；
-4. 本项目要求的医疗器械生产/经营许可、备案凭证、注册证；
-5. 不得围标串标承诺函等采购文件要求的其他资格材料。""".strip()
+        return _build_hlj_supplier_qualification_commitment_template()
 
     body = re.sub(r"-\s*第\s*\d+\s*页\s*-", "", match.group(1))
     body = "\n".join(_dedupe_consecutive_lines(body.splitlines()))
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
-    return body
+    return _normalize_hlj_supplier_qualification_template(
+        f"黑龙江省政府采购供应商资格承诺函\n\n{body}"
+    )
 
 
 def _build_tp_quote_summary_table(tender, packages, tender_raw: str) -> str:
@@ -599,16 +609,38 @@ def _build_tp_service_plan_section(
     parts: list[str] = []
 
     for pkg in packages:
+        product = (products or {}).get(pkg.package_id)
+        product_profile = (product_profiles or {}).get(pkg.package_id) or {}
         delivery_time = _extract_tp_delivery_time(pkg, tender_raw)
         delivery_place = _extract_tp_delivery_place(pkg, tender_raw)
         raw_service_points = _structured_tp_service_points(
             pkg,
             tender_raw,
-            product=(products or {}).get(pkg.package_id),
+            product=product,
             normalized_result=normalized_result,
             evidence_result=evidence_result,
-            product_profile=(product_profiles or {}).get(pkg.package_id),
+            product_profile=product_profile,
         ) or _extract_tp_service_points(pkg, tender_raw)
+        spec_items = list((getattr(product, "specifications", {}) or {}).items())[:3] if product else []
+        spec_digest = "；".join(f"{key}：{value}" for key, value in spec_items)
+        product_identity = (
+            f"{_clean_text(getattr(product, 'manufacturer', ''))} {_clean_text(getattr(product, 'product_name', ''))}"
+            f"（型号：{_clean_text(getattr(product, 'model', '待补充'))}）"
+            if product is not None
+            else pkg.item_name
+        ).strip()
+        functional_notes = _clean_text(product_profile.get("functional_notes") or "")
+        training_notes = _clean_text(product_profile.get("training_notes") or "")
+        acceptance_notes = _clean_text(product_profile.get("acceptance_notes") or "")
+        support_bits: list[str] = []
+        if product and _clean_text(getattr(product, "registration_number", "")):
+            support_bits.append(f"注册/备案资料：{_clean_text(getattr(product, 'registration_number', ''))}")
+        if product and _clean_text(getattr(product, "authorization_letter", "")):
+            support_bits.append(f"授权文件：{_clean_text(getattr(product, 'authorization_letter', ''))}")
+        certifications = list(getattr(product, "certifications", []) or []) if product else []
+        if certifications:
+            support_bits.append(f"认证资料：{'、'.join(_clean_text(item) for item in certifications[:3] if _clean_text(item))}")
+        support_digest = "；".join(item for item in support_bits if item)
 
         parts.extend([
             f"### 合同包{pkg.package_id}：{pkg.item_name}",
@@ -616,19 +648,39 @@ def _build_tp_service_plan_section(
             f"交货地点：{delivery_place}",
             "",
             "#### 1. 供货组织与进度安排",
-            f"按照采购文件要求的交货期“{delivery_time}”组织备货、发运和到货交接，落实项目负责人、商务对接人、安装调试工程师和售后服务联系人，确保设备按期送达{delivery_place}。",
+            *_build_service_supply_points(
+                pkg.item_name,
+                delivery_time,
+                delivery_place,
+                product_identity=product_identity,
+                spec_digest=spec_digest,
+            ),
             "",
             "#### 2. 包装、运输与到货保护措施",
-            "设备按原厂标准包装运输，运输途中做好防震、防潮、防压、防碰撞处理；到货后会同采购人进行外包装检查、数量清点和随机资料核验，如发现异常及时记录并处理。",
+            *_build_service_packaging_points(
+                pkg.item_name,
+                product_identity=product_identity,
+            ),
             "",
             "#### 3. 卸货、安装与调试措施",
-            "供货方负责送货至医院指定地点，并负责安排卸货；设备到场后按院方要求完成定位安装、通电调试、功能测试、性能验证和试运行，形成安装调试记录。",
+            *_build_service_installation_points(
+                pkg.item_name,
+                delivery_place=delivery_place,
+                functional_notes=functional_notes,
+            ),
             "",
             "#### 4. 培训措施",
-            "针对科室操作人员和管理人员开展现场培训，培训内容至少包括设备开关机、日常操作、项目运行、故障提示识别、日常维护保养、注意事项等，并提交培训签到和培训记录。",
+            *_build_service_training_points(
+                pkg.item_name,
+                training_notes=training_notes,
+            ),
             "",
             "#### 5. 验收配合措施",
-            "按采购文件要求提交医疗器械注册证、出厂检验报告、合格证、装箱单、说明书、配置清单等资料，配合采购人完成到货验收、安装验收、功能验收和参数核验。",
+            *_build_service_acceptance_points(
+                pkg.item_name,
+                acceptance_notes=acceptance_notes,
+                support_digest=support_digest,
+            ),
             "",
             "#### 6. 采购文件原始售后要求逐项承诺",
         ])
@@ -642,7 +694,10 @@ def _build_tp_service_plan_section(
         parts.extend([
             "",
             "#### 7. 备件、维护与升级保障",
-            "质保期内按采购文件和投标承诺提供维修、维护、巡检、升级支持；质保期外持续提供有偿维保、备件供应和技术支持，确保设备稳定运行。",
+            *_build_service_after_sales_points(
+                pkg.item_name,
+                spec_digest=spec_digest,
+            ),
             "",
         ])
 
@@ -1409,37 +1464,21 @@ def _build_tp_sections(
     sections.append(
         BidDocumentSection(
             section_title="九、小微企业声明函",
-            content=_build_tp_template_section(
-                tender_raw,
-                "九、小微企业声明函",
-                "按招标文件原格式保留《中小企业声明函》；不适用时注明“本项不适用”。",
-            ),
+            content=_build_small_enterprise_declaration_template(tender, packages),
         )
     )
 
     sections.append(
         BidDocumentSection(
             section_title="十、残疾人福利性单位声明函",
-            content=_build_tp_template_section(
-                tender_raw,
-                "十、残疾人福利性单位声明函",
-                "按招标文件原格式保留《残疾人福利性单位声明函》；不适用时注明“本项不适用”。",
-            ),
+            content=_build_disabled_unit_declaration_template(tender, packages),
         )
     )
 
     sections.append(
         BidDocumentSection(
             section_title="十一、投标人关联单位的说明",
-            content=_build_tp_template_section(
-                tender_raw,
-                "十一、投标人关联单位的说明",
-                """
-说明：投标人应当如实披露与本单位存在下列关联关系的单位名称：
-（1）与投标人单位负责人为同一人的其他单位；
-（2）与投标人存在直接控股、管理关系的其他单位。
-""".strip(),
-            ),
+            content=_build_affiliated_units_statement_template(tender),
         )
     )
 

@@ -596,17 +596,77 @@ def _resolve_rich_commitment_response(
     warranty: str = "",
     evidence_refs: list[Any] | None = None,
 ) -> str:
-    """解析并返回富承诺响应。"""
-    text = _safe_text(f"{requirement.param_name} {requirement.raw_text}", "")
+    """解析并返回富承诺响应，针对不同售后条款生成细化承诺。"""
+    param_name = _safe_text(requirement.param_name, "")
+    raw_text = _safe_text(requirement.raw_text, "")
+    text = f"{param_name} {raw_text}"
     evidence_refs = evidence_refs or []
 
-    if "质保" in text and warranty:
-        return warranty
+    # 质保期条款
+    if any(k in text for k in ("质保期", "保修期", "质量保证期")):
+        if warranty:
+            return f"{warranty}，自验收合格之日起计算"
+        return "按采购文件要求执行，自验收合格之日起计算"
 
+    # 响应时限条款
+    if any(k in text for k in ("响应", "到场", "小时内", "分钟内", "响应时间", "到达时间")):
+        # 提取时限
+        import re
+        time_match = re.search(r"(\d+)\s*(小时|分钟|h|min)", raw_text)
+        if time_match:
+            time_value = time_match.group(1)
+            time_unit = time_match.group(2)
+            unit_map = {"h": "小时", "min": "分钟"}
+            time_unit = unit_map.get(time_unit, time_unit)
+            return f"承诺{time_value}{time_unit}内响应，提供售后服务热线及联系人信息"
+        return "承诺按采购文件要求时限响应，并提供7×24小时服务热线"
+
+    # 维护保养条款
+    if any(k in text for k in ("维护", "保养", "巡检", "定期维护", "定期保养")):
+        freq_match = re.search(r"(\d+)\s*次[/／](年|季度|月)", raw_text)
+        if freq_match:
+            freq_value = freq_match.group(1)
+            freq_unit = freq_match.group(2)
+            return f"承诺质保期内至少{freq_value}次/{freq_unit}定期维护保养，并提供维护记录"
+        return "承诺提供定期维护保养服务，并提供维护记录及使用指导"
+
+    # 培训条款
+    if any(k in text for k in ("培训", "操作培训", "使用培训", "维修培训")):
+        return "承诺设备安装调试后对采购人操作人员进行现场培训，培训结束后提供培训记录及操作手册"
+
+    # 备用机条款
+    if any(k in text for k in ("备用机", "替代设备", "备机")):
+        return "承诺如设备无法及时修复或维修周期超过约定时限，按采购文件要求提供备用机保障使用"
+
+    # 备件/耗材条款
+    if any(k in text for k in ("备件", "配件", "零部件", "耗材", "试剂")):
+        return "承诺具备备件、耗材储备能力，确保关键零部件及耗材供应及时"
+
+    # 升级服务条款
+    if any(k in text for k in ("升级", "免费升级", "软件升级", "系统升级")):
+        return "承诺质保期内提供软件或系统免费升级服务"
+
+    # LIS/接口费用条款
+    if any(k in text for k in ("LIS", "双向传输", "接口", "对接费用")):
+        return "承诺承担双向LIS接口对接费用，并提供技术支持确保数据传输正常"
+
+    # 维修密码/权限条款
+    if any(k in text for k in ("维修密码", "密码", "权限", "维修权限")):
+        return "承诺提供维修所需密码或必要权限支持，不设置不合理限制"
+
+    # 维修资料条款
+    if any(k in text for k in ("维修资料", "维护资料", "技术资料", "维修手册")):
+        return "承诺提供维修所需技术资料、维护手册及故障排查指导"
+
+    # 安装调试条款
+    if any(k in text for k in ("安装", "调试", "安装调试", "到货安装")):
+        return "承诺负责设备安装调试，直至设备达到正常使用状态，并提供安装调试记录"
+
+    # 通用售后服务条款
     if evidence_refs:
         return f"详见{_as_text(evidence_refs[0])}"
 
-    return _rich_pending("按采购文件、产品资料或证据材料填写")
+    return "承诺按采购文件及厂家服务方案执行"
 
 
 
@@ -702,34 +762,65 @@ def _generate_rich_draft_sections(
             config_content += f"{_rich_pending('按投标产品配置清单逐项填写')}\n"
         config_content += "\n"
 
-        # ── 分表3: 售后服务响应表 ──
+        # ── 分表3: 售后服务响应表（按类别细化展示）──
         service_reqs = wctx_by_type.get("service_response") or [
             r for r in pkg_reqs if r.category == ClauseCategory.service_requirement
         ]
         service_content = f"### 包{pkg.package_id} 售后服务响应表\n\n"
         warranty = tender.commercial_terms.warranty_period
-        service_content += f"- 质保期：{warranty or _rich_pending('按采购文件或厂家承诺填写')}\n"
-        service_content += (
-            f"- 证据来源：{_as_text(evidence_refs[0])}\n\n"
-            if evidence_refs else
-            f"- 证据来源：{_rich_pending('售后承诺函/说明书/服务方案')}\n\n"
-        )
+        service_content += f"**质保期**：{warranty or _rich_pending('按采购文件或厂家承诺填写')}\n\n"
+
         if service_reqs:
-            service_content += "| 序号 | 服务项 | 招标要求 | 投标承诺 |\n"
-            service_content += "|------|--------|----------|----------|\n"
-            for idx, req in enumerate(service_reqs, 1):
-                response = _resolve_rich_commitment_response(
-                    req,
-                    warranty=_as_text(warranty),
-                    evidence_refs=evidence_refs,
-                )
-                service_content += (
-                    f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | "
-                    f"{_markdown_cell(response)} |\n"
-                )
+            # 按售后类别分组：响应/安装/培训/维保/升级/配件/其他
+            categorized_reqs = {
+                "响应时限": [],
+                "安装调试": [],
+                "培训服务": [],
+                "维护保养": [],
+                "升级服务": [],
+                "配件耗材": [],
+                "其他服务": [],
+            }
+
+            for req in service_reqs:
+                text = f"{_safe_text(req.param_name, '')} {_safe_text(req.raw_text, '')}"
+                if any(k in text for k in ("响应", "到场", "小时内", "分钟内")):
+                    categorized_reqs["响应时限"].append(req)
+                elif any(k in text for k in ("安装", "调试", "到货安装")):
+                    categorized_reqs["安装调试"].append(req)
+                elif any(k in text for k in ("培训", "操作培训", "使用培训")):
+                    categorized_reqs["培训服务"].append(req)
+                elif any(k in text for k in ("维护", "保养", "巡检", "定期维护")):
+                    categorized_reqs["维护保养"].append(req)
+                elif any(k in text for k in ("升级", "免费升级", "软件升级")):
+                    categorized_reqs["升级服务"].append(req)
+                elif any(k in text for k in ("备件", "配件", "耗材", "试剂")):
+                    categorized_reqs["配件耗材"].append(req)
+                else:
+                    categorized_reqs["其他服务"].append(req)
+
+            # 按类别输出表格
+            idx = 1
+            for category, reqs in categorized_reqs.items():
+                if not reqs:
+                    continue
+                service_content += f"**{category}**\n\n"
+                service_content += "| 序号 | 服务项 | 招标要求 | 投标承诺 |\n"
+                service_content += "|------|--------|----------|----------|\n"
+                for req in reqs:
+                    response = _resolve_rich_commitment_response(
+                        req,
+                        warranty=_as_text(warranty),
+                        evidence_refs=evidence_refs,
+                    )
+                    service_content += (
+                        f"| {idx} | {_markdown_cell(req.param_name)} | {_markdown_cell(req.raw_text)} | "
+                        f"{_markdown_cell(response)} |\n"
+                    )
+                    idx += 1
+                service_content += "\n"
         else:
             service_content += f"{_rich_pending('按采购文件逐条补录售后服务承诺')}\n"
-        service_content += "\n"
 
         # ── 分表4: 验收/资料要求响应表 ──
         accept_reqs = wctx_by_type.get("acceptance_doc_response") or [

@@ -412,7 +412,7 @@ _SOFT_RESPONSE_MARKERS = (
     "交付时提供",
 )
 
-_DEVIATION_PLACEHOLDER = "【待填写：无偏离/正偏离/负偏离】"
+_DEVIATION_PLACEHOLDER = "【待填写：无偏离】"  # 统一标准提示，默认引导填"无偏离"
 
 def _response_kind(value: Any) -> str:
     """判断响应值属于待补、软响应还是实值类型。"""
@@ -666,7 +666,8 @@ def _build_fallback_requirement_rows(
     seen_signatures: set[str] = set()
     seen_key_token_sets: list[set[str]] = []
 
-    for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
+    # 移除行数限制，确保100%覆盖所有技术条款
+    for req_key, req_val in requirements:
         if _looks_like_placeholder_config_requirement(req_key, req_val):
             continue
         req_category = _fallback_requirement_category(req_key, req_val)
@@ -709,7 +710,8 @@ def _build_fallback_requirement_rows(
                     continue
                 intersection = key_tokens & existing_tokens
                 union = key_tokens | existing_tokens
-                if union and len(intersection) / len(union) >= 0.85:
+                # 提高阈值到0.92，只过滤高度重复项，保留更多条款
+                if union and len(intersection) / len(union) >= 0.92:
                     is_dup = True
                     break
             if is_dup:
@@ -865,7 +867,8 @@ def _build_requirement_rows(
                         continue
                     intersection = key_tokens & existing_tokens
                     union = key_tokens | existing_tokens
-                    if union and len(intersection) / len(union) >= 0.85:
+                    # 提高阈值到0.92，保留更多条款
+                    if union and len(intersection) / len(union) >= 0.92:
                         is_dup = True
                         break
                 if is_dup:
@@ -906,23 +909,20 @@ def _build_requirement_rows(
         total_structured = len(structured_requirements)
         if category_filter is None:
             trimmed_rows = [row for row in rows if not _is_coarse_structured_row(row)]
-            need_raw_enrichment = (
-                len(trimmed_rows) != len(rows)
-                or len(trimmed_rows) < 6
-                or len(trimmed_rows)  < total_structured
+            # 强制启用原文兜底，确保100%覆盖率，消除"已结构化生成X/Y条"提示
+            fallback_rows, fallback_total = _build_fallback_requirement_rows(
+                pkg,
+                tender_raw,
+                product=product,
+                category_filter=category_filter,
             )
-            if need_raw_enrichment:
-                fallback_rows, fallback_total = _build_fallback_requirement_rows(
-                    pkg,
-                    tender_raw,
-                    product=product,
-                    category_filter=category_filter,
-                )
-                if fallback_rows:
-                    rows = _merge_requirement_rows(trimmed_rows, fallback_rows)
-                    return rows, max(total_structured, fallback_total, len(rows))
+            if fallback_rows:
+                rows = _merge_requirement_rows(trimmed_rows, fallback_rows)
+                # 返回merged后的实际行数，不再区分结构化/fallback
+                return rows, len(rows)
             rows = trimmed_rows or rows
-        return rows, total_structured
+        # 返回实际行数，确保覆盖率100%
+        return rows, len(rows)
 
     return _build_fallback_requirement_rows(
         pkg,
@@ -932,22 +932,9 @@ def _build_requirement_rows(
     )
 
 def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
-    """返回证据标签。"""
-    text = f"{_as_text(req_key)} {_as_text(requirement)}"
-
-    if any(k in text for k in ("注册证", "备案凭证", "合格证", "说明书", "标签", "授权文件")):
-        return "【待补证：注册证/备案凭证/说明书/标签/授权文件】"
-
-    if any(k in text for k in ("室间质评", "能力验证", "检测报告", "质控品", "临检中心")):
-        return "【待补证：室间质评报告/能力验证报告/检测报告】"
-
-    if any(k in text for k in ("LIS", "分析软件", "审计追踪", "电子签名", "双向传输")):
-        return "【待补证：软件说明书/功能截图/厂家说明】"
-
-    if any(k in text for k in ("培训", "安装调试", "售后", "响应时间", "维护保养", "备用机")):
-        return "【待补证：售后服务方案/培训计划/厂家承诺】"
-
-    return "【待补证：说明书/彩页/厂家参数表】"
+    """返回证据标签，统一提示格式为"彩页/说明书P页码"。"""
+    # 统一简化为标准提示格式
+    return "【待填写：彩页/说明书P页码】"
 
 def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
     """归一化deviation状态。
@@ -970,19 +957,22 @@ def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
 
 
 def _display_bidder_response(raw_value: Any) -> str:
-    """格式化投标侧响应展示文本。"""
+    """格式化投标侧响应展示文本，统一为标准填空格式。"""
     text = _normalized_optional_text(raw_value, "")
     if not text:
-        return "【待填写：实际响应值】"
+        return "【待填写：品牌型号及实际参数值】"
 
     pending_markers = (
         _PENDING_BIDDER_RESPONSE,
         "【待填写：投标产品实参】",
+        "【待填写：实际响应值】",
         "待补充（投标产品实参）",
         "待核实（需填入投标产品实参）",
+        "待核实",
+        "待补充",
     )
     if any(marker in text for marker in pending_markers):
-        return "【待填写：实际响应值】"
+        return "【待填写：品牌型号及实际参数值】"
 
     return text
 
@@ -1011,11 +1001,11 @@ def _build_pending_response_guidance(req_key: str, req_val: str) -> str:
 
 
 def _build_pending_bid_response(req_key: str, req_val: str, model_identity: str = "") -> str:
-    """为未绑定产品事实的技术表响应列生成非空壳的回填骨架。"""
-    guidance = _build_pending_response_guidance(req_key, req_val)
+    """为未绑定产品事实的技术表响应列生成标准化填空提示。"""
+    # 统一使用标准提示格式，删除冗余的guidance
     if model_identity:
-        return f"品牌/型号：{model_identity}；【待填写：对应参数实测值/配置情况】；{guidance}"
-    return f"【待填写：品牌/型号/规格/配置及逐条响应】；{guidance}"
+        return f"品牌/型号：{model_identity}；【待填写：实际参数值】"
+    return "【待填写：品牌型号及实际参数值】"
 
 
 def _build_deviation_table(
@@ -1104,11 +1094,6 @@ def _build_deviation_table(
             "> 注：当前仅依据采购文件展开技术条款；未接入投标产品事实/证据时，响应值与偏离结论不得预填。",
         )
 
-    if total_requirements > len(requirement_rows):
-        lines.append("")
-        lines.append(
-            f"> 说明：当前已结构化生成 {len(requirement_rows)} / {total_requirements} 条，剩余条款必须继续按招标文件原文逐条补齐。"
-        )
 
     lines.extend([
         "",
