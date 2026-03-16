@@ -8,5 +8,5 @@ data/
 *.db
 .DS_Store
 tests
-.venv-test
-textfile
+.venv-test/
+textfile/
