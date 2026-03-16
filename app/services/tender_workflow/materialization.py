@@ -792,16 +792,26 @@ def _maybe_rebuild_section_content(
     tender: TenderDocument,
     products: dict[str, ProductSpecification],
     evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """返回rebuild章节内容。"""
     title = _safe_text(section.section_title)
     content = _safe_text(section.content)
     if "技术偏离及详细配置明细表" in title or "技术偏离及详细配置明细表" in content:
-        if products and _coarse_technical_section(content):
-            return _build_materialized_technical_section(tender, products, evidence_result)
-    if "技术服务和售后服务的内容及措施" in title and products:
-        return _build_materialized_service_section(tender, products)
-    return ""
+        if (products or product_profiles) and _coarse_technical_section(content):
+            return _build_materialized_technical_section(
+                tender,
+                products,
+                evidence_result,
+                product_profiles=product_profiles,
+            )
+
+    if "技术服务和售后服务的内容及措施" in title and (products or product_profiles):
+        return _build_materialized_service_section(
+            tender,
+            products,
+            product_profiles=product_profiles,
+        )
 
 
 def _find_review_match(
@@ -1074,6 +1084,7 @@ def _materialize_section_content(
     company: CompanyProfile | None,
     products: dict[str, ProductSpecification],
     evidence_result: dict[str, Any] | None = None,
+    product_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[BidDocumentSection, bool]:
     """实装章节内容。"""
     content = section.content
@@ -1113,6 +1124,7 @@ def _materialize_section_content(
         tender,
         products,
         evidence_result=evidence_result,
+        product_profiles=product_profiles,
     )
     was_rebuilt = bool(rebuilt_content)
     if rebuilt_content:
@@ -1202,10 +1214,16 @@ def _materialize_section_content(
                         parameter_name = parameter_cell.split("：", 1)[0].strip()
                         requirement_value = parameter_cell
                     match = _find_technical_match(evidence_result, row_package_id, parameter_name)
-                    response_value = _resolve_materialized_response_value(product, match, parameter_name)
+                    profile = _profile_for_package(row_package_id, product_profiles)
+                    package_facts = (profile or {}).get("technical_specs") if isinstance(profile, dict) else None
+                    response_value = _resolve_materialized_response_value(
+                        product,
+                        match,
+                        parameter_name,
+                        package_facts=package_facts,
+                    )
                     evaluation = _evaluate_requirement_response(requirement_value, response_value)
 
-                    # Fill model column for 8-column format
                     if product and 0 <= model_idx < len(cells):
                         p_model = _safe_text(product.model) or _safe_text(product.product_name)
                         if p_model and (not cells[model_idx].strip() or cells[model_idx].strip() == "[待填写]"):
@@ -1503,6 +1521,7 @@ def _materialize_sections(
             company,
             products,
             evidence_result=evidence_result,
+            product_profiles=product_profiles,
         )
         materialized.append(updated)
         if changed:

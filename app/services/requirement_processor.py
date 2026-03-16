@@ -665,7 +665,7 @@ def _flatten_requirements(pkg: ProcurementPackage) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
     for key, value in pkg.technical_requirements.items():
         k = _safe_text(str(key), "技术参数")
-        raw_value = _as_text(value) or "详见招标文件"
+        raw_value = _clean_atomic_value(_as_text(value))
         if not raw_value:
             continue
         v = _clean_requirement_value(k, raw_value)
@@ -673,7 +673,6 @@ def _flatten_requirements(pkg: ProcurementPackage) -> list[tuple[str, str]]:
             continue
         items.extend(_expand_requirement_entry(k, v))
     return _dedupe_requirement_pairs(items)
-
 
 def _is_sparse_technical_requirements(pkg: ProcurementPackage) -> bool:
     """判断采购包技术参数是否稀疏，阈值从 2 降至 5 以触发更多原文回提。"""
@@ -795,21 +794,15 @@ def _extract_requirements_from_raw(pkg: ProcurementPackage, tender_raw: str) -> 
 
 
 def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
-    """将复合技术要求拆分成原子级条款。
-
-    规则：
-    - 一个句子里有多个参数（用、或；分隔），拆成多条
-    - "技术参数总括"这种合并项不允许进入最终技术偏离表
-    - 拆后必须语义完整：不允许半截条目名（括号未闭合、过短无意义）进入最终主表
-    """
-    # 跳过总括性/通用项
+    """将复合技术要求拆分成原子级条款。"""
     _GENERIC_SUMMARY_KEYS = ("技术参数总括", "技术参数汇总", "技术要求总述", "整体要求", "总体要求", "参数一览")
     if any(gk in key for gk in _GENERIC_SUMMARY_KEYS):
         return []
 
-    normalized_val = _as_text(value)
+    normalized_val = _clean_atomic_value(_as_text(value))
     if not normalized_val:
         return []
+
     short_keep_values = {"是", "否", "有", "无", "提供", "具备", "支持"}
     if (
         len(normalized_val) < 4
@@ -820,7 +813,6 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
     ):
         return []
 
-    # 检测是否含多个参数（用、；分隔，且每段含数值或技术关键词）
     raw_segments = [seg.strip() for seg in re.split(r"[；;]", normalized_val) if seg.strip()]
     segments: list[str] = []
     for seg in raw_segments:
@@ -828,36 +820,33 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
             segments[-1] = f"{segments[-1]}；{seg}"
             continue
         segments.append(seg)
+
     if len(segments) <= 1:
-        # 尝试用、分隔 — 阈值降至2段，且只需大多数含技术内容即可
         sub_segments = re.split(r"、", normalized_val)
         tech_count = sum(
             1 for seg in sub_segments
-            if any(m in seg for m in _HARD_REQUIREMENT_MARKERS) or re.search(r"\d", seg)
+            if any(m in seg for m in _HARD_REQUIREMENT_MARKERS)
+            or re.search(r"\d", seg)
             or _contains_any(seg, _TECH_KEYWORDS)
         )
         if len(sub_segments) >= 2 and tech_count >= len(sub_segments) * 0.6:
-            segments = sub_segments
+            segments = [s.strip() for s in sub_segments if _clean_atomic_value(s)]
 
-    if len(segments) <= 1:
-        return [(key, normalized_val)]
+    if not segments:
+        return []
 
-    # 拆分成原子条款
     results: list[tuple[str, str]] = []
     for idx, segment in enumerate(segments, start=1):
-        seg = segment.strip()
+        seg = _clean_atomic_value(segment)
         if not seg or len(seg) < 3:
             continue
-        # 语义完整性检查：拆后条目必须 >= 6 字或含数值/硬标记才允许入表
         if len(seg) < 6 and not any(m in seg for m in _HARD_REQUIREMENT_MARKERS) and not re.search(r"\d", seg):
             continue
-        # 半截条目名检查：括号未闭合则回合到父级
         if _is_truncated_name(seg):
             continue
-        # 尝试从 segment 中提取 sub_key:sub_val
+
         pair = _extract_requirement_pair(seg)
         if pair:
-            # 再次检查拆后 key 的完整性
             sub_key, sub_val = pair
             if _is_truncated_name(sub_key):
                 continue
@@ -867,7 +856,6 @@ def _atomize_requirement(key: str, value: str) -> list[tuple[str, str]]:
             results.append((sub_key, seg))
 
     return results if results else [(key, normalized_val)]
-
 
 def _is_truncated_name(name: str) -> bool:
     """检测条目名是否为半截（括号未闭合、自引用、以冒号/介词结尾等）。"""

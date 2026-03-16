@@ -545,6 +545,7 @@ def _structured_tp_service_points(
     """从结构化需求中组装 TP 服务要点。"""
     if not normalized_result:
         return []
+
     rows, _ = _build_requirement_rows(
         pkg,
         tender_raw,
@@ -554,22 +555,16 @@ def _structured_tp_service_points(
         product_profile=product_profile,
         category_filter="service_requirement",
     )
+
     points: list[str] = []
+    seen: set[str] = set()
+
     for row in rows:
         key = _clean_text(row.get("key") or "")
         requirement = _clean_text(row.get("requirement") or "")
         if not key and not requirement:
             continue
-        combined = f"{key} {requirement}".strip()
-        if not _is_tp_service_or_acceptance_clause(combined):
-            continue
-        if _looks_like_pure_technical_clause(combined):
-            continue
-        response = _clean_text(row.get("response") or "")
-        if response and _has_real_bidder_response(response):
-            points.append(f"{key}：{requirement}；我方响应：{response}".strip("："))
-        else:
-            points.append(f"{key}：{requirement}".strip("："))
+
         combined = _slice_service_tail(f"{key} {requirement}".strip())
         if not combined:
             continue
@@ -577,6 +572,17 @@ def _structured_tp_service_points(
             continue
         if _looks_like_pure_technical_clause(combined):
             continue
+
+        response = _clean_text(row.get("response") or "")
+        if response and _has_real_bidder_response(response):
+            point = f"{key}：{requirement}；我方响应：{response}".strip("：")
+        else:
+            point = f"{key}：{requirement}".strip("：")
+
+        if point not in seen:
+            seen.add(point)
+            points.append(point)
+
     return points
 
 

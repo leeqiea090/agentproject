@@ -585,4 +585,5 @@ def generate_bid_sections(
         regression_metrics=metrics,
         draft_level=draft_level,
         document_mode=doc_mode,
+        product_profiles=profile_payload,
     )

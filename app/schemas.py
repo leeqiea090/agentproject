@@ -296,13 +296,13 @@ class RegressionMetrics(BaseModel):
 
 
 class BidGenerationResult(BaseModel):
-    """投标生成完整结果 — 包含章节、校验门和回归指标。"""
+    """投标生成完整结果 — 包含章节、校验门、回归指标和产品画像。"""
     sections: list[BidDocumentSection] = Field(default_factory=list, description="文档章节列表")
     validation_gate: ValidationGate = Field(default_factory=ValidationGate, description="硬校验门结果")
     regression_metrics: RegressionMetrics = Field(default_factory=RegressionMetrics, description="回归指标")
     draft_level: DraftLevel = Field(default=DraftLevel.internal_draft, description="稿件等级")
     document_mode: DocumentMode = Field(default=DocumentMode.single_package_deep_draft, description="文档模式")
-
+    product_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict, description="按包号聚合的产品画像")
 
 class IngestTextRequest(BaseModel):
     text: str = Field(..., min_length=1, description="待导入的原始文本内容")
