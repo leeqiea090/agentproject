@@ -1336,7 +1336,7 @@ class TenderParser:
 
     @staticmethod
     def extract_text_from_pdf(pdf_path: str | Path) -> str:
-        """从PDF文件中提取文本"""
+        """从PDF文件中提取文本，并对碎片化换行进行归一化拼接。"""
         try:
             with open(pdf_path, 'rb') as file:
                 pdf_reader = pypdf.PdfReader(file)
@@ -1345,10 +1345,110 @@ class TenderParser:
                     text += page.extract_text() + "\n"
 
                 logger.info(f"成功从PDF提取文本，共 {len(text)} 字符")
+                text = TenderParser._normalize_pdf_text(text)
                 return text
         except Exception as e:
             logger.error(f"PDF文本提取失败: {str(e)}")
             raise ValueError(f"无法读取PDF文件: {str(e)}")
+
+    @staticmethod
+    def _normalize_pdf_text(text: str) -> str:
+        """归一化 PDF 提取文本：合并被碎片化换行拆断的行。
+
+        PDF 排版经常将一句话拆成多行短片段，例如：
+            □\n企业\n□\n事业单位
+        需要将它们重新拼接为连续文本。
+        """
+        if not text:
+            return text
+        # 去除页码标记
+        text = re.sub(r"-\s*第?\s*\d+\s*页?\s*-", "\n", text)
+        # 去除零宽字符
+        text = re.sub(r"[\u200b\ufeff\u00a0]+", " ", text)
+
+        lines = text.split("\n")
+        merged: list[str] = []
+        buf = ""
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                # 空行：刷出缓冲区
+                if buf:
+                    merged.append(buf)
+                    buf = ""
+                merged.append("")
+                continue
+
+            # 判断当前行是否为"结构性标题"——不应与前行合并
+            is_structural = bool(re.match(
+                r"^(?:"
+                r"第[一二三四五六七八九十百]+(?:章|节|部分|条)"
+                r"|[一二三四五六七八九十百]+\s*[、.]"
+                r"|(?:（|[(])\s*[一二三四五六七八九十\d]+\s*(?:）|[)])"
+                r"|\d+(?:\.\d+)*\s*[、.]"
+                r"|[★▲■●※]"
+                r"|附[一二三四五六七八九十\d]"
+                r"|#+\s"
+                r"|\|"   # markdown table row
+                r")",
+                stripped,
+            ))
+
+            # 如果当前行是结构标题，先刷出缓冲
+            if is_structural:
+                if buf:
+                    merged.append(buf)
+                    buf = ""
+                buf = stripped
+                continue
+
+            # 短片段（≤6字符且不以句末标点结尾）大概率是 PDF 碎片，拼接到缓冲
+            is_fragment = (
+                len(stripped) <= 6
+                and not stripped.endswith(("。", "；", "：", ".", ";", ":", "）", ")"))
+                and not re.fullmatch(r"\d+", stripped)
+            )
+
+            if buf:
+                # 如果上一行末尾是中文且当前行开头也是中文，直接拼接无空格
+                if buf and stripped:
+                    last_char = buf[-1]
+                    first_char = stripped[0]
+                    is_cjk_last = "\u4e00" <= last_char <= "\u9fff" or last_char in "\uff0c\u3002\uff1b\uff1a\u3001\uff09\u3011\u300d\u300b\u2019\u201d\u25a1\u2611\u2610"
+                    is_cjk_first = "\u4e00" <= first_char <= "\u9fff" or first_char in "\uff08\u3010\u300c\u300a\u2018\u201c\u25a1\u2611\u2610"
+                    if is_fragment or (is_cjk_last and is_cjk_first):
+                        buf += stripped
+                    elif is_cjk_last or is_cjk_first:
+                        buf += stripped
+                    else:
+                        buf += " " + stripped
+                else:
+                    buf += stripped
+            else:
+                buf = stripped
+
+            # 如果行以句末标点结束，刷出缓冲
+            if buf.endswith(("。", "；", ".", ";")) and not is_fragment:
+                merged.append(buf)
+                buf = ""
+
+        if buf:
+            merged.append(buf)
+
+        # 去除连续空行
+        result: list[str] = []
+        prev_empty = False
+        for line in merged:
+            if not line.strip():
+                if prev_empty:
+                    continue
+                prev_empty = True
+            else:
+                prev_empty = False
+            result.append(line)
+
+        return "\n".join(result)
 
     @staticmethod
     def extract_text_from_docx(docx_path: str | Path) -> str:

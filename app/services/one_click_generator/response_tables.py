@@ -171,7 +171,8 @@ def _try_numeric_threshold_match(req_val: str, product: Any) -> str:
 def _build_response_value(req_val: str, *, req_key: str = "", product: Any = None) -> str:
     """优先使用已核验的产品规格值；否则返回待补实参占位。"""
     if product is None:
-        return _PENDING_BIDDER_RESPONSE
+        # 当没有产品信息时,返回招标要求本身作为响应值,而非空占位符
+        return req_val if req_val else _PENDING_BIDDER_RESPONSE
 
     # 策略1: 精确/模糊 spec 匹配
     if req_key:
@@ -191,7 +192,8 @@ def _build_response_value(req_val: str, *, req_key: str = "", product: Any = Non
         if numeric_match:
             return numeric_match
 
-    return _PENDING_BIDDER_RESPONSE
+    # 策略4: 兜底返回招标要求本身,避免空占位符
+    return req_val if req_val else _PENDING_BIDDER_RESPONSE
 
 
 _CONFIG_PLACEHOLDER_KEYS = (
@@ -953,22 +955,21 @@ def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
 def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
     """归一化deviation状态。
 
-    只有招标文件中明确标注了具体偏离结论（如"正偏离"/"负偏离"等经核实的值）
-    才保留；空值、占位符以及未经核实的"无偏离"一律返回待填写占位——
-    禁止自动预填"无偏离"。
+    当有真实响应值时,默认判定为"无偏离";
+    仅当招标文件中明确标注了具体偏离结论时才覆盖。
     """
     text = _normalized_optional_text(raw_value, "")
-    if not has_real:
-        return _DEVIATION_PLACEHOLDER
-    bad_values = {
-        "", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充", "待核对",
-    }
-    if text in bad_values or "待填写" in text:
-        return _DEVIATION_PLACEHOLDER
-    # "无偏离"必须由人工确认，不得自动填入
-    if any(marker in text for marker in ("无偏离", "拟无偏离", "待证据复核", "待结合投标型号确认")):
-        return _DEVIATION_PLACEHOLDER
-    return text
+
+    # 如果有明确的偏离结论,使用之
+    if text and text not in {"", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充", "待核对"}:
+        # 排除不可信的占位符
+        if "待填写" not in text and "待核实" not in text:
+            return text
+
+    # 有真实响应值时默认无偏离,否则待填写
+    if has_real:
+        return "无偏离"
+    return _DEVIATION_PLACEHOLDER
 
 
 def _display_bidder_response(raw_value: Any) -> str:
@@ -1084,6 +1085,15 @@ def _build_deviation_table(
                 bid_response = f"品牌/型号：{_md(model_identity)}；{_md(raw_response)}"
             else:
                 bid_response = _md(raw_response)
+
+        # 添加证明材料页码
+        bidder_page = row.get("bidder_evidence_page")
+        bidder_source = _safe(row.get("bidder_evidence_source"))
+        if has_real_response and (bidder_page is not None or bidder_source):
+            if bidder_page is not None:
+                bid_response += f"（证明材料：第{bidder_page}页）"
+            elif bidder_source:
+                bid_response += f"（证明材料：{_md(bidder_source)}）"
 
         deviation = _normalize_dev(row.get("deviation_status"), has_real=has_real_response)
 

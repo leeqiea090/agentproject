@@ -752,7 +752,12 @@ def _extract_configuration_items(
     # Config pollution cleaning — remove non-config items that leaked through boundary detection
     cleaned = _clean_config_items(deduped, pkg.package_id, pkg.item_name)
 
-    # 完全提取不到任何配置时，仅保留一条占位提示，由人工补录。
+    # 完全提取不到任何配置时，尝试从技术条款反推
+    if not cleaned:
+        _derive_config_items_from_technical_requirements(pkg, tender_raw, deduped, _seen_names)
+        cleaned = _clean_config_items(deduped, pkg.package_id, pkg.item_name)
+
+    # 如果仍然提取不到，保留一条占位提示
     if not cleaned:
         cleaned.extend([
             (
