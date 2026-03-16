@@ -414,6 +414,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             company=company,
             products=products,
             evidence_result=evidence_dict,
+            product_profiles=step3_dict.get("product_profiles", {}) if isinstance(step3_dict, dict) else {},
         )
         sections = internal_sections
 

@@ -87,6 +87,13 @@ def _classify_config_item(name: str) -> str:
 
     return "标准附件"
 
+def _looks_like_service_config_noise(name: str, remark: str = "") -> bool:
+    text = f"{_as_text(name)} {_as_text(remark)}"
+    bad_tokens = (
+        "售后", "服务要求", "免费更新", "响应速度", "维护保养",
+        "培训", "安装调试", "验收", "送货", "卸货", "技术服务人员",
+    )
+    return any(token in text for token in bad_tokens)
 
 def _config_dedup_tokens(name: str) -> set[str]:
     """提取配置项名称的 token 集合用于 Jaccard 去重。"""
@@ -871,14 +878,13 @@ def _clean_config_items(
 
 
 def _profile_config_items(product_profile: dict[str, Any] | None) -> list[tuple[str, str, str, str]]:
-    """从产品 profile 提取配置项，覆盖6大类别：
-    核心模块、标准附件、配套软件、初始耗材、随机文件、安装/培训资料
-    """
+    """从产品 profile 提取配置项，并用 technical_specs / evidence_refs 做补强。"""
     if not product_profile:
         return []
 
     structured_items = product_profile.get("config_items") or []
     parsed: list[tuple[str, str, str, str]] = []
+
     for item in structured_items:
         if not isinstance(item, dict):
             continue
@@ -893,32 +899,33 @@ def _profile_config_items(product_profile: dict[str, Any] | None) -> list[tuple[
             remark = f"{remark}；{desc}"
         parsed.append((name, unit, qty, remark))
 
-    # 从 technical_specs 补充可能的配置项（如果 config_items 不够丰富）
     tech_specs = product_profile.get("technical_specs") or {}
     existing_names = {item[0].strip() for item in parsed}
-    _CONFIG_HINT_KEYS = (
+    config_hint_keys = (
         "配置", "配备", "含", "包含", "包括", "标配", "选配", "附件",
         "主机", "模块", "工作站", "软件", "显示器", "打印机", "数据线",
         "电源线", "支架", "台车", "说明书", "合格证", "保修卡", "装箱单",
+        "冷水机", "UPS", "接口模块", "分析软件", "探头", "扫码器",
     )
-    for key, val in tech_specs.items():
-        val_str = str(val)
-        if any(hint in key for hint in _CONFIG_HINT_KEYS) or any(hint in val_str for hint in _CONFIG_HINT_KEYS):
-            if key.strip() not in existing_names:
-                remark = _classify_config_item(key)
-                parsed.append((key, "项", "1", f"{remark}；{val_str}"))
-                existing_names.add(key.strip())
 
-    # 确保覆盖基本类别 — 如果没有随机文件，从 evidence_refs 补充
-    category_present = {_classify_config_item(item[0]) for item in parsed}
+    for key, val in tech_specs.items():
+        key_text = _as_text(key)
+        val_text = _as_text(val)
+        if not key_text:
+            continue
+        if any(hint in key_text for hint in config_hint_keys) or any(hint in val_text for hint in config_hint_keys):
+            if key_text.strip() not in existing_names:
+                parsed.append((key_text, "项", "1", f"{_classify_config_item(key_text)}；{val_text or '待核对'}"))
+                existing_names.add(key_text.strip())
+
     evidence_refs = product_profile.get("evidence_refs") or []
-    if "随机文件" not in category_present:
-        for ref in evidence_refs:
-            if isinstance(ref, dict):
-                file_name = _as_text(ref.get("file_name", ""))
-                if file_name and file_name not in existing_names:
-                    parsed.append((file_name, "份", "1", "随机文件"))
-                    existing_names.add(file_name)
+    for ref in evidence_refs:
+        if not isinstance(ref, dict):
+            continue
+        file_name = _as_text(ref.get("file_name", ""))
+        if file_name and file_name not in existing_names and any(k in file_name for k in ("说明书", "装箱", "配置", "清单", "彩页")):
+            parsed.append((file_name, "份", "1", "随机文件"))
+            existing_names.add(file_name)
 
     return _clean_config_items(parsed)
 
@@ -980,10 +987,21 @@ def _build_configuration_table(
     config_items = _profile_config_items(product_profile)
     if not config_items:
         config_items = _extract_configuration_items(pkg, tender_raw, normalized_result=normalized_result)
+
+    if not config_items:
+        inferred_items: list[tuple[str, str, str, str]] = []
+        for key, value in (pkg.technical_requirements or {}).items():
+            k = _as_text(key)
+            v = _as_text(value)
+            if any(h in f"{k} {v}" for h in
+                   ("模块", "工作站", "软件", "接口", "探头", "系统", "附件", "冷水机", "UPS", "扫码器")):
+                inferred_items.append((k, "项", "1", f"{_classify_config_item(k)}；由招标条款反推，请与装箱清单核对"))
+        config_items = _clean_config_items(inferred_items)
+
     if not config_items and not product_identity_lines:
         lines.extend(
             [
-                f"| 1 | 【待填写：配置清单】 | 项 | 1 | 待确认 | 待确认 | 未从招标文件中提取到配置明细，请根据投标产品实际配置逐项补录 |",
+                "| 1 | 【待填写：配置清单】 | 项 | 1 | 待确认 | 待确认 | 未从招标文件中提取到配置明细，请根据投标产品实际配置逐项补录 |",
             ]
         )
         return "\n".join(lines)
@@ -997,7 +1015,8 @@ def _build_configuration_table(
     config_descriptions: list[tuple[str, str, str]] = []  # (name, usage, remark)
     seen_main_device = bool(product_identity_lines)
     for name, unit, qty, remark in config_items:
-        # Enhance remark with product spec value if available
+        if _looks_like_service_config_noise(name, remark):
+            continue
         matched_spec = _fuzzy_spec_lookup(product, name) if product else ""
         usage = _infer_config_usage(name)
         is_standard = "是" if _is_standard_config(name) else "选配"

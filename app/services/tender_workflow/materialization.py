@@ -731,12 +731,17 @@ def _build_materialized_technical_section(
 def _build_materialized_service_section(
     tender: TenderDocument,
     products: dict[str, ProductSpecification],
+    product_profiles: dict[str, Any] | None = None,
 ) -> str:
     """构建materialized服务章节。"""
     parts: list[str] = []
     for pkg in _target_packages_for_materialization(tender, products):
         product = _product_for_package(pkg.package_id, products) or _fallback_single_product(products)
-        profile = _product_profile_for_materialization(product)
+        # 优先使用传入的 product_profiles,否则回退到从 product 构建
+        if product_profiles and pkg.package_id in product_profiles:
+            profile = product_profiles[pkg.package_id]
+        else:
+            profile = _product_profile_for_materialization(product)
         spec_items = list((product.specifications or {}).items())[:3] if product else []
         spec_digest = "；".join(f"{key}：{value}" for key, value in spec_items) or "按采购文件要求配置"
         product_identity = (

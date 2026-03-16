@@ -169,10 +169,9 @@ def _try_numeric_threshold_match(req_val: str, product: Any) -> str:
 
 
 def _build_response_value(req_val: str, *, req_key: str = "", product: Any = None) -> str:
-    """优先使用已核验的产品规格值；否则返回待补实参占位。"""
+    """优先使用已核验的产品规格值；没有产品事实时绝不回抄招标要求。"""
     if product is None:
-        # 当没有产品信息时,返回招标要求本身作为响应值,而非空占位符
-        return req_val if req_val else _PENDING_BIDDER_RESPONSE
+        return _PENDING_BIDDER_RESPONSE
 
     # 策略1: 精确/模糊 spec 匹配
     if req_key:
@@ -186,15 +185,14 @@ def _build_response_value(req_val: str, *, req_key: str = "", product: Any = Non
         if token_matched:
             return token_matched
 
-    # 策略3: 数值门槛匹配 — 如果招标要求含 ≥/≤ 等比较符
+    # 策略3: 数值门槛匹配
     if req_val and any(m in req_val for m in _HARD_REQUIREMENT_MARKERS):
         numeric_match = _try_numeric_threshold_match(req_val, product)
         if numeric_match:
             return numeric_match
 
-    # 策略4: 兜底返回招标要求本身,避免空占位符
-    return req_val if req_val else _PENDING_BIDDER_RESPONSE
-
+    # 没有真实产品事实时，返回待填，不再回抄招标要求
+    return _PENDING_BIDDER_RESPONSE
 
 _CONFIG_PLACEHOLDER_KEYS = (
     "装箱配置",
@@ -539,23 +537,22 @@ def _resolve_structured_response(
     结构化表格场景下的响应值兜底顺序：
     1. evidence_result 直接命中的 response_value
     2. product_profile 中的精确/近似映射
-    3. 旧有 _build_response_value(...) 的能力兜底
-    4. 最后才退化为统一待核实占位符
+    3. 已核验 product spec
+    4. 最后统一回到待填写占位
     """
     response = _normalized_optional_text((match or {}).get("response_value"), "")
-    if response:
+    if response and response != req_val:
         return response
 
     response = _lookup_profile_response_value(product_profile, req_key)
-    if response:
+    if response and response != req_val:
         return response
 
     response = _build_response_value(req_val, req_key=req_key, product=product)
-    if response and response != _PENDING_BIDDER_RESPONSE:
+    if response and response not in {req_val, _PENDING_BIDDER_RESPONSE}:
         return response
 
     return _PENDING_BIDDER_RESPONSE
-
 
 _GENERIC_STRUCTURED_ROW_KEYS = {
     "技术参数",
@@ -630,7 +627,7 @@ def _merge_requirement_rows(
                     continue
                 intersection = key_tokens & existing_tokens
                 union = key_tokens | existing_tokens
-                if union and len(intersection) / len(union) >= 0.85:
+                if union and len(intersection) / len(union) >= 0.92:
                     is_dup = True
                     break
             if is_dup:
@@ -643,7 +640,7 @@ def _merge_requirement_rows(
 
 def _fallback_requirement_category(req_key: str, req_val: str) -> str:
     """对原文兜底行重新分类，避免服务/合规条款混入技术表。"""
-    return _normalized_requirement_category(_classify_clause_category(req_key, req_val))
+    return _normalized_requirement_category(_requirement_processor._classify_clause_category(req_key, req_val))
 
 
 def _fallback_requirement_matches_category(req_category: str, category_filter: str | None) -> bool:
@@ -912,7 +909,7 @@ def _build_requirement_rows(
             need_raw_enrichment = (
                 len(trimmed_rows) != len(rows)
                 or len(trimmed_rows) < 6
-                or len(trimmed_rows) + 2 < total_structured
+                or len(trimmed_rows)  < total_structured
             )
             if need_raw_enrichment:
                 fallback_rows, fallback_total = _build_fallback_requirement_rows(

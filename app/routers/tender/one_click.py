@@ -125,6 +125,7 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             company=_PLACEHOLDER_COMPANY,
             products={},
             evidence_result=None,
+            product_profiles=gen_result.product_profiles,
         )
         _set_one_click_job_status(
             job_id,

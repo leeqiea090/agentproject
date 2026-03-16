@@ -362,6 +362,7 @@ async def generate_bid_document(request: BidGenerateRequest):
             company=company_profile,
             products=products,
             evidence_result=evidence_result,
+            product_profiles=pipeline_result.product_profiles,
         )
         consistency_report = _second_validation(
             analysis_result=analysis_result,
