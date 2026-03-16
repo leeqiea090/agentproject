@@ -37,11 +37,15 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_main_param_note(raw_value: Any, has_real_response: bool) -> str:
-    """归一化主参数备注文本。"""
+    """归一化主参数备注文本。
+
+    只有当招标文件中明确读取到真实偏离结论时才保留原值；
+    空值、占位符一律返回待确认——禁止自动写"无偏离"。
+    """
     text = _safe_text(raw_value, "")
-    bad_values = {"", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充"}
+    bad_values = {"", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充", "无偏离"}
     if text in bad_values or "待填写" in text:
-        return "无偏离" if has_real_response else "待确认"
+        return "待确认"
     return text
 
 def __reexport_all(module) -> None:
@@ -710,7 +714,9 @@ def _extract_configuration_items(
                 remark=remark,
             )
 
-    if _config_items_need_enrichment(parsed_items):
+    # 当结构化提取完全没有配置项时，从技术条款反推关键配置项作为人工底稿参考。
+    # 仅在 parsed_items 为空时启用，避免在已有配置时凭空追加。
+    if not parsed_items:
         _derive_config_items_from_technical_requirements(pkg, tender_raw, parsed_items, _seen_names)
 
     # 智能去重：基于 token Jaccard 相似度而非简单子串匹配
@@ -746,27 +752,14 @@ def _extract_configuration_items(
     # Config pollution cleaning — remove non-config items that leaked through boundary detection
     cleaned = _clean_config_items(deduped, pkg.package_id, pkg.item_name)
 
-    # 不再强行补“标准附件 / 配套软件 / 随机文件 / 安装培训 / 初始耗材”等 6 类通用占位项。
-    # 只在完全提取不到任何配置时，补一组可直接落表的最小成品清单。
+    # 完全提取不到任何配置时，仅保留一条占位提示，由人工补录。
     if not cleaned:
         cleaned.extend([
             (
-                f"{pkg.item_name}主机",
-                "台",
+                "【待填写：配置清单】",
+                "项",
                 "1",
-                "核心模块",
-            ),
-            (
-                "随机附件",
-                "套",
-                "1",
-                "标准附件",
-            ),
-            (
-                "随机文件",
-                "份",
-                "1",
-                "说明书、合格证、装箱单",
+                "未从招标文件中提取到配置明细，请根据投标产品实际配置逐项补录",
             ),
         ])
 
@@ -985,7 +978,7 @@ def _build_configuration_table(
     if not config_items and not product_identity_lines:
         lines.extend(
             [
-                f"| 1 | {pkg.item_name}主机 | 台 | {package_qty} | 是 | 核心设备 | 核心模块；与第三章投标型号一致，如有子模块/附件差异再补充 |",
+                f"| 1 | 【待填写：配置清单】 | 项 | 1 | 待确认 | 待确认 | 未从招标文件中提取到配置明细，请根据投标产品实际配置逐项补录 |",
             ]
         )
         return "\n".join(lines)

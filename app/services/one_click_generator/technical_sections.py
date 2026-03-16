@@ -28,6 +28,7 @@ from app.services.one_click_generator.common import (
     _as_text,
     _infer_package_quantity,
     _normalize_commitment_term,
+    _clean_delivery_text,
     _package_detail_lines,
     _package_scope,
     _quote_overview_table,
@@ -209,9 +210,9 @@ def _build_post_table_narratives(
     delivery_time = ""
     delivery_place = ""
     if pkg.delivery_time:
-        delivery_time = _safe_text(pkg.delivery_time, "按招标文件约定")
+        delivery_time = _clean_delivery_text(pkg.delivery_time, "按招标文件约定")
     if pkg.delivery_place:
-        delivery_place = _safe_text(pkg.delivery_place, "采购人指定地点")
+        delivery_place = _clean_delivery_text(pkg.delivery_place, "采购人指定地点", is_place=True)
 
     is_rich = draft_mode == "rich"
     has_real_product = bool(p_model and p_mfr)
@@ -802,8 +803,8 @@ def _build_package_detail_section(
 
     # 交付说明
     content += f"### 包{pkg.package_id} 交付说明\n\n"
-    content += f"- 交货期：{pkg.delivery_time or _rich_pending('按采购文件填写交货期限')}\n"
-    content += f"- 交货地点：{pkg.delivery_place or _rich_pending('按采购文件填写交货地点')}\n"
+    content += f"- 交货期：{_clean_delivery_text(pkg.delivery_time, '') or _rich_pending('按采购文件填写交货期限')}\n"
+    content += f"- 交货地点：{_clean_delivery_text(pkg.delivery_place, '', is_place=True) or _rich_pending('按采购文件填写交货地点')}\n"
     content += f"- 交货方式：{_rich_pending('按采购文件或投标承诺填写')}\n\n"
 
     # 培训说明
@@ -832,8 +833,8 @@ def _build_appendix_service_placeholder(
     sections: list[str] = ["## 二、技术服务和售后服务的内容及措施"]
 
     for pkg in pkgs:
-        delivery_time = _normalize_commitment_term(pkg.delivery_time or "按采购文件约定")
-        delivery_place = _normalize_commitment_term(pkg.delivery_place or "采购人指定地点")
+        delivery_time = _normalize_commitment_term(_clean_delivery_text(pkg.delivery_time, "") or "按采购文件约定")
+        delivery_place = _normalize_commitment_term(_clean_delivery_text(pkg.delivery_place, "", is_place=True) or "采购人指定地点")
         warranty = _normalize_commitment_term(tender.commercial_terms.warranty_period or "按采购文件约定")
 
         sections.extend([

@@ -10,7 +10,7 @@ from app.services.one_click_generator.response_tables import (
     _build_requirement_rows,
     _has_real_bidder_response,
 )
-from .common import _clean_text, _md_table
+from .common import _clean_text, _md_table, _truncate_commercial_tail
 
 _TP_APPENDIX_TITLES = [
     "附一、资格性审查响应对照表",
@@ -109,14 +109,17 @@ def _norm_header(text: str) -> str:
 
 
 def _tidy_extracted_text(text: str) -> str:
-    """清理抽取后的文本。"""
+    """清理抽取后的文本，合并 PDF 碎片化换行。"""
     value = _clean_text(text)
     if not value:
         return ""
-    value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", value)
+    # 合并中文之间被空格打断的文本
+    value = re.sub(r"(?<=[一-鿿])\s+(?=[一-鿿])", "", value)
+    value = re.sub(r"(?<=[一-鿿])\s+(?=[□☑☐（《“])", "", value)
+    value = re.sub(r"(?<=[□☑☐）》”。，；：、])\s+(?=[一-鿿])", "", value)
     value = re.sub(r"(?<=[（《“])\s+", "", value)
-    value = re.sub(r"\s+(?=[）》。；：，、“])", "", value)
-    value = re.sub(r"(?<=[：，。；、“])\s+", "", value)
+    value = re.sub(r"\s+(?=[）》。；：，、”])", "", value)
+    value = re.sub(r"(?<=[：，。；、”])\s+", "", value)
     return value.strip()
 
 
@@ -271,7 +274,7 @@ def _looks_like_tp_title_fragment(line: str, title: str) -> bool:
 
 
 def _clean_tp_template_block(block: str, title: str) -> str:
-    """清理TP 格式模板文本块。"""
+    """清理TP 格式模板文本块，合并 PDF 碎片化换行。"""
     body = re.sub(r"-\s*第\s*\d+\s*页\s*-", "", block or "").strip()
     if not body:
         return ""
@@ -292,7 +295,27 @@ def _clean_tp_template_block(block: str, title: str) -> str:
         if _looks_like_tp_title_fragment(line, title):
             continue
         cleaned.append(line.strip())
-    return "\n".join(cleaned).strip()
+
+    # 合并 PDF 碎片化短行：将过短且不以句末标点结尾的行拼接到前一行
+    merged: list[str] = []
+    for line in cleaned:
+        if (
+            merged
+            and len(line) <= 8
+            and not re.match(r"^(?:[一二三四五六七八九十]+[、.]|\d+[、.）)]|[★▲■●※]|#+\s|\|)", line)
+            and not line.endswith(("。", "；", "："))
+        ):
+            last_char = merged[-1][-1] if merged[-1] else ""
+            first_char = line[0] if line else ""
+            cjk_last = "\u4e00" <= last_char <= "\u9fff" or last_char in "\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300d\u300b\u25a1\u2611\u2610"
+            cjk_first = "\u4e00" <= first_char <= "\u9fff" or first_char in "\uff08\u3010\u300c\u300a\u25a1\u2611\u2610"
+            if cjk_last or cjk_first:
+                merged[-1] += line
+            else:
+                merged[-1] += " " + line
+        else:
+            merged.append(line)
+    return "\n".join(merged).strip()
 
 
 def _extract_tp_format_block(tender_raw: str) -> str:
@@ -1079,11 +1102,11 @@ def _extract_tp_delivery_time(pkg, tender_raw: str) -> str:
         if "标的提供的时间" in line:
             value = line.split("标的提供的时间", 1)[1].strip(" ：:")
             if value:
-                return value
+                return _truncate_commercial_tail(value)
         if "合同履行期限" in line:
             value = line.split("合同履行期限", 1)[1].strip(" ：:")
             if value:
-                return value
+                return _truncate_commercial_tail(value)
 
     text = _normalize_dense_text(tender_raw)
     match = re.search(
@@ -1091,7 +1114,7 @@ def _extract_tp_delivery_time(pkg, tender_raw: str) -> str:
         text,
     )
     if match:
-        return _tidy_extracted_text(match.group(1))
+        return _truncate_commercial_tail(_tidy_extracted_text(match.group(1)))
     return "按采购文件要求"
 
 
@@ -1103,7 +1126,7 @@ def _extract_tp_delivery_place(pkg, tender_raw: str) -> str:
         if "标的提供的地点" in line:
             value = line.split("标的提供的地点", 1)[1].strip(" ：:")
             if value:
-                return value
+                return _truncate_commercial_tail(value, keep_delivery_place=True)
     return "采购人指定地点"
 
 

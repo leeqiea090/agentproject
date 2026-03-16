@@ -396,11 +396,36 @@ def _extract_package_quantity(pkg, tender_raw: str) -> str:
     return "【待填写：数量】"
 
 
+_COMMERCIAL_TRUNCATE_TOKENS = (
+    "投标有效期", "付款方式", "付款条件", "验收要求", "验收标准",
+    "履约保证金", "质保期", "质保要求", "售后服务", "违约责任",
+    "交货地点", "交货期限", "投标报价", "评分标准", "评分办法",
+    "保险要求", "包装要求", "运输要求", "合同条款", "商务条款",
+    "标的提供的地点", "标的提供的时间", "采购项目（标的）交付的地点",
+    "采购项目（标的）交付的时间",
+)
+
+
+def _truncate_commercial_tail(text: str, *, keep_delivery_place: bool = False) -> str:
+    """截断提取文本中混入的商务条款尾巴。"""
+    if not text:
+        return text
+    truncate_tokens = [t for t in _COMMERCIAL_TRUNCATE_TOKENS
+                       if not (keep_delivery_place and t in ("交货地点", "标的提供的地点", "采购项目（标的）交付的地点"))]
+    earliest = len(text)
+    for token in truncate_tokens:
+        idx = text.find(token)
+        if idx > 0 and idx < earliest:
+            earliest = idx
+    result = text[:earliest].rstrip(" ；;，,：:、\t")
+    return result if result else text
+
+
 def _extract_delivery_time(pkg, tender_raw: str) -> str:
     """提取交付时间。"""
     row = _find_summary_row(tender_raw, pkg.package_id)
     if row and row.get("delivery_time"):
-        return row["delivery_time"]
+        return _truncate_commercial_tail(row["delivery_time"])
 
     front_scope = _normalize_dense_text(_extract_front_matter_scope(tender_raw))
     if front_scope:
@@ -411,7 +436,7 @@ def _extract_delivery_time(pkg, tender_raw: str) -> str:
         for pat in front_patterns:
             match = re.search(pat, front_scope)
             if match:
-                return " ".join(match.group(1).split())
+                return _truncate_commercial_tail(" ".join(match.group(1).split()))
 
     block = _find_package_block(tender_raw, pkg.package_id)
     if block:
@@ -426,7 +451,7 @@ def _extract_delivery_time(pkg, tender_raw: str) -> str:
         for pat in patterns:
             m = re.search(pat, block)
             if m:
-                return " ".join(m.group(1).split())
+                return _truncate_commercial_tail(" ".join(m.group(1).split()))
 
     return "按采购文件要求"
 
@@ -435,7 +460,7 @@ def _extract_delivery_place(pkg, tender_raw: str) -> str:
     """提取交付地点。"""
     row = _find_summary_row(tender_raw, pkg.package_id)
     if row and row.get("delivery_place"):
-        return row["delivery_place"]
+        return _truncate_commercial_tail(row["delivery_place"], keep_delivery_place=True)
 
     front_scope = _normalize_dense_text(_extract_front_matter_scope(tender_raw))
     if front_scope:
@@ -446,7 +471,7 @@ def _extract_delivery_place(pkg, tender_raw: str) -> str:
         for pat in front_patterns:
             match = re.search(pat, front_scope)
             if match:
-                return " ".join(match.group(1).split())
+                return _truncate_commercial_tail(" ".join(match.group(1).split()), keep_delivery_place=True)
 
     block = _find_package_block(tender_raw, pkg.package_id)
     if block:
@@ -461,7 +486,7 @@ def _extract_delivery_place(pkg, tender_raw: str) -> str:
         for pat in patterns:
             m = re.search(pat, block)
             if m:
-                return " ".join(m.group(1).split())
+                return _truncate_commercial_tail(" ".join(m.group(1).split()), keep_delivery_place=True)
 
     return "甲方指定地点"
 

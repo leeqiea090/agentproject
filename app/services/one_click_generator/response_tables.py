@@ -368,10 +368,14 @@ def _format_structured_bidder_evidence(
 
     source_bits = [bit for bit in (bid_file, bid_type) if bit]
     if not source_bits:
-        source_bits = [_safe_text(match.get("bidder_evidence_source"), "投标方资料")]
-    source_text = " / ".join(source_bits)
+        source_bits = [_safe_text(match.get("bidder_evidence_source"), "")]
+        source_bits = [b for b in source_bits if b]
+    source_text = " / ".join(source_bits) if source_bits else ""
 
-    quote_text = bid_snippet or f"{req_key}：{response}"
+    # 只使用真实存在的 snippet，不凭空构造
+    quote_text = bid_snippet
+    if not quote_text:
+        return source_text, "", bid_page
     if bid_page is not None:
         quote_text = f"{quote_text}（第{bid_page}页）"
     return source_text, quote_text, bid_page
@@ -565,11 +569,26 @@ _FALLBACK_TECHNICAL_CATEGORIES = {
 }
 
 
+def _normalize_requirement_key_for_dedup(key: str) -> str:
+    """归一化需求项名称用于去重，去除编号后缀和动词前缀。"""
+    normalized = re.sub(r"^[★▲■●\s]+", "", key.strip())
+    normalized = re.sub(r"^[（(]?\d+(?:\.\d+)?[）)]?\s*", "", normalized)
+    normalized = re.sub(
+        r"^(?:(?:具备|配置|配备|采用|支持|可兼容|可选配|原厂配套的|原厂配套))+",
+        "",
+        normalized,
+    )
+    normalized = re.sub(r"[（(]\d+[）)]$", "", normalized)
+    normalized = re.sub(r"(相互独立|可同时连续工作或单独分开工作|可同时连续工作|单独分开工作)$", "", normalized)
+    return normalized.strip(" ：:，,；;。")
+
+
 def _requirement_row_signature(row: dict[str, Any]) -> str:
     """为需求行构造去重签名。"""
     key = _safe_text(row.get("key") or row.get("param_name"), "")
     requirement = _safe_text(row.get("requirement") or row.get("value"), "")
-    return f"{key}::{requirement}"
+    normalized_key = _normalize_requirement_key_for_dedup(key)
+    return f"{normalized_key}::{requirement}"
 
 
 def _is_coarse_structured_row(row: dict[str, Any]) -> bool:
@@ -581,18 +600,41 @@ def _is_coarse_structured_row(row: dict[str, Any]) -> bool:
     return bool(re.match(r"^(?:\d+(?:\.\d+)*)\s+", requirement))
 
 
+def _requirement_key_dedup_tokens(key: str) -> set[str]:
+    """提取需求项名称的 token 集合用于 Jaccard 去重。"""
+    normalized = _normalize_requirement_key_for_dedup(key)
+    return {t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", normalized) if len(t) >= 2}
+
+
 def _merge_requirement_rows(
     primary_rows: list[dict[str, Any]],
     fallback_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """合并结构化与原文兜底行，优先保留结构化精细行。"""
     merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_signatures: set[str] = set()
+    seen_key_token_sets: list[set[str]] = []
     for row in [*primary_rows, *fallback_rows]:
         signature = _requirement_row_signature(row)
-        if not signature or signature in seen:
+        if not signature or signature in seen_signatures:
             continue
-        seen.add(signature)
+        # Jaccard key-level dedup: 同名条款不同编号的重复项
+        key = _safe_text(row.get("key") or row.get("param_name"), "")
+        key_tokens = _requirement_key_dedup_tokens(key)
+        if key_tokens:
+            is_dup = False
+            for existing_tokens in seen_key_token_sets:
+                if not existing_tokens:
+                    continue
+                intersection = key_tokens & existing_tokens
+                union = key_tokens | existing_tokens
+                if union and len(intersection) / len(union) >= 0.85:
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+            seen_key_token_sets.append(key_tokens)
+        seen_signatures.add(signature)
         merged.append(row)
     return merged
 
@@ -622,6 +664,8 @@ def _build_fallback_requirement_rows(
     requirements = _effective_requirements(pkg, tender_raw)
     package_scoped_raw = _extract_package_technical_scope_text(pkg, tender_raw)
     rows: list[dict[str, Any]] = []
+    seen_signatures: set[str] = set()
+    seen_key_token_sets: list[set[str]] = []
 
     for req_key, req_val in requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
         if _looks_like_placeholder_config_requirement(req_key, req_val):
@@ -638,11 +682,10 @@ def _build_fallback_requirement_rows(
         response = _build_response_value(req_val, req_key=req_key, product=product)
         has_real_response = _has_real_bidder_response(response)
 
+        # 只有存在经核实的产品事实时才填充投标侧证据；
+        # 禁止凭空构造 "产品参数库" / "req_key：response" 伪证据。
         bidder_evidence = ""
         bidder_source = ""
-        if has_real_response and product is not None:
-            bidder_source = "产品参数库"
-            bidder_evidence = f"{req_key}：{response}"
 
         if not _row_is_usable_for_package(
                 pkg,
@@ -654,6 +697,26 @@ def _build_fallback_requirement_rows(
             continue
 
         mapping_confidence = _mapping_confidence_for_row(pkg, req_key, req_val, quote)
+
+        # 去重：基于归一化签名 + Jaccard key 相似度
+        row_sig = f"{_normalize_requirement_key_for_dedup(req_key)}::{req_val}"
+        if row_sig in seen_signatures:
+            continue
+        key_tokens = _requirement_key_dedup_tokens(req_key)
+        if key_tokens:
+            is_dup = False
+            for existing_tokens in seen_key_token_sets:
+                if not existing_tokens:
+                    continue
+                intersection = key_tokens & existing_tokens
+                union = key_tokens | existing_tokens
+                if union and len(intersection) / len(union) >= 0.85:
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+            seen_key_token_sets.append(key_tokens)
+        seen_signatures.add(row_sig)
 
         rows.append(
             {
@@ -699,6 +762,8 @@ def _build_requirement_rows(
     if structured_requirements:
         match_by_id, match_by_param = _structured_match_indexes(evidence_result, pkg.package_id)
         rows: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+        seen_key_token_sets: list[set[str]] = []
         for requirement in structured_requirements[:_MAX_TECH_ROWS_PER_PACKAGE]:
             req_category = _normalized_requirement_category(requirement.get("category")) or "technical_requirement"
             req_key = _safe_text(
@@ -757,15 +822,14 @@ def _build_requirement_rows(
                 or requirement.get("source_page")
             )
             has_real_response = _has_real_bidder_response(response)
+            # 只有当 match 中确实存在真实的产品事实引用时才填充投标侧证据；
+            # 禁止在缺少真实事实时凭空构造 "产品参数库" / "req_key：response" 伪证据。
             if not bidder_quote and has_real_response:
-                bidder_source = bidder_source or _safe_text(
-                    (match or {}).get("matched_fact_source"),
-                    "产品参数库",
-                )
-                bidder_quote = _safe_text(
-                    (match or {}).get("matched_fact_quote"),
-                    f"{req_key}：{response}",
-                )
+                _real_fact_source = _safe_text((match or {}).get("matched_fact_source"), "")
+                _real_fact_quote = _safe_text((match or {}).get("matched_fact_quote"), "")
+                if _real_fact_source and _real_fact_quote:
+                    bidder_source = bidder_source or _real_fact_source
+                    bidder_quote = _real_fact_quote
 
             # 合并 tender/bid binding 信息
             _bid_bind = (bid_bindings or {}).get(requirement_id, {})
@@ -789,6 +853,26 @@ def _build_requirement_rows(
                 continue
 
             mapping_confidence = _mapping_confidence_for_row(pkg, req_key, req_val, tender_quote)
+
+            # 去重：基于归一化签名 + Jaccard key 相似度
+            row_sig = f"{_normalize_requirement_key_for_dedup(req_key)}::{req_val}"
+            if row_sig in seen_signatures:
+                continue
+            key_tokens = _requirement_key_dedup_tokens(req_key)
+            if key_tokens:
+                is_dup = False
+                for existing_tokens in seen_key_token_sets:
+                    if not existing_tokens:
+                        continue
+                    intersection = key_tokens & existing_tokens
+                    union = key_tokens | existing_tokens
+                    if union and len(intersection) / len(union) >= 0.85:
+                        is_dup = True
+                        break
+                if is_dup:
+                    continue
+                seen_key_token_sets.append(key_tokens)
+            seen_signatures.add(row_sig)
 
             rows.append(
                 {
@@ -867,7 +951,12 @@ def _recommended_evidence_label(req_key: str, requirement: str = "") -> str:
     return "【待补证：说明书/彩页/厂家参数表】"
 
 def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
-    """归一化deviation状态。"""
+    """归一化deviation状态。
+
+    只有招标文件中明确标注了具体偏离结论（如"正偏离"/"负偏离"等经核实的值）
+    才保留；空值、占位符以及未经核实的"无偏离"一律返回待填写占位——
+    禁止自动预填"无偏离"。
+    """
     text = _normalized_optional_text(raw_value, "")
     if not has_real:
         return _DEVIATION_PLACEHOLDER
@@ -876,6 +965,7 @@ def _normalize_deviation_status(raw_value: Any, *, has_real: bool) -> str:
     }
     if text in bad_values or "待填写" in text:
         return _DEVIATION_PLACEHOLDER
+    # "无偏离"必须由人工确认，不得自动填入
     if any(marker in text for marker in ("无偏离", "拟无偏离", "待证据复核", "待结合投标型号确认")):
         return _DEVIATION_PLACEHOLDER
     return text

@@ -198,6 +198,33 @@ _CONFIG_EXIT_HINTS = (
 _CONFIG_ITEM_UNITS = ("台套", "台", "套", "个", "把", "本", "件", "组", "副", "支", "块", "张", "盒", "瓶", "根", "条", "份", "只")
 _PENDING_BIDDER_RESPONSE = "待核实（需填入投标产品实参）"
 
+# ── 商务信息截断标记 ──
+_DELIVERY_TRUNCATE_TOKENS = (
+    "投标有效期", "付款方式", "付款条件", "验收要求", "验收标准",
+    "履约保证金", "质保期", "质保要求", "售后服务", "违约责任",
+    "交货地点", "交货期限", "投标报价", "评分标准", "评分办法",
+    "保险要求", "包装要求", "运输要求", "合同条款", "商务条款",
+    "标的提供的地点", "标的提供的时间", "采购项目（标的）交付的地点",
+    "采购项目（标的）交付的时间",
+)
+
+
+def _clean_delivery_text(text: str | None, default: str = "按招标文件约定", *, is_place: bool = False) -> str:
+    """清理交货期/交货地点文本，截断混入的商务条款。"""
+    cleaned = _safe_text(text, default)
+    if cleaned == default:
+        return cleaned
+    skip_tokens = {"交货地点", "标的提供的地点", "采购项目（标的）交付的地点"} if is_place else set()
+    earliest = len(cleaned)
+    for token in _DELIVERY_TRUNCATE_TOKENS:
+        if token in skip_tokens:
+            continue
+        idx = cleaned.find(token)
+        if 0 < idx < earliest:
+            earliest = idx
+    result = cleaned[:earliest].rstrip(" ；;，,：:、\t")
+    return result if result else default
+
 
 def _today() -> str:
     """返回当前日期字符串。"""
@@ -388,8 +415,8 @@ def _package_detail_lines(
 
     lines: list[str] = []
     for pkg in pkgs:
-        delivery = _safe_text(pkg.delivery_time, "按招标文件约定")
-        place = _safe_text(pkg.delivery_place, "采购人指定地点")
+        delivery = _clean_delivery_text(pkg.delivery_time, "按招标文件约定")
+        place = _clean_delivery_text(pkg.delivery_place, "采购人指定地点", is_place=True)
         quantity = _infer_package_quantity(pkg, tender_raw)
         lines.append(
             f"- 包{pkg.package_id}：{pkg.item_name}；数量：{quantity}；预算：{_fmt_money(pkg.budget)}元；"
@@ -420,7 +447,7 @@ def _quote_overview_table(
             quantity = _infer_package_quantity(pkg, tender_raw)
             rows.append(
                 f"| {idx}（{pkg.package_id}） | {pkg.item_name} | {quantity} | "
-                f"{_fmt_money(pkg.budget)} | 【待填写：包{pkg.package_id}投标报价】 | {_safe_text(pkg.delivery_time, '按招标文件约定')} |"
+                f"{_fmt_money(pkg.budget)} | 【待填写：包{pkg.package_id}投标报价】 | {_clean_delivery_text(pkg.delivery_time, '按招标文件约定')} |"
             )
         rows.append(
             f"|  | **预算合计（参考）** |  | **{_fmt_money(total_budget)}** |  |  |"
