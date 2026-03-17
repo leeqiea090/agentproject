@@ -1215,6 +1215,19 @@ def _build_cs_sections(
 
     sections.append(
         BidDocumentSection(
+            section_title="十二、报价书附件",
+            content=_build_quote_attachment_section(
+                tender,
+                packages,
+                tender_raw,
+                products=products,
+                product_profiles=product_profiles,
+            ),
+        )
+    )
+
+    sections.append(
+        BidDocumentSection(
             section_title=_CS_APPENDIX_TITLES[0],
             content=_build_cs_qualification_review_section(tender, packages, tender_raw),
         )

@@ -15,6 +15,7 @@ __all__ = [
     "_build_service_fee_commitment_template",
     "_build_vendor_qualification_paste_section",
     "_append_vendor_qualification_paste_section",
+    "_build_quote_attachment_section",
     "_build_small_enterprise_declaration_template",
     "_build_disabled_unit_declaration_template",
     "_build_service_supply_points",
@@ -307,7 +308,7 @@ def _build_vendor_qualification_paste_section(
         required_materials=required_materials,
     )
     lines = [
-        "## 相关证件（厂商资质文件，人工粘贴区）",
+        "## 2. 厂商资质文件（人工粘贴区）",
         "以下标题由系统结合项目属性、包件信息及招标文件中出现的许可、注册、授权、进口、检测等要求自动整理，请在对应标题下粘贴完整证照扫描件；不适用项可删除。",
         "",
     ]
@@ -340,10 +341,223 @@ def _append_vendor_qualification_paste_section(
     )
     base = str(base_content or "").strip()
     if not base:
-        return block
+        return f"## 1. 资格承诺正文\n\n{block}".strip()
     if "相关证件（厂商资质文件" in base or "投标公司资质-营业执照" in base:
         return base
-    return f"{base}\n\n{block}".strip()
+    return f"## 1. 资格承诺正文\n\n{base}\n\n{block}".strip()
+
+
+def _quote_attachment_identity(product, item_name: str) -> str:
+    """返回报价附件中的产品身份摘要。"""
+    if product is None:
+        return f"【待填写：{item_name}品牌/型号/生产厂家】"
+    bits = [
+        _clean_text(getattr(product, "brand", "")),
+        _clean_text(getattr(product, "model", "")),
+        _clean_text(getattr(product, "manufacturer", "")),
+    ]
+    joined = " / ".join(bit for bit in bits if bit)
+    return joined or f"【待填写：{item_name}品牌/型号/生产厂家】"
+
+
+def _build_quote_attachment_parameter_block(
+    pkg: ProcurementPackage,
+    tender_raw: str,
+    *,
+    product=None,
+) -> list[str]:
+    """构建报价附件中的产品技术参数摘要。"""
+    qty = _extract_detail_quantity(pkg, tender_raw)
+    delivery_time = _extract_delivery_time(pkg, tender_raw)
+    delivery_place = _extract_delivery_place(pkg, tender_raw)
+    lines = [
+        f"### 包{pkg.package_id}：{pkg.item_name}",
+        f"1）数量：{qty}",
+        f"2）拟投产品：{_quote_attachment_identity(product, pkg.item_name)}",
+        f"3）交货期：{delivery_time}",
+        f"4）交货地点：{delivery_place}",
+    ]
+
+    spec_points = _extract_tech_points(pkg, tender_raw)
+    if product is not None and getattr(product, "specifications", None):
+        product_points = [
+            f"{key}：{value}"
+            for key, value in list((getattr(product, "specifications", {}) or {}).items())[:8]
+            if _clean_text(key) and _clean_text(value)
+        ]
+        for point in product_points:
+            if point not in spec_points:
+                spec_points.append(point)
+
+    if spec_points:
+        lines.append("5）产品主要技术参数：")
+        for idx, point in enumerate(spec_points[:10], start=1):
+            lines.append(f"   {idx}. {point}")
+    else:
+        lines.append("5）产品主要技术参数：请按采购文件逐条补齐关键参数响应。")
+
+    return lines
+
+
+def _build_quote_attachment_detail_table(
+    tender,
+    packages: list[ProcurementPackage],
+    tender_raw: str,
+    *,
+    products: dict[str, object] | None = None,
+) -> str:
+    """构建报价附件中的报价明细表。"""
+    lines = [
+        "| 序号 | 货物名称 | 规格型号 | 生产厂家 | 品牌 | 单价(元) | 数量 | 总价(元) |",
+        "|---:|---|---|---|---|---:|---|---:|",
+    ]
+    total_budget = 0.0
+    for idx, pkg in enumerate(packages, start=1):
+        total_budget += float(getattr(pkg, "budget", 0) or 0)
+        product = (products or {}).get(pkg.package_id)
+        model = _clean_text(getattr(product, "model", ""))
+        manufacturer = _clean_text(getattr(product, "manufacturer", ""))
+        brand = _clean_text(getattr(product, "brand", "")) or "【待填写：品牌】"
+        quantity = _extract_package_quantity(pkg, tender_raw)
+        lines.append(
+            f"| {idx} | {pkg.item_name} | {model or '【待填写：品牌型号】'} | "
+            f"{manufacturer or '【待填写：生产厂家】'} | {brand} | "
+            f"【待填写：单价】 | {quantity} | 【待填写：总价】 |"
+        )
+    lines.append(f"|  | **预算合计（参考）** |  |  |  |  |  | **{total_budget:,.2f}** |")
+    lines.append("|  | **投标总报价** |  |  |  |  |  | **【待填写：投标总报价】** |")
+    lines.append("")
+    lines.append("注：本表应与报价书、报价一览表中的品牌型号、数量、单价及总价保持一致。")
+    return "\n".join(lines)
+
+
+def _build_quote_attachment_section(
+    tender,
+    packages: list[ProcurementPackage] | None,
+    tender_raw: str,
+    *,
+    products: dict[str, object] | None = None,
+    product_profiles: dict[str, dict[str, object]] | None = None,
+) -> str:
+    """构建报价书附件章节。"""
+    packages = list(packages or [])
+    products = products or {}
+    product_profiles = product_profiles or {}
+    lines = [
+        "## 1. 产品主要技术参数明细表及报价表",
+        "### （一）产品主要技术参数",
+    ]
+
+    for idx, pkg in enumerate(packages):
+        product = products.get(pkg.package_id)
+        lines.extend(_build_quote_attachment_parameter_block(pkg, tender_raw, product=product))
+        if idx < len(packages) - 1:
+            lines.append("")
+
+    lines.extend(
+        [
+            "",
+            "### （二）报价明细表",
+            _build_quote_attachment_detail_table(
+                tender,
+                packages,
+                tender_raw,
+                products=products,
+            ),
+            "",
+            "## 2. 技术服务和售后服务的内容及措施",
+            "### （一）技术服务",
+        ]
+    )
+
+    for pkg in packages:
+        product = products.get(pkg.package_id)
+        profile = product_profiles.get(pkg.package_id) or {}
+        delivery_time = _extract_delivery_time(pkg, tender_raw)
+        delivery_place = _extract_delivery_place(pkg, tender_raw)
+        spec_items = list((getattr(product, "specifications", {}) or {}).items())[:3] if product else []
+        spec_digest = "；".join(f"{key}：{value}" for key, value in spec_items)
+        product_identity = (
+            f"{_clean_text(getattr(product, 'manufacturer', ''))} {_clean_text(getattr(product, 'product_name', ''))}"
+            f"（型号：{_clean_text(getattr(product, 'model', '待补充'))}）"
+            if product is not None
+            else pkg.item_name
+        ).strip()
+        lines.append(f"#### 包{pkg.package_id}：{pkg.item_name}")
+        lines.extend(
+            _build_service_supply_points(
+                pkg.item_name,
+                delivery_time,
+                delivery_place,
+                product_identity=product_identity,
+                spec_digest=spec_digest,
+            )
+        )
+        lines.extend(
+            _build_service_packaging_points(
+                pkg.item_name,
+                product_identity=product_identity,
+            )
+        )
+        lines.extend(
+            _build_service_installation_points(
+                pkg.item_name,
+                delivery_place=delivery_place,
+                functional_notes=_clean_text(profile.get("functional_notes") or ""),
+            )
+        )
+        lines.extend(
+            _build_service_training_points(
+                pkg.item_name,
+                training_notes=_clean_text(profile.get("training_notes") or ""),
+            )
+        )
+        lines.extend(
+            _build_service_acceptance_points(
+                pkg.item_name,
+                acceptance_notes=_clean_text(profile.get("acceptance_notes") or ""),
+            )
+        )
+        lines.append("")
+
+    lines.append("### （二）售后服务")
+    for pkg in packages:
+        product = products.get(pkg.package_id)
+        spec_items = list((getattr(product, "specifications", {}) or {}).items())[:3] if product else []
+        spec_digest = "；".join(f"{key}：{value}" for key, value in spec_items)
+        lines.append(f"#### 包{pkg.package_id}：{pkg.item_name}")
+        lines.extend(
+            _build_service_after_sales_points(
+                pkg.item_name,
+                spec_digest=spec_digest,
+            )
+        )
+        lines.append("")
+
+    lines.extend(
+        [
+            "## 3. 产品彩页",
+        ]
+    )
+    for idx, pkg in enumerate(packages, start=1):
+        lines.append(f"### （{_cn_ordinal(idx)}）包{pkg.package_id}：{pkg.item_name}")
+        lines.append("[[PASTE_AREA:10]]")
+        lines.extend(["", "[PAGE_BREAK]", ""])
+
+    lines.append("## 4. 节能/环保/能效认证证书（如适用）")
+    for idx, pkg in enumerate(packages, start=1):
+        lines.append(f"### （{_cn_ordinal(idx)}）包{pkg.package_id}：{pkg.item_name}")
+        lines.append("[[PASTE_AREA:8]]")
+        lines.extend(["", "[PAGE_BREAK]", ""])
+
+    lines.append("## 5. 检测/质评数据节选")
+    for idx, pkg in enumerate(packages, start=1):
+        lines.append(f"### （{_cn_ordinal(idx)}）包{pkg.package_id}：{pkg.item_name}")
+        lines.append("[[PASTE_AREA:8]]")
+        if idx < len(packages):
+            lines.extend(["", "[PAGE_BREAK]", ""])
+
+    return "\n".join(lines).strip()
 
 
 def _build_service_supply_points(

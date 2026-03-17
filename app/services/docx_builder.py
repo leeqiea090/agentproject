@@ -1,5 +1,9 @@
 """Word 文档生成服务（基于 python-docx）"""
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -71,6 +75,25 @@ def _add_paragraph(doc: Document, text: str, bold: bool = False) -> None:
     para.paragraph_format.space_after = Pt(4)
 
 
+def _add_toc_title(doc: Document, text: str = "目录") -> None:
+    """添加目录页标题，但不使用 Heading 样式，避免目录把自己收录进去。"""
+    para = doc.add_paragraph()
+    para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = para.add_run(text)
+    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+    run.font.name = "黑体"
+    run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体")
+    run.font.bold = True
+    run.font.size = Pt(16)
+
+    fmt = para.paragraph_format
+    fmt.keep_with_next = True
+    fmt.keep_together = True
+    fmt.widow_control = True
+    fmt.space_before = Pt(6)
+    fmt.space_after = Pt(6)
+
+
 def _append_inline_runs(para, text: str, size: Pt) -> None:
     """将含 **粗体** 的文本写入段落"""
     parts = re.split(r"(\*\*.*?\*\*)", text)
@@ -115,6 +138,87 @@ def _append_heading_body_fallback(doc: Document, title: str) -> None:
 def _normalize_title(text: str) -> str:
     """标题归一化（用于去重匹配）"""
     return re.sub(r"[\s#`*:：、（）()\-—_]", "", text or "")
+
+
+_CN_NUM_MAP = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+_DEFAULT_TOC_SUBHEADINGS = {
+    "二、报价书": "报价书正文",
+    "二、首轮报价表": "首轮报价表",
+    "三、报价一览表": "报价一览表",
+    "三、分项报价表": "分项报价表",
+    "四、资格承诺函": "资格承诺正文",
+    "五、技术偏离及详细配置明细表": "技术偏离及详细配置",
+    "五、技术服务和售后服务的内容及措施": "技术服务与售后安排",
+    "六、技术服务和售后服务的内容及措施": "技术服务与售后安排",
+    "六、法定代表人/单位负责人授权书": "授权书",
+    "七、法定代表人/单位负责人授权书": "授权书",
+    "七、法定代表人/单位负责人和授权代表身份证明": "身份证明",
+    "八、法定代表人/单位负责人和授权代表身份证明": "身份证明",
+    "八、小微企业声明函": "小微企业声明",
+    "九、小微企业声明函": "小微企业声明",
+    "九、残疾人福利性单位声明函": "残疾人福利性单位声明",
+    "十、残疾人福利性单位声明函": "残疾人福利性单位声明",
+    "十、投标人关联单位的说明": "关联单位说明",
+    "十一、投标人关联单位的说明": "关联单位说明",
+    "十一、资格承诺函": "资格承诺正文",
+    "十二、报价书附件": "报价书附件明细",
+    "附一、资格性审查响应对照表": "资格性审查明细",
+    "附二、符合性审查响应对照表": "符合性审查明细",
+    "附三、详细评审响应对照表": "详细评审明细",
+    "附四、投标无效情形汇总及自检表": "无效情形自检",
+}
+
+
+def _normalize_level2_heading_text(heading_text: str) -> str:
+    """将二级小标题统一为阿拉伯数字编号。"""
+    stripped = (heading_text or "").strip()
+    match = re.match(r"^[（(]?([一二三四五六七八九十])[）)]?[、.\s]+(.+)$", stripped)
+    if match:
+        idx = _CN_NUM_MAP.get(match.group(1))
+        if idx is not None:
+            return f"{idx}. {match.group(2).strip()}"
+    return stripped
+
+
+def _ensure_toc_subheadings(section_title: str, content: str) -> str:
+    """为目录补齐稳定的二级小标题，并将二级标题统一为阿拉伯数字。"""
+    lines = str(content or "").splitlines()
+    has_level2 = False
+    has_numeric_level3 = False
+    normalized: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            has_level2 = True
+            normalized.append(f"## {_normalize_level2_heading_text(stripped[3:])}")
+            continue
+        if re.match(r"^###\s+\d+[\.、]\s*", stripped):
+            has_numeric_level3 = True
+        normalized.append(line)
+
+    normalized_content = "\n".join(normalized).strip()
+    if has_level2 or has_numeric_level3:
+        return normalized_content
+
+    subtitle = _DEFAULT_TOC_SUBHEADINGS.get((section_title or "").strip())
+    if not subtitle:
+        return normalized_content
+    if not normalized_content:
+        return f"## 1. {subtitle}"
+    return f"## 1. {subtitle}\n\n{normalized_content}".strip()
 
 def _normalize_cover_placeholder(value: str, label: str) -> str:
     """归一化封面占位符文本。"""
@@ -480,6 +584,8 @@ def _markdown_heading_info(stripped: str) -> tuple[int, str, str] | None:
     if stripped.startswith(">"):
         stripped = re.sub(r"^>\s*", "", stripped)
     if stripped.startswith("### "):
+        if re.match(r"^###\s+\d+[\.、]\s*", stripped):
+            return 2, stripped[4:].strip(), "markdown"
         return 3, stripped[4:].strip(), "markdown"
     if stripped.startswith("#### "):
         return 3, stripped[5:].strip(), "markdown"
@@ -506,12 +612,12 @@ def _enable_update_fields_on_open(doc: Document) -> None:
     update_fields.set(qn("w:val"), "true")
 
 
-def _insert_toc_field(paragraph, levels: str = "1-3") -> None:
+def _insert_toc_field(paragraph, levels: str = "1-2") -> None:
     """
     在段落中插入 Word 目录域：
-    { TOC \\o "1-3" \\h \\z \\u }
+    { TOC \\o "1-2" \\h \\z \\u }
 
-    \\o "1-3" = 收录 1~3 级标题
+    \\o "1-2" = 收录 1~2 级标题
     \\h       = 目录项带超链接，可点击跳转
     \\z       = Web 布局中隐藏页码
     \\u       = 使用段落大纲级别
@@ -545,11 +651,51 @@ def _insert_toc_field(paragraph, levels: str = "1-3") -> None:
 
 def _add_toc(doc: Document, sections: Iterable[BidDocumentSection]) -> None:
     """添加可点击跳转的 Word 自动目录。"""
-    _add_heading(doc, "目录", 1)
+    _add_toc_title(doc, "目录")
 
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(6)
-    _insert_toc_field(p, levels="1-3")
+    _insert_toc_field(p, levels="1-2")
+
+
+def _refresh_toc_with_macos_word(output_path: Path) -> None:
+    """在 macOS 上调用本机 Word 刷新目录和页码。失败时静默回退为普通 docx。"""
+    if sys.platform != "darwin":
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if os.environ.get("BID_DOCX_DISABLE_WORD_REFRESH") == "1":
+        return
+    if shutil.which("osascript") is None:
+        return
+
+    resolved = output_path.resolve()
+    script = f'''
+    tell application "Microsoft Word"
+        open POSIX file "{resolved}"
+        delay 1
+        set docRef to active document
+        repeat with tocRef in (get tables of contents of docRef)
+            update tocRef
+        end repeat
+        delay 0.5
+        repeat with tocRef in (get tables of contents of docRef)
+            update tocRef
+        end repeat
+        save docRef
+        close docRef saving yes
+    end tell
+    '''
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception:
+        return
 
 def _render_markdown_table(
     doc: Document,
@@ -1281,7 +1427,10 @@ def build_bid_docx(
         doc.add_page_break()
 
     for idx, section in enumerate(render_sections):
-        clean_content = _clean_markdown_content(section.section_title, section.content)
+        clean_content = _ensure_toc_subheadings(
+            section.section_title,
+            _clean_markdown_content(section.section_title, section.content),
+        )
 
         # 章节标题
         _add_heading(doc, section.section_title, 1)
@@ -1308,4 +1457,5 @@ def build_bid_docx(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
+    _refresh_toc_with_macos_word(output_path)
     return output_path

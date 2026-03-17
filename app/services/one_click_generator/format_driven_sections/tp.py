@@ -14,6 +14,7 @@ from .common import (
     _append_vendor_qualification_paste_section,
     _build_affiliated_units_statement_template,
     _build_hlj_supplier_qualification_commitment_template,
+    _build_quote_attachment_section,
     _build_service_acceptance_points,
     _build_service_after_sales_points,
     _build_disabled_unit_declaration_template,
@@ -1488,6 +1489,19 @@ def _build_tp_sections(
         BidDocumentSection(
             section_title="十一、投标人关联单位的说明",
             content=_build_affiliated_units_statement_template(tender),
+        )
+    )
+
+    sections.append(
+        BidDocumentSection(
+            section_title="十二、报价书附件",
+            content=_build_quote_attachment_section(
+                tender,
+                packages,
+                tender_raw,
+                products=products,
+                product_profiles=product_profiles,
+            ),
         )
     )
 
