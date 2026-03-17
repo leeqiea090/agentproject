@@ -11,6 +11,7 @@ from app.services.one_click_generator.response_tables import (
     _has_real_bidder_response,
 )
 from .common import (
+    _append_vendor_qualification_paste_section,
     _build_affiliated_units_statement_template,
     _build_hlj_supplier_qualification_commitment_template,
     _build_service_acceptance_points,
@@ -1326,6 +1327,7 @@ def _build_tp_sections(
     products: dict | None = None,
     active_packages: list | None = None,
     *,
+    required_materials: list[str] | None = None,
     normalized_result: dict | None = None,
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
@@ -1384,7 +1386,14 @@ def _build_tp_sections(
     sections.append(
         BidDocumentSection(
             section_title="四、资格承诺函",
-            content=_extract_tp_qualification_commitment_template(tender_raw),
+            content=_append_vendor_qualification_paste_section(
+                _extract_tp_qualification_commitment_template(tender_raw),
+                tender,
+                packages,
+                tender_raw,
+                products=products,
+                required_materials=required_materials,
+            ),
         )
     )
 

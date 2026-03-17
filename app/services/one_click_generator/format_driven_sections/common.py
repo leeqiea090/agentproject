@@ -13,6 +13,8 @@ __all__ = [
     "_build_hlj_supplier_qualification_commitment_template",
     "_build_manufacturer_authorization_template",
     "_build_service_fee_commitment_template",
+    "_build_vendor_qualification_paste_section",
+    "_append_vendor_qualification_paste_section",
     "_build_small_enterprise_declaration_template",
     "_build_disabled_unit_declaration_template",
     "_build_service_supply_points",
@@ -87,6 +89,261 @@ def _goods_names_text(packages: list[ProcurementPackage] | None = None) -> str:
 def _service_plan_text(value: str, fallback: str) -> str:
     text = _clean_text(value)
     return text if text else fallback
+
+
+def _cn_ordinal(index: int) -> str:
+    """返回中文序号。"""
+    numerals = "零一二三四五六七八九十"
+    if index <= 10:
+        return numerals[index]
+    if index < 20:
+        return "十" + numerals[index % 10]
+    tens, ones = divmod(index, 10)
+    if tens < len(numerals):
+        return numerals[tens] + "十" + (numerals[ones] if ones else "")
+    return str(index)
+
+
+def _append_unique_text(items: list[str], value: str) -> None:
+    """按顺序去重追加文本。"""
+    text = str(value or "").strip()
+    if text and text not in items:
+        items.append(text)
+
+
+def _qualification_context_text(
+    tender,
+    packages: list[ProcurementPackage] | None,
+    tender_raw: str,
+    *,
+    products: dict[str, object] | None = None,
+    required_materials: list[str] | None = None,
+) -> str:
+    """汇总厂商资质判断所需上下文。"""
+    parts: list[str] = [
+        getattr(tender, "project_name", "") or "",
+        getattr(tender, "project_number", "") or "",
+        getattr(tender, "procurement_type", "") or "",
+        getattr(tender, "special_requirements", "") or "",
+        tender_raw or "",
+    ]
+    for pkg in packages or []:
+        parts.extend(
+            [
+                getattr(pkg, "package_id", "") or "",
+                getattr(pkg, "item_name", "") or "",
+                getattr(pkg, "delivery_time", "") or "",
+                getattr(pkg, "delivery_place", "") or "",
+            ]
+        )
+    for item in required_materials or []:
+        parts.append(str(item or ""))
+    for product in (products or {}).values():
+        if product is None:
+            continue
+        parts.extend(
+            [
+                getattr(product, "product_name", "") or "",
+                getattr(product, "manufacturer", "") or "",
+                getattr(product, "model", "") or "",
+                getattr(product, "origin", "") or "",
+                getattr(product, "registration_number", "") or "",
+                getattr(product, "authorization_letter", "") or "",
+            ]
+        )
+        for cert in list(getattr(product, "certifications", []) or []):
+            parts.append(str(cert or ""))
+    return _clean_text(" ".join(part for part in parts if part))
+
+
+def _package_doc_suffix(pkg: ProcurementPackage, multi_package: bool) -> str:
+    """返回包件文档标题后缀。"""
+    if not multi_package:
+        return ""
+    name = _clean_text(getattr(pkg, "item_name", ""))
+    if name:
+        return f"（包{pkg.package_id}：{name}）"
+    return f"（包{pkg.package_id}）"
+
+
+def _product_requires_import_docs(product) -> bool:
+    """判断产品是否需要进口合法来源资料。"""
+    origin = _clean_text(getattr(product, "origin", ""))
+    if not origin:
+        return False
+    china_markers = ("中国", "国产", "境内", "大陆")
+    return not any(marker in origin for marker in china_markers)
+
+
+def _infer_vendor_qualification_titles(
+    tender,
+    packages: list[ProcurementPackage] | None,
+    tender_raw: str,
+    *,
+    products: dict[str, object] | None = None,
+    required_materials: list[str] | None = None,
+) -> list[str]:
+    """推断厂商资质文件小节标题。"""
+    context = _qualification_context_text(
+        tender,
+        packages,
+        tender_raw,
+        products=products,
+        required_materials=required_materials,
+    )
+    packages = list(packages or [])
+    products = products or {}
+    titles: list[str] = []
+
+    medical_required = any(
+        token in context
+        for token in (
+            "医疗器械",
+            "注册证",
+            "备案凭证",
+            "经营备案",
+            "经营许可证",
+            "生产许可证",
+            "医院",
+            "检验",
+            "流式",
+            "辐照",
+            "手术",
+        )
+    )
+    imported_required = any(
+        token in context
+        for token in ("进口", "原装", "报关", "原产地", "境外", "海外", "合法来源")
+    )
+    authorization_required = any(
+        token in context
+        for token in ("授权书", "授权文件", "厂家授权", "代理授权", "合法来源", "经销授权")
+    )
+    registration_required = medical_required or any(
+        token in context for token in ("注册证", "备案凭证", "备案证明", "备案证")
+    )
+    supplier_license_required = medical_required or any(
+        token in context for token in ("经营许可证", "经营备案", "行业许可证", "资质证书", "备案凭证")
+    )
+    manufacturer_license_required = medical_required or any(
+        token in context for token in ("生产许可证", "生产备案", "生产许可", "制造许可证")
+    )
+    quality_system_required = any(
+        token in context for token in ("ISO", "ISO9001", "ISO13485", "质量管理体系", "服务体系认证")
+    )
+    test_report_required = any(
+        token in context for token in ("检测报告", "检验报告", "测试报告", "质检报告", "第三方报告")
+    )
+    engineer_required = any(
+        token in context for token in ("工程师资质", "厂家工程师", "售后服务工程师", "项目人员清单", "服务人员资质")
+    )
+    certification_required = any(
+        token in context for token in ("3C", "CCC", "节能", "环保", "能效", "环境标志")
+    )
+    manufacturer_identity_required = any(
+        token in context for token in ("生产厂家", "制造商", "厂家", "品牌方")
+    ) or authorization_required or registration_required or bool(products)
+
+    _append_unique_text(titles, "投标公司资质-营业执照")
+    if supplier_license_required:
+        if medical_required:
+            _append_unique_text(titles, "投标公司资质-医疗器械经营许可证/备案凭证")
+        else:
+            _append_unique_text(titles, "投标公司资质-行业许可证/备案凭证")
+    if quality_system_required:
+        _append_unique_text(titles, "投标公司资质-质量管理体系/服务体系认证证书")
+
+    if manufacturer_identity_required:
+        _append_unique_text(titles, "生产厂家资质-营业执照")
+    if manufacturer_license_required:
+        if medical_required:
+            _append_unique_text(titles, "生产厂家资质-医疗器械生产许可证/经营许可证/备案凭证")
+        else:
+            _append_unique_text(titles, "生产厂家资质-行业生产许可证/备案凭证")
+    if engineer_required:
+        _append_unique_text(titles, "生产厂家资质-厂家工程师/售后服务工程师资质")
+
+    multi_package = len(packages) > 1
+    for pkg in packages:
+        product = products.get(str(getattr(pkg, "package_id", "")))
+        suffix = _package_doc_suffix(pkg, multi_package)
+        if registration_required or _clean_text(getattr(product, "registration_number", "")):
+            _append_unique_text(titles, f"投标产品资质-注册证/备案凭证{suffix}")
+        if authorization_required or _clean_text(getattr(product, "authorization_letter", "")):
+            _append_unique_text(titles, f"投标产品资质-授权书/合法来源证明{suffix}")
+        if imported_required or _product_requires_import_docs(product):
+            _append_unique_text(titles, f"投标产品资质-进口报关单/原产地证明{suffix}")
+        if test_report_required:
+            _append_unique_text(titles, f"投标产品资质-检验报告/检测报告{suffix}")
+        if certification_required:
+            _append_unique_text(titles, f"投标产品资质-节能/环保/3C认证证明{suffix}")
+        certifications = list(getattr(product, "certifications", []) or []) if product is not None else []
+        if certifications:
+            _append_unique_text(titles, f"投标产品资质-认证证书{suffix}")
+
+    if not titles:
+        titles = [
+            "投标公司资质-营业执照",
+            "生产厂家资质-营业执照",
+            "投标产品资质-授权书/合法来源证明",
+        ]
+    return titles
+
+
+def _build_vendor_qualification_paste_section(
+    tender,
+    packages: list[ProcurementPackage] | None,
+    tender_raw: str,
+    *,
+    products: dict[str, object] | None = None,
+    required_materials: list[str] | None = None,
+) -> str:
+    """构建厂商资质文件人工粘贴区。"""
+    titles = _infer_vendor_qualification_titles(
+        tender,
+        packages,
+        tender_raw,
+        products=products,
+        required_materials=required_materials,
+    )
+    lines = [
+        "## 相关证件（厂商资质文件，人工粘贴区）",
+        "以下标题由系统结合项目属性、包件信息及招标文件中出现的许可、注册、授权、进口、检测等要求自动整理，请在对应标题下粘贴完整证照扫描件；不适用项可删除。",
+        "",
+    ]
+
+    for idx, title in enumerate(titles, start=1):
+        lines.append(f"### （{_cn_ordinal(idx)}）{title}")
+        lines.append("[[PASTE_AREA:8]]")
+        if idx < len(titles):
+            lines.extend(["", "[PAGE_BREAK]", ""])
+
+    return "\n".join(lines).strip()
+
+
+def _append_vendor_qualification_paste_section(
+    base_content: str,
+    tender,
+    packages: list[ProcurementPackage] | None,
+    tender_raw: str,
+    *,
+    products: dict[str, object] | None = None,
+    required_materials: list[str] | None = None,
+) -> str:
+    """在现有章节后追加厂商资质文件人工粘贴区。"""
+    block = _build_vendor_qualification_paste_section(
+        tender,
+        packages,
+        tender_raw,
+        products=products,
+        required_materials=required_materials,
+    )
+    base = str(base_content or "").strip()
+    if not base:
+        return block
+    if "相关证件（厂商资质文件" in base or "投标公司资质-营业执照" in base:
+        return base
+    return f"{base}\n\n{block}".strip()
 
 
 def _build_service_supply_points(
