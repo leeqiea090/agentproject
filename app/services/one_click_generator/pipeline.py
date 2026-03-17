@@ -217,6 +217,7 @@ def generate_bid_sections(
     normalized_result: dict[str, Any] | None = None,
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, dict[str, Any]] | None = None,
+    required_materials: list[str] | None = None,
     selected_packages: list[str] | None = None,
     require_validation_pass: bool = False,
 ) -> BidGenerationResult:
@@ -345,6 +346,7 @@ def generate_bid_sections(
         tender_raw=tender_raw,
         products=products,
         active_packages=active_packages,
+        required_materials=required_materials,
         normalized_result=normalized_payload,
         evidence_result=evidence_result,
         product_profiles=profile_payload,

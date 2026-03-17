@@ -1068,6 +1068,7 @@ def _build_cs_sections(
     products: dict | None = None,
     active_packages: list | None = None,
     *,
+    required_materials: list[str] | None = None,
     normalized_result: dict | None = None,
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
@@ -1195,12 +1196,19 @@ def _build_cs_sections(
     sections.append(
         BidDocumentSection(
             section_title="十一、资格承诺函",
-            content=_normalize_hlj_supplier_qualification_template(
-                _build_cs_template_section(
-                    tender_raw,
-                    "十一、资格承诺函",
-                    _build_hlj_supplier_qualification_commitment_template(),
-                )
+            content=_append_vendor_qualification_paste_section(
+                _normalize_hlj_supplier_qualification_template(
+                    _build_cs_template_section(
+                        tender_raw,
+                        "十一、资格承诺函",
+                        _build_hlj_supplier_qualification_commitment_template(),
+                    )
+                ),
+                tender,
+                packages,
+                tender_raw,
+                products=products,
+                required_materials=required_materials,
             ),
         )
     )

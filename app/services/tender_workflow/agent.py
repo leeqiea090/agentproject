@@ -550,6 +550,7 @@ class TenderWorkflowAgent:
             normalized_result=normalized_result,
             evidence_result=evidence_result,
             product_profiles=product_profiles,
+            required_materials=analysis_result.get("required_materials"),
         )
         sections = gen_result.sections
 

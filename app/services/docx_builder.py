@@ -15,6 +15,7 @@ from app.services.one_click_generator.format_driven_sections.common import (
     _build_disabled_unit_declaration_template,
     _build_hlj_supplier_qualification_commitment_template,
     _build_small_enterprise_declaration_template,
+    _build_vendor_qualification_paste_section,
 )
 
 
@@ -719,6 +720,17 @@ def _parse_and_render_markdown(
             doc.add_page_break()
             body_since_heading = False
 
+        elif re.fullmatch(r"\[\[PASTE_AREA:(\d+)]]", stripped):
+            match = re.fullmatch(r"\[\[PASTE_AREA:(\d+)]]", stripped)
+            blank_lines = max(3, min(int(match.group(1)), 20)) if match else 8
+            for _ in range(blank_lines):
+                para = doc.add_paragraph()
+                run = para.add_run(" ")
+                run.font.size = Pt(11)
+                para.paragraph_format.space_after = Pt(0)
+            rendered_body = True
+            body_since_heading = True
+
         # Markdown 表格：收集连续的表格行一起渲染
         elif stripped.startswith("|"):
             table_lines = []
@@ -1045,6 +1057,7 @@ def _backfill_required_sections(sections, tender=None):
         "二、报价书": "【待人工补齐：按招标文件原格式填写报价书】",
         "三、报价一览表": "【待人工补齐：按招标文件原格式填写报价一览表】",
         "四、资格承诺函": _build_hlj_supplier_qualification_commitment_template(),
+        "五、资格证明文件": _build_vendor_qualification_paste_section(tender, packages, ""),
         "五、技术偏离及详细配置明细表": "【待人工补齐：按采购文件逐条填写技术偏离及详细配置明细】",
         "六、技术服务和售后服务的内容及措施": "【待人工补齐：按采购文件补齐供货、安装调试、验收、售后服务方案】",
         "七、法定代表人/单位负责人授权书": "【待人工补齐：法定代表人/单位负责人授权书】",

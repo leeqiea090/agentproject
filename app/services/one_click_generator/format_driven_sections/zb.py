@@ -2025,6 +2025,7 @@ def _build_zb_section_content(
     packages: list,
     *,
     products: dict[str, Any] | None = None,
+    required_materials: list[str] | None = None,
     normalized_result: dict[str, Any] | None = None,
     evidence_result: dict[str, Any] | None = None,
     product_profiles: dict[str, Any] | None = None,
@@ -2148,9 +2149,17 @@ def _build_zb_section_content(
 """.strip()
 
     if _title_has_any(title, ("资格证明", "资格文件", "资格材料")):
+        base = ""
         if raw and _looks_like_safe_zb_template_title(title):
-            return raw + "\n\n【请逐项补齐对应证明文件，并标注页码。】"
-        return "【待按招标文件要求逐项提供资格证明文件、资信材料、许可证/备案凭证、财务/纳税/社保证明等。】"
+            base = raw + "\n\n请按招标文件要求补齐以下厂商资质及产品证照，并在正式成稿时补充对应页码。"
+        return _append_vendor_qualification_paste_section(
+            base,
+            tender,
+            packages,
+            tender_raw,
+            products=products,
+            required_materials=required_materials,
+        )
 
     if _title_has_any(title, ("商务条款", "商务偏离", "商务响应")):
         return _build_zb_business_deviation_table(tender, packages, tender_raw)
@@ -2446,6 +2455,7 @@ def _build_zb_sections(
     products: dict | None = None,
     active_packages: list | None = None,
     *,
+    required_materials: list[str] | None = None,
     normalized_result: dict | None = None,
     evidence_result: dict | None = None,
     product_profiles: dict | None = None,
@@ -2507,6 +2517,7 @@ def _build_zb_sections(
                     tender_raw,
                     packages,
                     products=products,
+                    required_materials=required_materials,
                     normalized_result=normalized_result,
                     evidence_result=evidence_result,
                     product_profiles=product_profiles,
@@ -2525,6 +2536,7 @@ def _build_zb_sections(
                     tender_raw,
                     packages,
                     products=products,
+                    required_materials=required_materials,
                     normalized_result=normalized_result,
                     evidence_result=evidence_result,
                     product_profiles=product_profiles,
@@ -2549,6 +2561,7 @@ def _build_zb_sections(
                     tender_raw,
                     packages,
                     products=products,
+                    required_materials=required_materials,
                     normalized_result=normalized_result,
                     evidence_result=evidence_result,
                     product_profiles=product_profiles,
