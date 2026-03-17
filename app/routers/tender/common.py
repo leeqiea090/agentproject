@@ -30,6 +30,7 @@ bid_storage: dict[str, dict] = {}
 workflow_storage: dict[str, dict] = {}
 workflow_kb_indexed_sources: set[str] = set()
 one_click_job_storage: dict[str, dict] = {}
+one_click_session_storage: dict[str, dict] = {}
 
 _PLACEHOLDER_COMPANY = CompanyProfile(
     company_id="placeholder",

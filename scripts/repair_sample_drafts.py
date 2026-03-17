@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 import re
 import sys
@@ -15,8 +16,10 @@ from app.services.one_click_generator.format_driven_sections.common import (
     _build_manufacturer_authorization_template,
     _build_service_acceptance_points,
     _build_service_after_sales_points,
+    _build_service_commitment_points,
     _build_service_fee_commitment_template,
     _build_service_installation_points,
+    _build_service_milestone_points,
     _build_service_packaging_points,
     _build_small_enterprise_declaration_template,
     _build_service_supply_points,
@@ -56,6 +59,85 @@ NEW_COMPANY_EXPLANATION = (
     "写明成立时间、适用依据及不能提供相关证明材料的原因，并同步附营业执照、主管部门说明或其他佐证材料。"
 )
 
+TP_SECTION_GROUPS = [
+    (
+        "第一章、资格性证明文件",
+        [
+            "四、资格承诺函",
+            "七、法定代表人/单位负责人授权书",
+            "八、法定代表人/单位负责人和授权代表身份证明",
+        ],
+    ),
+    (
+        "第二章、符合性承诺",
+        [
+            "十一、投标人关联单位的说明",
+            "九、小微企业声明函",
+            "十、残疾人福利性单位声明函",
+        ],
+    ),
+    (
+        "第三章、商务及技术部分",
+        [
+            "二、报价书",
+            "三、报价一览表",
+            "六、技术服务和售后服务的内容及措施",
+        ],
+    ),
+    (
+        "第四章、报价书附件",
+        [
+            "五、技术偏离及详细配置明细表",
+            "附一、资格性审查响应对照表",
+            "附二、符合性审查响应对照表",
+            "附三、详细评审响应对照表",
+            "附四、投标无效情形汇总及自检表",
+        ],
+    ),
+]
+
+CS_SECTION_GROUPS = [
+    (
+        "第一章、资格性证明文件",
+        [
+            "十一、资格承诺函",
+            "六、法定代表人/单位负责人授权书",
+            "七、法定代表人/单位负责人和授权代表身份证明",
+        ],
+    ),
+    (
+        "第二章、符合性承诺",
+        [
+            "十、投标人关联单位的说明",
+            "八、小微企业声明函",
+            "九、残疾人福利性单位声明函",
+        ],
+    ),
+    (
+        "第三章、商务及技术部分",
+        [
+            "二、首轮报价表",
+            "三、分项报价表",
+            "五、技术服务和售后服务的内容及措施",
+        ],
+    ),
+    (
+        "第四章、报价书附件",
+        [
+            "四、技术偏离及详细配置明细表",
+            "附一、资格性审查响应对照表",
+            "附二、符合性审查响应对照表",
+            "附三、详细评审响应对照表",
+            "附四、投标无效情形汇总及自检表",
+        ],
+    ),
+]
+
+SECTION_GROUPS_BY_FILE = {
+    "投标底稿_检验科购置全自动电泳仪等设备 (3).docx": TP_SECTION_GROUPS,
+    "投标底稿_手术用头架、X射线血液辐照设备(二次).docx": CS_SECTION_GROUPS,
+}
+
 
 def _delete_paragraph(paragraph) -> None:
     element = paragraph._element
@@ -94,6 +176,7 @@ def _repair_document(path: Path) -> dict[str, int]:
         "deduped": 0,
         "replaced": 0,
         "blocks": 0,
+        "reordered": 0,
     }
 
     paragraphs = list(doc.paragraphs)
@@ -237,6 +320,10 @@ def _repair_document(path: Path) -> dict[str, int]:
         )
         stats["blocks"] += 2
 
+    section_groups = SECTION_GROUPS_BY_FILE.get(path.name)
+    if section_groups and _reorder_document_sections(doc, section_groups):
+        stats["reordered"] += 1
+
     doc.save(path)
     return stats
 
@@ -307,6 +394,85 @@ def _normalize_doc_line(text: str) -> str:
     return (text or "").strip().lstrip("-• ").strip()
 
 
+def _element_text(element) -> str:
+    texts = [node.text for node in element.iter() if node.tag.endswith("}t") and node.text]
+    return _normalize_doc_line("".join(texts))
+
+
+def _is_paragraph_element(element) -> bool:
+    return element.tag.endswith("}p")
+
+
+def _is_section_properties_element(element) -> bool:
+    return element.tag.endswith("}sectPr")
+
+
+def _reorder_document_sections(doc: Document, section_groups: list[tuple[str, list[str]]]) -> bool:
+    body = doc.element.body
+    children = list(body.iterchildren())
+    if not children:
+        return False
+
+    sect_pr = deepcopy(children[-1]) if _is_section_properties_element(children[-1]) else None
+    content_children = children[:-1] if sect_pr is not None else children
+    chapter_titles = {title for title, _ in section_groups}
+    ordered_titles = [title for _, titles in section_groups for title in titles]
+    known_titles = set(ordered_titles)
+
+    block_starts: list[tuple[int, str]] = []
+    seen_titles: set[str] = set()
+    for idx, child in enumerate(content_children):
+        if not _is_paragraph_element(child):
+            continue
+        text = _element_text(child)
+        if text in known_titles and text not in seen_titles:
+            block_starts.append((idx, text))
+            seen_titles.add(text)
+
+    if not block_starts:
+        return False
+
+    block_starts.sort()
+    prefix = [
+        deepcopy(child)
+        for child in content_children[:block_starts[0][0]]
+        if _element_text(child) not in chapter_titles
+    ]
+    blocks: dict[str, list] = {}
+
+    for position, (start_idx, title) in enumerate(block_starts):
+        end_idx = block_starts[position + 1][0] if position + 1 < len(block_starts) else len(content_children)
+        blocks[title] = [
+            deepcopy(child)
+            for child in content_children[start_idx:end_idx]
+            if _element_text(child) not in chapter_titles
+        ]
+
+    if not any(title in blocks for title in ordered_titles):
+        return False
+
+    for child in list(body.iterchildren()):
+        body.remove(child)
+
+    for child in prefix:
+        body.append(child)
+
+    for chapter_title, titles in section_groups:
+        chapter_sections = [title for title in titles if title in blocks]
+        if not chapter_sections:
+            continue
+        paragraph = doc.add_paragraph(chapter_title)
+        if paragraph.runs:
+            paragraph.runs[0].bold = True
+        for title in chapter_sections:
+            for child in blocks[title]:
+                body.append(child)
+
+    if sect_pr is not None:
+        body.append(sect_pr)
+    return True
+
+
 def _extract_service_packages(doc: Document, start_title: str, end_title: str) -> list[SimpleNamespace]:
     packages: list[SimpleNamespace] = []
     current: dict[str, str] | None = None
@@ -355,14 +521,15 @@ def _extract_service_packages(doc: Document, start_title: str, end_title: str) -
 
 
 def _build_sample_service_section_lines(packages: list[SimpleNamespace]) -> list[str]:
-    lines: list[str] = []
+    tech_lines: list[str] = ["（一）技术服务"]
+    service_lines: list[str] = ["（二）售后服务"]
     for pkg in packages:
         item_name = getattr(pkg, "item_name", "") or "【待填写：货物名称】"
         product_identity = getattr(pkg, "product_identity", "") or item_name
         delivery_time = getattr(pkg, "delivery_time", "") or "按采购文件要求"
         delivery_place = getattr(pkg, "delivery_place", "") or "采购人指定地点"
 
-        lines.extend([
+        tech_lines.extend([
             f"包{getattr(pkg, 'package_id', '')}：{item_name}",
             f"拟投产品：{product_identity}",
             f"交货期：{delivery_time}",
@@ -386,12 +553,31 @@ def _build_sample_service_section_lines(packages: list[SimpleNamespace]) -> list
             ),
             "4. 培训实施",
             *_build_service_training_points(item_name),
-            "5. 验收与资料移交",
+            "5. 项目实施里程碑",
+            *_build_service_milestone_points(
+                item_name,
+                delivery_time,
+                delivery_place=delivery_place,
+            ),
+            "6. 验收与资料移交",
             *_build_service_acceptance_points(item_name),
-            "6. 售后与维保安排",
+        ])
+        service_lines.extend([
+            f"包{getattr(pkg, 'package_id', '')}：{item_name}",
+            f"拟投产品：{product_identity}",
+            f"交货期：{delivery_time}",
+            f"交货地点：{delivery_place}",
+            "1. 售后与维保安排",
             *_build_service_after_sales_points(item_name),
+            "2. 服务保障承诺",
+            *_build_service_commitment_points(
+                item_name,
+                delivery_time,
+                delivery_place=delivery_place,
+            ),
         ])
 
+    lines = tech_lines + [""] + service_lines
     lines.extend([
         "供应商全称：【待填写：投标人名称】",
         "日期：【待填写：日期】",

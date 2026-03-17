@@ -1,563 +1,1122 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>招标文件一键生成投标文件</title>
+  <title>单包交互式投标文档生成</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
-      background: linear-gradient(135deg, #eaf0fb 0%, #f5f7ff 100%);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
+    :root {
+      --bg-1: #f4efe6;
+      --bg-2: #edf4fb;
+      --paper: rgba(255, 255, 255, 0.86);
+      --paper-strong: #ffffff;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: rgba(15, 23, 42, 0.08);
+      --brand: #0f5b78;
+      --brand-soft: #d8eff7;
+      --accent: #b85c38;
+      --ok: #13795b;
+      --ok-bg: #e7f8ef;
+      --error: #a63f34;
+      --error-bg: #fdebea;
+      --shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
+      --radius-xl: 28px;
+      --radius-lg: 18px;
+      --radius-md: 12px;
     }
 
-    .logo {
-      font-size: 2rem;
-      margin-bottom: 8px;
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(184, 92, 56, 0.14), transparent 30%),
+        radial-gradient(circle at top right, rgba(15, 91, 120, 0.12), transparent 32%),
+        linear-gradient(135deg, var(--bg-1) 0%, var(--bg-2) 100%);
+      padding: 28px 18px 48px;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(15, 23, 42, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(15, 23, 42, 0.035) 1px, transparent 1px);
+      background-size: 28px 28px;
+      mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.4), transparent 70%);
+    }
+
+    .shell {
+      max-width: 1220px;
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 20px;
+      margin-bottom: 22px;
+    }
+
+    .hero-card,
+    .panel {
+      background: var(--paper);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      box-shadow: var(--shadow);
+      border-radius: var(--radius-xl);
+    }
+
+    .hero-card {
+      padding: 28px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      right: -24px;
+      top: -24px;
+      width: 160px;
+      height: 160px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(15, 91, 120, 0.2), transparent 68%);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--brand);
+      margin-bottom: 14px;
     }
 
     h1 {
-      font-size: 1.6rem;
-      font-weight: 700;
-      color: #1a3a6b;
-      margin-bottom: 6px;
-      letter-spacing: 1px;
+      margin: 0 0 12px;
+      font-size: clamp(2rem, 4vw, 3.1rem);
+      line-height: 1.08;
+      letter-spacing: -.04em;
     }
 
-    .subtitle {
-      font-size: 0.9rem;
-      color: #64748b;
-      margin-bottom: 36px;
+    .hero-subtitle {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.8;
+      color: var(--muted);
+      max-width: 52ch;
     }
 
-    .card {
-      background: #fff;
-      border-radius: 16px;
-      box-shadow: 0 4px 24px rgba(37,99,235,0.10);
-      padding: 40px 48px;
-      width: 100%;
-      max-width: 520px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 24px;
+    .hero-side {
+      padding: 22px;
+      display: grid;
+      gap: 14px;
     }
 
-    /* 上传区 */
+    .hero-side-box {
+      border-radius: 20px;
+      padding: 18px 18px 16px;
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.52));
+      border: 1px solid var(--line);
+    }
+
+    .hero-side-box h2 {
+      margin: 0 0 8px;
+      font-size: 15px;
+    }
+
+    .hero-side-box p,
+    .hero-side-box li {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 13px;
+    }
+
+    .hero-side-box ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .panel {
+      padding: 22px;
+    }
+
+    .panel + .panel {
+      margin-top: 18px;
+    }
+
+    .panel-title {
+      margin: 0 0 8px;
+      font-size: 18px;
+    }
+
+    .panel-subtitle {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
     .upload-zone {
-      width: 100%;
-      border: 2px dashed #93c5fd;
-      border-radius: 12px;
-      background: #f0f7ff;
-      padding: 32px 20px;
+      border: 1.5px dashed rgba(15, 91, 120, 0.35);
+      background: linear-gradient(180deg, rgba(216, 239, 247, 0.7), rgba(255, 255, 255, 0.9));
+      border-radius: 20px;
+      padding: 24px 18px;
       text-align: center;
-      cursor: pointer;
-      transition: border-color .2s, background .2s;
       position: relative;
+      cursor: pointer;
+      transition: transform .18s ease, border-color .18s ease, background .18s ease;
     }
-    .upload-zone:hover, .upload-zone.drag-over {
-      border-color: #2563eb;
-      background: #dbeafe;
+
+    .upload-zone:hover,
+    .upload-zone.drag-over {
+      transform: translateY(-1px);
+      border-color: rgba(15, 91, 120, 0.7);
+      background: linear-gradient(180deg, rgba(216, 239, 247, 0.92), rgba(255, 255, 255, 0.94));
     }
-    .upload-zone input[type=file] {
+
+    .upload-zone input[type="file"] {
       position: absolute;
       inset: 0;
       opacity: 0;
       cursor: pointer;
     }
-    .upload-icon { font-size: 2.4rem; margin-bottom: 10px; }
+
+    .upload-mark {
+      width: 62px;
+      height: 62px;
+      border-radius: 20px;
+      margin: 0 auto 14px;
+      display: grid;
+      place-items: center;
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid rgba(15, 91, 120, 0.12);
+      font-size: 28px;
+    }
+
     .upload-label {
-      font-size: 1rem;
-      font-weight: 600;
-      color: #1e40af;
-      margin-bottom: 6px;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--brand);
+      margin-bottom: 8px;
     }
-    .upload-hint {
-      font-size: 0.78rem;
-      color: #94a3b8;
+
+    .upload-hint,
+    .chosen-file,
+    .import-hint {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
     }
-    .file-chosen {
-      margin-top: 10px;
-      font-size: 0.85rem;
-      color: #2563eb;
+
+    .chosen-file {
+      margin-top: 8px;
+      color: var(--ink);
       font-weight: 600;
       word-break: break-all;
     }
 
-    /* 按钮 */
-    .btn {
+    .stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .input,
+    .select,
+    .textarea {
       width: 100%;
-      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.9);
+      padding: 12px 14px;
+      font: inherit;
+      color: var(--ink);
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+
+    .textarea {
+      min-height: 96px;
+      resize: vertical;
+    }
+
+    .input:focus,
+    .select:focus,
+    .textarea:focus {
+      outline: none;
+      border-color: rgba(15, 91, 120, 0.55);
+      box-shadow: 0 0 0 4px rgba(15, 91, 120, 0.08);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
       border: none;
-      border-radius: 10px;
-      font-size: 1rem;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font: inherit;
       font-weight: 700;
       cursor: pointer;
-      letter-spacing: 1px;
-      transition: opacity .2s, transform .1s;
+      transition: transform .15s ease, opacity .15s ease, box-shadow .15s ease;
     }
-    .btn:active { transform: scale(.98); }
-    .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+    .btn:disabled {
+      cursor: not-allowed;
+      opacity: .52;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
 
     .btn-primary {
-      background: linear-gradient(90deg, #1d4ed8 0%, #2563eb 100%);
       color: #fff;
-    }
-    .btn-success {
-      background: linear-gradient(90deg, #059669 0%, #10b981 100%);
-      color: #fff;
+      background: linear-gradient(135deg, #0f5b78, #1b7a84);
+      box-shadow: 0 10px 24px rgba(15, 91, 120, 0.18);
     }
 
-    /* 进度 / 状态 */
-    .status-box {
-      width: 100%;
-      border-radius: 10px;
-      padding: 14px 18px;
-      font-size: 0.88rem;
-      font-weight: 500;
-      text-align: center;
-      display: none;
+    .btn-secondary {
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--line);
     }
-    .status-box.info  { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
-    .status-box.ok    { background: #ecfdf5; color: #065f46; border: 1px solid #6ee7b7; }
-    .status-box.error { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; }
+
+    .btn-accent {
+      color: #fff;
+      background: linear-gradient(135deg, #b85c38, #d27748);
+      box-shadow: 0 10px 24px rgba(184, 92, 56, 0.18);
+    }
+
+    .status-box {
+      display: none;
+      border-radius: 16px;
+      padding: 14px 16px;
+      font-size: 14px;
+      line-height: 1.7;
+      border: 1px solid transparent;
+      margin-bottom: 16px;
+    }
+
+    .status-box.info {
+      display: block;
+      background: rgba(216, 239, 247, 0.68);
+      color: var(--brand);
+      border-color: rgba(15, 91, 120, 0.16);
+    }
+
+    .status-box.ok {
+      display: block;
+      background: var(--ok-bg);
+      color: var(--ok);
+      border-color: rgba(19, 121, 91, 0.18);
+    }
+
+    .status-box.error {
+      display: block;
+      background: var(--error-bg);
+      color: var(--error);
+      border-color: rgba(166, 63, 52, 0.16);
+    }
 
     .spinner {
       display: inline-block;
-      width: 16px; height: 16px;
+      width: 14px;
+      height: 14px;
+      margin-right: 8px;
       border: 2px solid currentColor;
       border-top-color: transparent;
       border-radius: 50%;
-      animation: spin .7s linear infinite;
       vertical-align: middle;
-      margin-right: 6px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* 进度条 */
-    .progress-wrap {
-      width: 100%;
-      height: 6px;
-      background: #e2e8f0;
-      border-radius: 99px;
-      overflow: hidden;
-      display: none;
-    }
-    .progress-bar {
-      height: 100%;
-      background: linear-gradient(90deg, #2563eb, #60a5fa);
-      border-radius: 99px;
-      width: 0%;
-      transition: width .4s ease;
+      animation: spin .72s linear infinite;
     }
 
-    .live-progress {
-      width: 100%;
-      display: none;
-      border-radius: 12px;
-      padding: 14px 16px;
-      background: #f8fbff;
-      border: 1px solid #dbeafe;
+    @keyframes spin {
+      to { transform: rotate(360deg); }
     }
-    .live-progress-title {
-      font-size: 0.78rem;
-      color: #64748b;
-      margin-bottom: 8px;
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
     }
-    .live-progress-current {
-      font-size: 1rem;
+
+    .summary-card {
+      border-radius: 18px;
+      padding: 16px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.82));
+      border: 1px solid var(--line);
+    }
+
+    .summary-card .summary-label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .summary-card .summary-value {
+      font-size: 18px;
       font-weight: 700;
-      color: #1e3a8a;
-      margin-bottom: 8px;
+      line-height: 1.3;
+      word-break: break-word;
     }
-    .live-progress-sub {
-      font-size: 0.82rem;
-      color: #64748b;
-      margin-bottom: 12px;
-    }
-    .step-track {
+
+    .chips {
       display: flex;
+      gap: 8px;
       flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 7px 12px;
+      background: rgba(15, 91, 120, 0.08);
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .section-list {
+      display: grid;
       gap: 8px;
     }
-    .step-pill {
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 0.78rem;
-      background: #e2e8f0;
-      color: #64748b;
-      transition: all .2s ease;
-    }
-    .step-pill.active {
-      background: #dbeafe;
-      color: #1d4ed8;
-      font-weight: 700;
-    }
-    .step-pill.done {
-      background: #dcfce7;
-      color: #047857;
-    }
-    .step-pill.error {
-      background: #fee2e2;
-      color: #b91c1c;
+
+    .section-item {
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid var(--line);
+      font-size: 13px;
+      color: var(--ink);
     }
 
-    .footer {
-      margin-top: 28px;
-      font-size: 0.75rem;
-      color: #cbd5e1;
+    .prompt-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .prompt-count {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .prompt-list {
+      display: grid;
+      gap: 14px;
+    }
+
+    .prompt-card {
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 248, 250, 0.9));
+      padding: 16px;
+    }
+
+    .prompt-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .prompt-title {
+      margin: 0;
+      font-size: 15px;
+    }
+
+    .prompt-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .meta-pill {
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: rgba(184, 92, 56, 0.1);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .prompt-help {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.7;
+      margin-bottom: 10px;
+    }
+
+    .prompt-sections {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .empty-state {
+      border-radius: 22px;
+      padding: 34px 20px;
+      text-align: center;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(249, 250, 251, 0.78));
+      border: 1px dashed rgba(15, 23, 42, 0.12);
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    .hidden { display: none !important; }
+
+    @media (max-width: 1024px) {
+      .hero,
+      .layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 700px) {
+      body {
+        padding: 18px 12px 28px;
+      }
+
+      .hero-card,
+      .panel {
+        border-radius: 22px;
+        padding: 18px;
+      }
+
+      .summary-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .prompt-head {
+        flex-direction: column;
+      }
     }
   </style>
 </head>
 <body>
+  <div class="shell">
+    <section class="hero">
+      <div class="hero-card">
+        <div class="eyebrow">Single Package Mode</div>
+        <h1>只生成一个包，先交互补齐，再输出 Word</h1>
+        <p class="hero-subtitle">
+          先上传招标文件，系统只针对你选中的包生成待填写项。重复字段只问一次，
+          页面只保留在线交互填写，再下载最终文档。
+        </p>
+      </div>
+      <div class="hero-side hero-card">
+        <div class="hero-side-box">
+          <h2>流程</h2>
+          <ul>
+            <li>上传招标文件并识别包件</li>
+            <li>选择一个目标包生成待填写项</li>
+            <li>页面交互填写待补字段</li>
+            <li>只生成当前包的 Word 文档</li>
+          </ul>
+        </div>
+      </div>
+    </section>
 
-  <div class="logo">📄</div>
-  <h1>招标文件一键投标</h1>
-  <p class="subtitle">上传招标文件，AI 自动生成完整投标响应文件（Word）</p>
+    <div class="layout">
+      <aside>
+        <section class="panel">
+          <h2 class="panel-title">1. 上传并解析</h2>
+          <p class="panel-subtitle">上传后先做解析，不会立即生成全部包。</p>
 
-  <div class="card">
+          <label class="upload-zone" id="uploadZone">
+            <input type="file" id="fileInput" accept=".pdf,.doc,.docx" />
+            <div class="upload-mark">⤴</div>
+            <div class="upload-label">拖拽或点击上传招标文件</div>
+            <div class="upload-hint">支持 PDF / Word（.doc / .docx）</div>
+            <div class="chosen-file" id="chosenFile"></div>
+          </label>
 
-    <!-- 上传区 -->
-    <div class="upload-zone" id="uploadZone">
-      <input type="file" id="fileInput" accept=".pdf,.docx,.doc" />
-      <div class="upload-icon">☁️</div>
-      <div class="upload-label">点击或拖拽上传招标文件</div>
-      <div class="upload-hint">支持 PDF、Word（.docx）格式</div>
-      <div class="file-chosen" id="fileChosen"></div>
+          <div class="button-row" style="margin-top:16px;">
+            <button class="btn btn-primary" id="analyzeBtn" type="button">解析招标文件</button>
+          </div>
+        </section>
+
+        <section class="panel hidden" id="packagePanel">
+          <h2 class="panel-title">2. 选择目标包</h2>
+          <p class="panel-subtitle">后续只会生成你当前选中的一个包。</p>
+
+          <div class="stack">
+            <select class="select" id="packageSelect"></select>
+            <button class="btn btn-secondary" id="loadPromptsBtn" type="button">生成待填写项</button>
+          </div>
+        </section>
+
+        <section class="panel hidden" id="actionPanel">
+          <h2 class="panel-title">3. 生成文档</h2>
+          <p class="panel-subtitle">系统会把你填写的答案回填到当前包的所有对应位置。</p>
+
+          <div class="button-row">
+            <button class="btn btn-accent" id="generateBtn" type="button">生成当前包 Word</button>
+          </div>
+        </section>
+      </aside>
+
+      <main>
+        <section class="panel">
+          <div class="status-box" id="statusBox"></div>
+
+          <div class="summary-grid">
+            <div class="summary-card">
+              <div class="summary-label">项目名称</div>
+              <div class="summary-value" id="projectName">待上传</div>
+            </div>
+            <div class="summary-card">
+              <div class="summary-label">项目编号</div>
+              <div class="summary-value" id="projectNumber">待上传</div>
+            </div>
+            <div class="summary-card">
+              <div class="summary-label">当前包</div>
+              <div class="summary-value" id="currentPackage">未选择</div>
+            </div>
+          </div>
+
+          <div class="chips" id="packageChips"></div>
+        </section>
+
+        <section class="panel hidden" id="sectionPanel">
+          <h2 class="panel-title">本次将生成的章节</h2>
+          <p class="panel-subtitle">先看清楚当前包包含哪些章节，再决定补哪些字段。</p>
+          <div class="section-list" id="sectionList"></div>
+        </section>
+
+        <section class="panel">
+          <div class="prompt-toolbar">
+            <div>
+              <h2 class="panel-title" style="margin-bottom:4px;">交互式待填写项</h2>
+              <div class="prompt-count" id="promptCountText">先上传文件并选择包件。</div>
+            </div>
+          </div>
+
+          <div class="prompt-list hidden" id="promptList"></div>
+          <div class="empty-state" id="emptyState">
+            当前还没有待填写项。
+            <br />
+            先完成“上传并解析”与“选择目标包”。
+          </div>
+        </section>
+      </main>
     </div>
-
-    <!-- 进度条 -->
-    <div class="progress-wrap" id="progressWrap">
-      <div class="progress-bar" id="progressBar"></div>
-    </div>
-
-    <!-- 状态消息 -->
-    <div class="status-box" id="statusBox"></div>
-
-    <!-- 实时进度 -->
-    <div class="live-progress" id="liveProgress">
-      <div class="live-progress-title">当前进度</div>
-      <div class="live-progress-current" id="liveProgressCurrent">正在准备开始…</div>
-      <div class="live-progress-sub" id="liveProgressSub">系统会持续刷新当前处理阶段。</div>
-      <div class="step-track" id="stepTrack"></div>
-    </div>
-
-    <!-- 生成按钮 -->
-    <button class="btn btn-primary" id="btnGenerate" onclick="startGenerate()">
-      ✨ 一键生成投标文件
-    </button>
-
-    <!-- 下载按钮（生成后出现） -->
-    <button class="btn btn-success" id="downloadBtn" type="button" style="display:none; width:100%;">
-      ⬇ 下载投标文件（Word）
-    </button>
-
   </div>
 
-  <div class="footer">AI 生成的模板文件，请根据实际情况完善公司信息后使用</div>
+  <script>
+    const state = {
+      sessionId: '',
+      projectName: '',
+      projectNumber: '',
+      packages: [],
+      selectedPackage: '',
+      promptsByPackage: {},
+      answersByPackage: {},
+      busy: false,
+    };
 
-<script>
-const fileInput  = document.getElementById('fileInput');
-const fileChosen = document.getElementById('fileChosen');
-const statusBox  = document.getElementById('statusBox');
-const btnGen     = document.getElementById('btnGenerate');
-const progressWrap = document.getElementById('progressWrap');
-const progressBar  = document.getElementById('progressBar');
-const downloadBtn = document.getElementById('downloadBtn');
-const uploadZone   = document.getElementById('uploadZone');
-const liveProgress = document.getElementById('liveProgress');
-const liveProgressCurrent = document.getElementById('liveProgressCurrent');
-const liveProgressSub = document.getElementById('liveProgressSub');
-const stepTrack = document.getElementById('stepTrack');
+    const fileInput = document.getElementById('fileInput');
+    const chosenFile = document.getElementById('chosenFile');
+    const uploadZone = document.getElementById('uploadZone');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const packagePanel = document.getElementById('packagePanel');
+    const packageSelect = document.getElementById('packageSelect');
+    const loadPromptsBtn = document.getElementById('loadPromptsBtn');
+    const actionPanel = document.getElementById('actionPanel');
+    const generateBtn = document.getElementById('generateBtn');
+    const statusBox = document.getElementById('statusBox');
+    const projectNameEl = document.getElementById('projectName');
+    const projectNumberEl = document.getElementById('projectNumber');
+    const currentPackageEl = document.getElementById('currentPackage');
+    const packageChips = document.getElementById('packageChips');
+    const sectionPanel = document.getElementById('sectionPanel');
+    const sectionList = document.getElementById('sectionList');
+    const promptCountText = document.getElementById('promptCountText');
+    const promptList = document.getElementById('promptList');
+    const emptyState = document.getElementById('emptyState');
 
-const STEP_ORDER = ['queued', 'extracting', 'parsing', 'structuring', 'generating', 'building', 'completed'];
-const STEP_LABELS = {
-  queued: '准备开始',
-  extracting: '文档解析',
-  parsing: '需求抽取',
-  structuring: '条款整理',
-  generating: '章节生成',
-  building: '输出文档',
-  completed: '处理完成',
-  error: '处理失败',
-};
-
-let pollTimer = null;
-let activeJobId = '';
-let downloadUrl = '';
-let downloadFilename = '';
-let downloading = false;
-
-// 拖拽高亮
-uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
-['dragleave','drop'].forEach(ev => uploadZone.addEventListener(ev, () => uploadZone.classList.remove('drag-over')));
-uploadZone.addEventListener('drop', e => {
-  e.preventDefault();
-  if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; updateFileName(); }
-});
-
-fileInput.addEventListener('change', updateFileName);
-downloadBtn.addEventListener('click', downloadGeneratedFile);
-
-function updateFileName() {
-  const f = fileInput.files[0];
-  fileChosen.textContent = f ? `已选择：${f.name}` : '';
-  resetRunState();
-}
-
-function setStatus(type, msg) {
-  if (!type) { statusBox.style.display = 'none'; return; }
-  statusBox.className = `status-box ${type}`;
-  statusBox.style.display = 'block';
-  statusBox.innerHTML = msg;
-}
-
-function setProgress(pct) {
-  progressWrap.style.display = pct > 0 ? 'block' : 'none';
-  progressBar.style.width = pct + '%';
-}
-
-function resetRunState() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-  activeJobId = '';
-  downloadUrl = '';
-  downloadFilename = '';
-  downloading = false;
-  downloadBtn.disabled = false;
-  downloadBtn.textContent = '⬇ 下载投标文件（Word）';
-  downloadBtn.style.display = 'none';
-  setStatus('', '');
-  setProgress(0);
-  liveProgress.style.display = 'none';
-  stepTrack.innerHTML = '';
-}
-
-function renderStepTrack(stepCode, status) {
-  const activeIndex = STEP_ORDER.indexOf(stepCode);
-  stepTrack.innerHTML = STEP_ORDER.map((code, index) => {
-    let cls = 'step-pill';
-    if (status === 'error' && index === Math.max(activeIndex, 0)) cls += ' error';
-    else if (status === 'completed' || (activeIndex > -1 && index < activeIndex)) cls += ' done';
-    else if (code === stepCode) cls += ' active';
-    return `<span class="${cls}">${STEP_LABELS[code]}</span>`;
-  }).join('');
-}
-
-function updateLiveProgress(data) {
-  liveProgress.style.display = 'block';
-  liveProgressCurrent.textContent = data.message || '正在处理中…';
-  liveProgressSub.textContent = `当前阶段：${data.step_label || STEP_LABELS[data.step_code] || '处理中'} · 任务ID：${data.job_id}`;
-  renderStepTrack(data.step_code, data.status);
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function withNoCache(url) {
-  const u = new URL(url, window.location.origin);
-  u.searchParams.set('_ts', String(Date.now()));
-  return u.toString();
-}
-
-async function readResponseError(resp) {
-  const contentType = resp.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    const payload = await resp.json().catch(() => null);
-    if (payload && payload.detail) return payload.detail;
-  }
-
-  const text = await resp.text().catch(() => '');
-  return text.trim() || resp.statusText || '下载失败';
-}
-
-function inferFilename(resp, fallback) {
-  const disposition = resp.headers.get('content-disposition') || '';
-  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-  if (utf8Match && utf8Match[1]) {
-    try {
-      return decodeURIComponent(utf8Match[1]);
-    } catch (_) {
-      return utf8Match[1];
-    }
-  }
-
-  const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
-  if (plainMatch && plainMatch[1]) return plainMatch[1];
-  return fallback || '投标文件.docx';
-}
-
-function getErrorMessage(err) {
-  return err instanceof Error ? err.message : String(err || '未知错误');
-}
-
-async function fetchDownloadWithRetry(url, attempts = 3) {
-  let lastError = new Error('下载失败');
-
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      const resp = await fetch(withNoCache(url), {
-        method: 'GET',
-        cache: 'no-store',
-        credentials: 'same-origin',
-      });
-
-      if (!resp.ok) {
-        const message = await readResponseError(resp);
-        throw new Error(message);
-      }
-
-      return resp;
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < attempts) {
-        setStatus('info', `<span class="spinner"></span>下载中断，正在发起第 ${attempt + 1} 次下载…`);
-        await sleep(800 * attempt);
-
-      }
-    }
-  }
-
-  throw lastError;
-}
-
-async function downloadGeneratedFile() {
-  if (!downloadUrl || downloading) return;
-
-  downloading = true;
-  downloadBtn.disabled = true;
-  downloadBtn.textContent = '⏬ 正在下载…';
-  setStatus('info', '<span class="spinner"></span>正在下载文件…');
-
-  try {
-    const resp = await fetchDownloadWithRetry(downloadUrl);
-    const blob = await resp.blob();
-    if (!blob.size) throw new Error('下载文件为空，请重试');
-
-    const objectUrl = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = objectUrl;
-    anchor.download = inferFilename(resp, downloadFilename);
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-
-    setStatus('ok', '✅ 投标文件下载成功。');
-  } catch (err) {
-    setStatus('error', `❌ 下载失败：${getErrorMessage(err)}`);
-  } finally {
-    downloading = false;
-    downloadBtn.disabled = false;
-    downloadBtn.textContent = '⬇ 下载投标文件（Word）';
-  }
-}
-
-async function startGenerate() {
-  const f = fileInput.files[0];
-  if (!f) {
-    setStatus('error', '⚠️ 请先选择招标文件');
-    return;
-  }
-
-  const ext = f.name.split('.').pop().toLowerCase();
-  if (!['pdf', 'docx', 'doc'].includes(ext)) {
-    setStatus('error', '⚠️ 仅支持 PDF 或 Word（.docx）格式');
-    return;
-  }
-
-  // UI 状态
-  btnGen.disabled = true;
-  resetRunState();
-  setStatus('info', '<span class="spinner"></span>正在创建生成任务…');
-
-  try {
-    const formData = new FormData();
-    formData.append('file', f);
-
-    const resp = await fetch('/api/tender/one-click/start', {
-      method: 'POST',
-      body: formData,
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      chosenFile.textContent = file ? `已选择：${file.name}` : '';
+      resetAfterUploadChange();
     });
 
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-      throw new Error(err.detail || resp.statusText);
+    uploadZone.addEventListener('dragover', event => {
+      event.preventDefault();
+      uploadZone.classList.add('drag-over');
+    });
+
+    ['dragleave', 'drop'].forEach(type => {
+      uploadZone.addEventListener(type, () => uploadZone.classList.remove('drag-over'));
+    });
+
+    uploadZone.addEventListener('drop', event => {
+      event.preventDefault();
+      if (event.dataTransfer.files.length) {
+        fileInput.files = event.dataTransfer.files;
+        const file = fileInput.files[0];
+        chosenFile.textContent = file ? `已选择：${file.name}` : '';
+        resetAfterUploadChange();
+      }
+    });
+
+    analyzeBtn.addEventListener('click', prepareSession);
+    loadPromptsBtn.addEventListener('click', () => loadPrompts(packageSelect.value));
+    packageSelect.addEventListener('change', () => {
+      state.selectedPackage = packageSelect.value;
+      updateCurrentPackage();
+      renderPromptState();
+    });
+    generateBtn.addEventListener('click', generateDocument);
+
+    function setBusy(value) {
+      state.busy = value;
+      analyzeBtn.disabled = value;
+      loadPromptsBtn.disabled = value || !state.sessionId;
+      generateBtn.disabled = value || !state.sessionId || !state.selectedPackage;
+      packageSelect.disabled = value || !state.packages.length;
     }
 
-    const job = await resp.json();
-    activeJobId = job.job_id;
-    setProgress(job.progress || 1);
-    updateLiveProgress(job);
-    setStatus('info', `<span class="spinner"></span>${job.message || '正在处理中…'}`);
-    await pollJobStatus(activeJobId);
-    pollTimer = setInterval(() => {
-      pollJobStatus(activeJobId).catch(handlePollingError);
-    }, 1200);
-
-  } catch (err) {
-    setStatus('error', `❌ 生成失败：${getErrorMessage(err)}`);
-    btnGen.disabled = false;
-  } finally {
-    if (!activeJobId) btnGen.disabled = false;
-  }
-}
-
-function handlePollingError(err) {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-  setStatus('error', `❌ 状态刷新失败：${getErrorMessage(err)}`);
-  btnGen.disabled = false;
-}
-
-async function pollJobStatus(jobId) {
-  const resp = await fetch(`/api/tender/one-click/status/${jobId}`, { cache: 'no-store' });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-    throw new Error(err.detail || resp.statusText);
-  }
-
-  const data = await resp.json();
-  setProgress(data.progress || 0);
-  updateLiveProgress(data);
-
-  if (data.status === 'completed') {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+    function setStatus(type, message) {
+      if (!type || !message) {
+        statusBox.className = 'status-box';
+        statusBox.textContent = '';
+        return;
+      }
+      statusBox.className = `status-box ${type}`;
+      statusBox.innerHTML = message;
     }
-    setStatus('ok', '✅ 投标文件生成成功！点击下方按钮下载。');
-    downloadUrl = data.download_url;
-    downloadFilename = data.filename || '投标文件.docx';
-    downloadBtn.style.display = 'block';
-    btnGen.disabled = false;
-    return;
-  }
 
-  if (data.status === 'error') {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+    function getCurrentPromptPayload() {
+      return state.promptsByPackage[state.selectedPackage] || { prompts: [], section_titles: [] };
     }
-    setStatus('error', `❌ ${data.error || data.message || '生成失败'}`);
-    btnGen.disabled = false;
-    return;
-  }
 
-  setStatus('info', `<span class="spinner"></span>${data.message || '正在处理中…'}`);
-}
-</script>
+    function getCurrentPrompts() {
+      return getCurrentPromptPayload().prompts || [];
+    }
+
+    function getCurrentAnswers() {
+      if (!state.answersByPackage[state.selectedPackage]) {
+        state.answersByPackage[state.selectedPackage] = {};
+      }
+      return state.answersByPackage[state.selectedPackage];
+    }
+
+    function resetAfterUploadChange() {
+      state.sessionId = '';
+      state.projectName = '';
+      state.projectNumber = '';
+      state.packages = [];
+      state.selectedPackage = '';
+      state.promptsByPackage = {};
+      state.answersByPackage = {};
+      packagePanel.classList.add('hidden');
+      actionPanel.classList.add('hidden');
+      sectionPanel.classList.add('hidden');
+      sectionList.innerHTML = '';
+      packageSelect.innerHTML = '';
+      packageChips.innerHTML = '';
+      projectNameEl.textContent = '待上传';
+      projectNumberEl.textContent = '待上传';
+      currentPackageEl.textContent = '未选择';
+      promptList.innerHTML = '';
+      promptList.classList.add('hidden');
+      emptyState.classList.remove('hidden');
+      emptyState.innerHTML = '当前还没有待填写项。<br />先完成“上传并解析”与“选择目标包”。';
+      promptCountText.textContent = '先上传文件并选择包件。';
+      setStatus('', '');
+      setBusy(false);
+    }
+
+    function updateSummary() {
+      projectNameEl.textContent = state.projectName || '待上传';
+      projectNumberEl.textContent = state.projectNumber || '待上传';
+      updateCurrentPackage();
+      packageChips.innerHTML = state.packages.map(pkg => {
+        const active = pkg.package_id === state.selectedPackage;
+        return `<span class="chip" style="${active ? 'background: rgba(184, 92, 56, 0.12); color: #b85c38;' : ''}">包${pkg.package_id} · ${escapeHtml(pkg.item_name)}</span>`;
+      }).join('');
+    }
+
+    function updateCurrentPackage() {
+      const pkg = state.packages.find(item => item.package_id === state.selectedPackage);
+      currentPackageEl.textContent = pkg ? `包${pkg.package_id} · ${pkg.item_name}` : '未选择';
+    }
+
+    function populatePackageSelect() {
+      packageSelect.innerHTML = state.packages.map(pkg => {
+        return `<option value="${escapeHtml(pkg.package_id)}">包${escapeHtml(pkg.package_id)} · ${escapeHtml(pkg.item_name)} · 数量 ${escapeHtml(String(pkg.quantity))}</option>`;
+      }).join('');
+      packageSelect.value = state.selectedPackage || '';
+    }
+
+    function renderSections(promptPayload) {
+      const titles = promptPayload.section_titles || [];
+      if (!titles.length) {
+        sectionPanel.classList.add('hidden');
+        sectionList.innerHTML = '';
+        return;
+      }
+      sectionPanel.classList.remove('hidden');
+      sectionList.innerHTML = titles.map(title => `<div class="section-item">${escapeHtml(title)}</div>`).join('');
+    }
+
+    function renderPromptState() {
+      const promptPayload = getCurrentPromptPayload();
+      const prompts = promptPayload.prompts || [];
+      const answers = getCurrentAnswers();
+      const manualCount = Number(promptPayload.manual_placeholder_count || 0);
+      const manualExamples = (promptPayload.manual_placeholder_examples || []).join('、');
+      updateSummary();
+      setBusy(state.busy);
+
+      if (!state.selectedPackage) {
+        renderSections({ section_titles: [] });
+        promptList.innerHTML = '';
+        promptList.classList.add('hidden');
+        emptyState.classList.remove('hidden');
+        promptCountText.textContent = '先上传文件并选择包件。';
+        return;
+      }
+
+      packagePanel.classList.remove('hidden');
+      actionPanel.classList.toggle('hidden', !state.sessionId);
+
+      renderSections(promptPayload);
+
+      if (!prompts.length) {
+        promptList.innerHTML = '';
+        promptList.classList.add('hidden');
+        emptyState.classList.remove('hidden');
+        if (state.promptsByPackage[state.selectedPackage]) {
+          promptCountText.textContent = manualCount > 0
+            ? `当前包没有可复用交互项；另有 ${manualCount} 处内容保留在文档中自行填写。`
+            : '当前包没有额外待填写项，可以直接生成文档。';
+          emptyState.innerHTML = manualCount > 0
+            ? `当前包没有识别到可复用的共享字段。<br />文档中仍保留 ${manualCount} 处“请在文档中自行填写”提示${manualExamples ? `，示例：${escapeHtml(manualExamples)}` : ''}。`
+            : '当前包没有识别到需要人工补填的字段。<br />如果章节列表无误，可以直接点击“生成当前包 Word”。';
+        } else {
+          promptCountText.textContent = '当前包还没有生成待填写项，点击“生成待填写项”。';
+          emptyState.innerHTML = '当前还没有待填写项。<br />先完成“上传并解析”与“选择目标包”。';
+        }
+        return;
+      }
+
+      promptCountText.textContent = manualCount > 0
+        ? `当前包共 ${prompts.length} 个可复用交互项；另有 ${manualCount} 处内容会保留在文档中自行填写。`
+        : `当前包共 ${prompts.length} 个唯一待填写项；重复位置会自动复用同一答案。`;
+      emptyState.classList.add('hidden');
+      promptList.classList.remove('hidden');
+      promptList.innerHTML = prompts.map(prompt => renderPromptCard(prompt, resolvePromptValue(prompt, answers))).join('');
+
+      prompts.forEach(prompt => {
+        const input = document.querySelector(`[data-field-key="${CSS.escape(prompt.field_key)}"]`);
+        if (!input) return;
+        input.addEventListener('input', event => {
+          getCurrentAnswers()[prompt.field_key] = event.target.value;
+        });
+        input.addEventListener('change', event => {
+          getCurrentAnswers()[prompt.field_key] = event.target.value;
+        });
+      });
+    }
+
+    function renderPromptCard(prompt, value) {
+      const sections = (prompt.section_titles || []).map(escapeHtml).join('、');
+      const aliases = (prompt.aliases || []).map(escapeHtml).join(' / ');
+      const meta = [
+        `<span class="meta-pill">复用 ${escapeHtml(String(prompt.occurrence_count || 1))} 次</span>`,
+        prompt.required ? '<span class="meta-pill">建议填写</span>' : '<span class="meta-pill">可选</span>'
+      ].join('');
+
+      return `
+        <div class="prompt-card">
+          <div class="prompt-head">
+            <div>
+              <h3 class="prompt-title">${escapeHtml(prompt.label)}</h3>
+              <div class="prompt-help">
+                ${prompt.help_text ? escapeHtml(prompt.help_text) : '该字段会在当前包的所有对应位置统一回填。'}
+              </div>
+            </div>
+            <div class="prompt-meta">${meta}</div>
+          </div>
+          ${renderPromptInput(prompt, value)}
+          <div class="prompt-sections">
+            章节：${sections || '正文多处'}<br />
+            标签别名：${aliases || escapeHtml(prompt.label)}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderPromptInput(prompt, value) {
+      const safeValue = escapeAttribute(value || '');
+      if (prompt.prompt_type === 'select') {
+        const options = ['<option value="">请选择</option>'].concat(
+          (prompt.choices || []).map(choice => {
+            const selected = value === choice ? 'selected' : '';
+            return `<option value="${escapeAttribute(choice)}" ${selected}>${escapeHtml(choice)}</option>`;
+          })
+        ).join('');
+        return `<select class="select" data-field-key="${escapeAttribute(prompt.field_key)}">${options}</select>`;
+      }
+
+      if (prompt.prompt_type === 'textarea') {
+        return `<textarea class="textarea" data-field-key="${escapeAttribute(prompt.field_key)}" placeholder="请输入 ${escapeAttribute(prompt.label)}">${escapeHtml(value || '')}</textarea>`;
+      }
+
+      return `<input class="input" data-field-key="${escapeAttribute(prompt.field_key)}" type="text" value="${safeValue}" placeholder="请输入 ${escapeAttribute(prompt.label)}" />`;
+    }
+
+    async function prepareSession() {
+      const file = fileInput.files[0];
+      if (!file) {
+        setStatus('error', '请先选择招标文件。');
+        return;
+      }
+
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (!['pdf', 'doc', 'docx'].includes(ext)) {
+        setStatus('error', '仅支持 PDF / Word（.doc / .docx）文件。');
+        return;
+      }
+
+      setBusy(true);
+      setStatus('info', '<span class="spinner"></span>正在解析招标文件并识别包件…');
+
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch('/api/tender/one-click/prepare', {
+          method: 'POST',
+          body: formData,
+        });
+        const payload = await readJsonOrThrow(response);
+
+        state.sessionId = payload.session_id;
+        state.projectName = payload.project_name || '';
+        state.projectNumber = payload.project_number || '';
+        state.packages = payload.packages || [];
+        state.selectedPackage = payload.default_package_id || (state.packages[0] && state.packages[0].package_id) || '';
+        populatePackageSelect();
+        updateSummary();
+        packagePanel.classList.remove('hidden');
+        actionPanel.classList.remove('hidden');
+        setStatus('ok', `已解析完成，共识别 ${state.packages.length} 个包件。请先选择一个包，再生成待填写项。`);
+        renderPromptState();
+
+        if (state.selectedPackage) {
+          await loadPrompts(state.selectedPackage, true);
+        }
+      } catch (error) {
+        setStatus('error', `解析失败：${getErrorMessage(error)}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadPrompts(packageId, silent = false) {
+      if (!state.sessionId) {
+        setStatus('error', '请先上传并解析招标文件。');
+        return;
+      }
+      if (!packageId) {
+        setStatus('error', '请先选择目标包。');
+        return;
+      }
+
+      state.selectedPackage = packageId;
+      updateSummary();
+      setBusy(true);
+      if (!silent) {
+        setStatus('info', '<span class="spinner"></span>正在生成当前包的待填写项…');
+      }
+
+      try {
+        const response = await fetch('/api/tender/one-click/prompts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: state.sessionId,
+            package_id: packageId,
+          }),
+        });
+        const payload = await readJsonOrThrow(response);
+        state.promptsByPackage[packageId] = payload;
+        if (!state.answersByPackage[packageId]) {
+          state.answersByPackage[packageId] = {};
+        }
+        renderSections(payload);
+        renderPromptState();
+        setStatus('ok', `包${packageId} 的待填写项已准备好，共 ${payload.prompt_count || 0} 项。`);
+      } catch (error) {
+        setStatus('error', `生成待填写项失败：${getErrorMessage(error)}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function generateDocument() {
+      if (!state.sessionId || !state.selectedPackage) {
+        setStatus('error', '请先上传文件并选择目标包。');
+        return;
+      }
+
+      if (!state.promptsByPackage[state.selectedPackage]) {
+        setStatus('error', '请先生成待填写项。');
+        return;
+      }
+
+      setBusy(true);
+      setStatus('info', '<span class="spinner"></span>正在回填答案并生成当前包 Word 文档…');
+
+      try {
+        const response = await fetch('/api/tender/one-click/generate-interactive', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: state.sessionId,
+            package_id: state.selectedPackage,
+            answers: getCurrentAnswers(),
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response));
+        }
+
+        const blob = await response.blob();
+        if (!blob.size) {
+          throw new Error('生成的文件为空');
+        }
+
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = inferFilename(response, `包${state.selectedPackage}_投标文件.docx`);
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1200);
+        setStatus('ok', `包${state.selectedPackage} 文档已生成并开始下载。`);
+      } catch (error) {
+        setStatus('error', `生成失败：${getErrorMessage(error)}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function readJsonOrThrow(response) {
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response));
+      }
+      return response.json();
+    }
+
+    async function readErrorMessage(response) {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const payload = await response.json().catch(() => null);
+        if (payload && payload.detail) return payload.detail;
+      }
+      return (await response.text().catch(() => '')) || response.statusText || '请求失败';
+    }
+
+    function inferFilename(response, fallback) {
+      const disposition = response.headers.get('content-disposition') || '';
+      const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+      if (utf8Match && utf8Match[1]) {
+        try {
+          return decodeURIComponent(utf8Match[1]);
+        } catch (_) {
+          return utf8Match[1];
+        }
+      }
+
+      const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+      if (plainMatch && plainMatch[1]) return plainMatch[1];
+      return fallback;
+    }
+
+    function getErrorMessage(error) {
+      return error instanceof Error ? error.message : String(error || '未知错误');
+    }
+
+    function resolvePromptValue(prompt, answers) {
+      const directKeys = [prompt.field_key, prompt.label].concat(prompt.aliases || []);
+      for (const key of directKeys) {
+        if (key in answers && String(answers[key]).trim()) {
+          return String(answers[key]).trim();
+        }
+      }
+
+      const brand = String(answers.product_brand || '').trim();
+      const model = String(answers.product_model || answers.product_identity || '').trim();
+      const origin = String(answers.product_origin || '').trim();
+
+      if (prompt.field_key === 'product_identity') {
+        return [brand, model].filter(Boolean).join(' ').trim();
+      }
+      if (prompt.field_key === 'product_identity_origin') {
+        const identity = [brand, model].filter(Boolean).join(' ').trim();
+        if (identity && origin) return `${identity}，${origin}`;
+        return identity || origin;
+      }
+      if (prompt.field_key === 'product_model') {
+        return model;
+      }
+      return '';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function escapeAttribute(value) {
+      return escapeHtml(value).replace(/`/g, '&#96;');
+    }
+
+    resetAfterUploadChange();
+  </script>
 </body>
 </html>

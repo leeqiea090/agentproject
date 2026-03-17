@@ -729,6 +729,66 @@ class TenderWorkflowResponse(BaseModel):
     generated_time: datetime = Field(description="生成时间")
 
 
+class OneClickPackageOption(BaseModel):
+    """交互式单包生成时可选的包件信息。"""
+    package_id: str = Field(description="包号")
+    item_name: str = Field(description="标的名称")
+    quantity: int = Field(description="数量")
+    budget: float = Field(description="预算金额")
+
+
+class OneClickPrepareResponse(BaseModel):
+    """上传招标文件后的交互准备结果。"""
+    session_id: str = Field(description="交互式会话ID")
+    project_name: str = Field(description="项目名称")
+    project_number: str = Field(description="项目编号")
+    packages: list[OneClickPackageOption] = Field(default_factory=list, description="可选包件")
+    default_package_id: str = Field(default="", description="默认选中的包号")
+
+
+class OneClickPromptRequest(BaseModel):
+    """请求单包待填写项。"""
+    session_id: str = Field(description="交互式会话ID")
+    package_id: str = Field(description="目标包号")
+
+
+class OneClickInteractivePrompt(BaseModel):
+    """单包交互式填写项。"""
+    field_key: str = Field(description="字段唯一键，用于答案回填")
+    label: str = Field(description="用户可见标签")
+    prompt_type: str = Field(description="输入类型：text/textarea/select/date")
+    choices: list[str] = Field(default_factory=list, description="可选项；仅 select 有值")
+    required: bool = Field(default=True, description="是否建议填写")
+    help_text: str = Field(default="", description="补充说明")
+    occurrence_count: int = Field(default=1, description="该答案会复用到的出现次数")
+    section_titles: list[str] = Field(default_factory=list, description="涉及章节标题")
+    aliases: list[str] = Field(default_factory=list, description="本字段对应的原始标签别名")
+
+
+class OneClickPromptResponse(BaseModel):
+    """单包交互式填写项响应。"""
+    session_id: str = Field(description="交互式会话ID")
+    package_id: str = Field(description="目标包号")
+    project_name: str = Field(description="项目名称")
+    project_number: str = Field(description="项目编号")
+    item_name: str = Field(default="", description="包件名称")
+    prompt_count: int = Field(default=0, description="待填写项数量")
+    manual_placeholder_count: int = Field(default=0, description="保留在文档中自行填写的占位符数量")
+    manual_placeholder_examples: list[str] = Field(default_factory=list, description="需在文档中自行填写的占位符示例")
+    section_titles: list[str] = Field(default_factory=list, description="本次将生成的章节标题")
+    prompts: list[OneClickInteractivePrompt] = Field(default_factory=list, description="待填写项列表")
+    draft_level: str = Field(default="", description="稿件等级")
+    validation_gate: ValidationGate | None = Field(default=None, description="硬校验门结果")
+    regression_metrics: RegressionMetrics | None = Field(default=None, description="回归指标")
+
+
+class OneClickInteractiveGenerateRequest(BaseModel):
+    """交互式答案回填并生成文档。"""
+    session_id: str = Field(description="交互式会话ID")
+    package_id: str = Field(description="目标包号")
+    answers: dict[str, str] = Field(default_factory=dict, description="字段键或标签到答案的映射")
+
+
 class OneClickJobStartResponse(BaseModel):
     """一键生成任务启动响应"""
     job_id: str = Field(description="任务ID")

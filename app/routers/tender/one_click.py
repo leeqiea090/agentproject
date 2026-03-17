@@ -5,14 +5,32 @@ from pathlib import Path
 import shutil
 import uuid
 
-from fastapi import BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from app.schemas import DraftLevel, OneClickJobStartResponse, OneClickJobStatusResponse
+from app.schemas import (
+    BidDocumentSection,
+    DraftLevel,
+    OneClickInteractiveGenerateRequest,
+    OneClickJobStartResponse,
+    OneClickJobStatusResponse,
+    OneClickPackageOption,
+    OneClickPrepareResponse,
+    OneClickPromptRequest,
+    OneClickPromptResponse,
+    TenderDocument,
+)
 from app.services.docx_builder import build_bid_docx
+from app.services.interactive_fill import (
+    apply_interactive_answers,
+    build_company_from_answers,
+    plan_interactive_fill,
+    serialize_interactive_prompts,
+)
 from app.services.llm import get_chat_model
 from app.services.one_click_generator import generate_bid_sections
 from app.services.one_click_generator.common import BidSectionsValidationError
+from app.services.quality_gate import render_editable_draft_sections
 from app.services.tender_parser import create_tender_parser
 from app.services.tender_workflow import _materialize_sections
 from app.routers.tender.common import (
@@ -22,6 +40,7 @@ from app.routers.tender.common import (
     _safe_download_filename,
     logger,
     one_click_job_storage,
+    one_click_session_storage,
     router,
 )
 
@@ -49,6 +68,7 @@ def _one_click_output_path(job_id: str, draft_level: DraftLevel | str | None):
     """计算一键成稿结果文件的输出路径。"""
     return BID_OUTPUT_DIR / f"{job_id}_{_one_click_doc_label(draft_level)}.docx"
 
+
 def _set_one_click_job_status(
     job_id: str,
     *,
@@ -75,7 +95,114 @@ def _set_one_click_job_status(
     }
 
 
-def _run_one_click_generation(job_id: str, save_path: Path) -> None:
+def _load_tender(session_data: dict) -> TenderDocument:
+    return TenderDocument(**session_data["tender_doc"])
+
+
+def _resolve_package(tender_doc: TenderDocument, package_id: str | None):
+    if not package_id:
+        return None
+    normalized = str(package_id).strip()
+    for pkg in tender_doc.packages:
+        if pkg.package_id == normalized:
+            return pkg
+    raise HTTPException(status_code=400, detail=f"包号 '{normalized}' 不存在于当前招标文件中")
+
+
+def _single_package_tender(tender_doc: TenderDocument, package_id: str | None) -> TenderDocument:
+    pkg = _resolve_package(tender_doc, package_id)
+    if pkg is None:
+        return tender_doc
+    return tender_doc.model_copy(update={"packages": [pkg]})
+
+
+def _selected_packages_arg(package_id: str | None) -> list[str] | None:
+    normalized = str(package_id or "").strip()
+    return [normalized] if normalized else None
+
+
+def _package_options(tender_doc: TenderDocument) -> list[OneClickPackageOption]:
+    return [
+        OneClickPackageOption(
+            package_id=pkg.package_id,
+            item_name=pkg.item_name,
+            quantity=pkg.quantity,
+            budget=pkg.budget,
+        )
+        for pkg in tender_doc.packages
+    ]
+
+
+def _download_filename(
+    doc_label: str,
+    tender_doc: TenderDocument,
+    package_id: str | None = None,
+) -> str:
+    pkg = _resolve_package(tender_doc, package_id) if package_id else None
+    if pkg is None:
+        stem = f"{doc_label}_{tender_doc.project_name}"
+    else:
+        stem = f"{doc_label}_包{pkg.package_id}_{pkg.item_name}_{tender_doc.project_name}"
+    return _safe_download_filename(stem, ".docx")
+
+
+def _build_interactive_preview(
+    tender_doc: TenderDocument,
+    raw_text: str,
+    package_id: str,
+) -> dict:
+    package = _resolve_package(tender_doc, package_id)
+    llm = get_chat_model()
+    selected_packages = [package.package_id]
+    scoped_tender = _single_package_tender(tender_doc, package.package_id)
+    gen_result = generate_bid_sections(
+        scoped_tender,
+        raw_text,
+        llm,
+        selected_packages=selected_packages,
+        require_validation_pass=True,
+    )
+    sections, _ = _materialize_sections(
+        sections=gen_result.sections,
+        tender=scoped_tender,
+        company=_PLACEHOLDER_COMPANY,
+        products={},
+        evidence_result=None,
+        product_profiles=gen_result.product_profiles,
+    )
+    interactive_sections = render_editable_draft_sections(sections, add_draft_watermark=False)
+    interactive_plan = plan_interactive_fill(interactive_sections, llm=llm)
+    interactive_sections = interactive_plan["sections"]
+    manual_placeholders = interactive_plan["manual_items"]
+    prompts = interactive_plan["prompts"]
+
+    return {
+        "package_id": package.package_id,
+        "item_name": package.item_name,
+        "sections": [section.model_dump() for section in interactive_sections],
+        "section_titles": [section.section_title for section in interactive_sections],
+        "prompts": prompts,
+        "manual_placeholder_count": sum(int(item.get("count", 0)) for item in manual_placeholders),
+        "manual_placeholder_examples": [str(item.get("label") or "") for item in manual_placeholders[:6]],
+        "validation_gate": gen_result.validation_gate.model_dump(),
+        "regression_metrics": gen_result.regression_metrics.model_dump(),
+        "draft_level": gen_result.draft_level.value,
+    }
+
+
+def _ensure_session_preview(session_data: dict, package_id: str) -> dict:
+    package_cache = session_data.setdefault("package_cache", {})
+    if package_id not in package_cache:
+        tender_doc = _load_tender(session_data)
+        package_cache[package_id] = _build_interactive_preview(
+            tender_doc=tender_doc,
+            raw_text=str(session_data.get("raw_text") or ""),
+            package_id=package_id,
+        )
+    return package_cache[package_id]
+
+
+def _run_one_click_generation(job_id: str, save_path: Path, selected_package: str | None = None) -> None:
     """执行后台一键成稿流程并写出结果文件。"""
     try:
         _set_one_click_job_status(
@@ -97,6 +224,7 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             progress=32,
         )
         tender_doc = parser.parse_tender_document(save_path)
+        scoped_tender = _single_package_tender(tender_doc, selected_package)
 
         _set_one_click_job_status(
             job_id,
@@ -114,14 +242,15 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             progress=72,
         )
         gen_result = generate_bid_sections(
-            tender_doc,
+            scoped_tender,
             raw_text,
             llm,
+            selected_packages=_selected_packages_arg(selected_package),
             require_validation_pass=True,
         )
         sections, _ = _materialize_sections(
             sections=gen_result.sections,
-            tender=tender_doc,
+            tender=scoped_tender,
             company=_PLACEHOLDER_COMPANY,
             products={},
             evidence_result=None,
@@ -138,7 +267,7 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
         output_file = _one_click_output_path(job_id, gen_result.draft_level)
         build_bid_docx(
             sections,
-            tender_doc,
+            scoped_tender,
             _PLACEHOLDER_COMPANY,
             output_file,
             draft_level=gen_result.draft_level,
@@ -146,7 +275,7 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
         if not output_file.exists() or output_file.stat().st_size == 0:
             raise RuntimeError("Word 文件生成失败，输出文件为空")
 
-        filename = _safe_download_filename(f"{doc_label}_{tender_doc.project_name}", ".docx")
+        filename = _download_filename(doc_label, scoped_tender, selected_package)
         download_url = f"/api/tender/one-click/download/{job_id}"
         logger.info("一键生成任务完成: %s -> %s", job_id, output_file)
         is_external_ready = gen_result.validation_gate.passes_external_gate()
@@ -184,15 +313,9 @@ def _run_one_click_generation(job_id: str, save_path: Path) -> None:
             logger.warning("一键生成临时文件清理失败: %s", save_path)
 
 
-@router.post("/one-click", summary="一键生成底稿骨架")
-async def one_click_generate(file: UploadFile = File(...)):
-    """
-    上传招标文件（PDF 或 Word），自动解析并生成可下载的底稿骨架 Word 文档。
-
-    - 输入：招标文件（.pdf / .docx）
-    - 输出：可补录的底稿骨架（.docx）
-    """
-    # 1. 校验文件格式
+@router.post("/one-click/prepare", response_model=OneClickPrepareResponse, summary="上传招标文件并准备交互式生成")
+async def prepare_one_click_generation(file: UploadFile = File(...)):
+    """解析招标文件，返回包件列表，供前端做单包交互生成。"""
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
@@ -201,7 +324,159 @@ async def one_click_generate(file: UploadFile = File(...)):
             detail=f"不支持的文件格式 '{suffix}'，请上传 PDF 或 Word（.docx）文件",
         )
 
-    # 2. 保存上传文件
+    temp_id = str(uuid.uuid4())
+    save_path = UPLOAD_DIR / f"{temp_id}{suffix}"
+    try:
+        with save_path.open("wb") as buf:
+            shutil.copyfileobj(file.file, buf)
+    except Exception as exc:
+        logger.error("交互式准备阶段文件保存失败: %s", exc)
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
+
+    try:
+        llm = get_chat_model()
+        parser = create_tender_parser(llm)
+        raw_text = parser.extract_text(save_path)
+        tender_doc = parser.parse_tender_document(save_path)
+    except Exception as exc:
+        logger.error("交互式准备阶段解析失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"解析失败：{exc}")
+    finally:
+        save_path.unlink(missing_ok=True)
+
+    session_id = str(uuid.uuid4())
+    one_click_session_storage[session_id] = {
+        "session_id": session_id,
+        "original_filename": filename,
+        "created_time": datetime.now(),
+        "tender_doc": tender_doc.model_dump(),
+        "raw_text": raw_text,
+        "package_cache": {},
+    }
+
+    packages = _package_options(tender_doc)
+    default_package_id = packages[0].package_id if packages else ""
+    return OneClickPrepareResponse(
+        session_id=session_id,
+        project_name=tender_doc.project_name,
+        project_number=tender_doc.project_number,
+        packages=packages,
+        default_package_id=default_package_id,
+    )
+
+
+@router.post("/one-click/prompts", response_model=OneClickPromptResponse, summary="生成单包交互式待填写项")
+async def get_one_click_prompts(req: OneClickPromptRequest):
+    """仅针对选中的一个包生成待填写项，重复字段只返回一次。"""
+    session_data = one_click_session_storage.get(req.session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="交互式会话不存在或已失效")
+
+    tender_doc = _load_tender(session_data)
+    scoped_tender = _single_package_tender(tender_doc, req.package_id)
+    try:
+        preview_data = _ensure_session_preview(session_data, req.package_id)
+    except BidSectionsValidationError as exc:
+        logger.warning("交互式待填写项生成被硬校验阻断：%s", exc)
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("交互式待填写项生成失败：%s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成待填写项失败：{exc}")
+    prompts = serialize_interactive_prompts(preview_data["prompts"])
+    package = scoped_tender.packages[0] if scoped_tender.packages else None
+
+    return OneClickPromptResponse(
+        session_id=req.session_id,
+        package_id=req.package_id,
+        project_name=scoped_tender.project_name,
+        project_number=scoped_tender.project_number,
+        item_name=package.item_name if package else "",
+        prompt_count=len(prompts),
+        manual_placeholder_count=int(preview_data.get("manual_placeholder_count") or 0),
+        manual_placeholder_examples=list(preview_data.get("manual_placeholder_examples", [])),
+        section_titles=list(preview_data.get("section_titles", [])),
+        prompts=prompts,
+        draft_level=str(preview_data.get("draft_level") or ""),
+        validation_gate=preview_data.get("validation_gate"),
+        regression_metrics=preview_data.get("regression_metrics"),
+    )
+
+
+@router.post("/one-click/generate-interactive", summary="按交互式答案生成单包文档")
+async def generate_interactive_one_click(req: OneClickInteractiveGenerateRequest):
+    """将前端收集到的答案回填到单包底稿中并输出 Word。"""
+    session_data = one_click_session_storage.get(req.session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="交互式会话不存在或已失效")
+
+    tender_doc = _load_tender(session_data)
+    scoped_tender = _single_package_tender(tender_doc, req.package_id)
+    try:
+        preview_data = _ensure_session_preview(session_data, req.package_id)
+    except BidSectionsValidationError as exc:
+        logger.warning("交互式单包文档生成被硬校验阻断：%s", exc)
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("交互式单包预生成失败：%s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成单包预览失败：{exc}")
+    sections = [BidDocumentSection(**item) for item in preview_data.get("sections", [])]
+    if not sections:
+        raise HTTPException(status_code=409, detail="当前包尚未生成待填写项，请先请求 prompts")
+
+    answers = {str(key).strip(): str(value).strip() for key, value in req.answers.items() if str(value).strip()}
+    final_sections = apply_interactive_answers(sections, preview_data.get("prompts", []), answers)
+    company = build_company_from_answers(answers)
+    draft_level = preview_data.get("draft_level") or DraftLevel.internal_draft.value
+    output_id = str(uuid.uuid4())
+    output_file = _one_click_output_path(output_id, draft_level)
+
+    try:
+        build_bid_docx(
+            final_sections,
+            scoped_tender,
+            company,
+            output_file,
+            draft_level=draft_level,
+        )
+    except Exception as exc:
+        logger.error("交互式单包文档生成失败：%s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成失败：{exc}")
+
+    if not output_file.exists() or output_file.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="Word 文件生成失败，输出文件为空")
+
+    doc_label = _one_click_doc_label(draft_level)
+    return FileResponse(
+        output_file,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=_download_filename(doc_label, scoped_tender, req.package_id),
+    )
+
+
+@router.post("/one-click", summary="一键生成底稿骨架")
+async def one_click_generate(
+    file: UploadFile = File(...),
+    selected_package: str | None = Form(default=None),
+):
+    """
+    上传招标文件（PDF 或 Word），自动解析并生成可下载的底稿骨架 Word 文档。
+
+    - 输入：招标文件（.pdf / .docx）
+    - 输出：可补录的底稿骨架（.docx）
+    - 可选：`selected_package` 指定只生成单个包
+    """
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in _ALLOWED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件格式 '{suffix}'，请上传 PDF 或 Word（.docx）文件",
+        )
+
     job_id = str(uuid.uuid4())
     save_path = UPLOAD_DIR / f"{job_id}{suffix}"
     try:
@@ -212,7 +487,6 @@ async def one_click_generate(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
 
     try:
-        # 3. 解析招标文件
         llm = get_chat_model()
         parser = create_tender_parser(llm)
 
@@ -221,40 +495,39 @@ async def one_click_generate(file: UploadFile = File(...)):
 
         logger.info("开始解析招标结构")
         tender_doc = parser.parse_tender_document(save_path)
+        scoped_tender = _single_package_tender(tender_doc, selected_package)
 
-        # 4. 一键生成投标文件各章节（按固定模板生成，使用解析后的结构化数据）
         gen_result = generate_bid_sections(
-            tender_doc,
+            scoped_tender,
             raw_text,
             llm,
+            selected_packages=_selected_packages_arg(selected_package),
             require_validation_pass=True,
         )
         sections, _ = _materialize_sections(
             sections=gen_result.sections,
-            tender=tender_doc,
+            tender=scoped_tender,
             company=_PLACEHOLDER_COMPANY,
             products={},
             evidence_result=None,
+            product_profiles=gen_result.product_profiles,
         )
 
-        # 5. 构建 Word 文档
         doc_label = _one_click_doc_label(gen_result.draft_level)
         output_file = _one_click_output_path(job_id, gen_result.draft_level)
         build_bid_docx(
             sections,
-            tender_doc,
+            scoped_tender,
             _PLACEHOLDER_COMPANY,
             output_file,
             draft_level=gen_result.draft_level,
         )
 
         logger.info("投标文件生成成功：%s", output_file)
-
-        # 6. 返回文件下载
         return FileResponse(
             output_file,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=_safe_download_filename(f"{doc_label}_{tender_doc.project_name}", ".docx"),
+            filename=_download_filename(doc_label, scoped_tender, selected_package),
         )
 
     except BidSectionsValidationError as exc:
@@ -264,16 +537,16 @@ async def one_click_generate(file: UploadFile = File(...)):
         logger.error("一键生成失败：%s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"生成失败：{exc}")
     finally:
-        # 清理上传的临时文件
-        try:
-            save_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        save_path.unlink(missing_ok=True)
 
 
 @router.post("/one-click/start", response_model=OneClickJobStartResponse, summary="启动一键生成底稿任务")
-async def start_one_click_generate(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """异步启动一键成稿任务。"""
+async def start_one_click_generate(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    selected_package: str | None = Form(default=None),
+):
+    """异步启动一键成稿任务，可选只生成指定包。"""
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
@@ -298,7 +571,7 @@ async def start_one_click_generate(background_tasks: BackgroundTasks, file: Uplo
         message="文件上传成功，正在准备开始…",
         progress=3,
     )
-    background_tasks.add_task(_run_one_click_generation, job_id, save_path)
+    background_tasks.add_task(_run_one_click_generation, job_id, save_path, selected_package)
     return OneClickJobStartResponse(**one_click_job_storage[job_id])
 
 
@@ -323,7 +596,11 @@ async def download_one_click_result(job_id: str):
     output_file_str = str(job_info.get("output_file") or "").strip()
     output_file = Path(output_file_str) if output_file_str else None
     if output_file is None or not output_file.exists():
-        for candidate_level in (job_info.get("draft_level"), DraftLevel.internal_draft.value, DraftLevel.external_ready.value):
+        for candidate_level in (
+            job_info.get("draft_level"),
+            DraftLevel.internal_draft.value,
+            DraftLevel.external_ready.value,
+        ):
             candidate = _one_click_output_path(job_id, candidate_level)
             if candidate.exists():
                 output_file = candidate

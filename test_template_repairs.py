@@ -11,9 +11,11 @@ from app.services.one_click_generator.format_driven_sections.common import (
     _build_small_enterprise_declaration_template,
     _normalize_hlj_supplier_qualification_template,
 )
-from app.services.one_click_generator.format_driven_sections.tp import _build_tp_service_plan_section
+from app.services.one_click_generator.format_driven_sections.cs import _build_cs_sections
+from app.services.one_click_generator.format_driven_sections.tp import _build_tp_sections, _build_tp_service_plan_section
 from app.services.tender_workflow.materialization import _build_materialized_service_section
 from app.schemas import ProcurementPackage, ProductSpecification, TenderDocument
+from scripts.repair_sample_drafts import TP_SECTION_GROUPS, _reorder_document_sections
 
 
 def test_hlj_qualification_template_fallback_is_complete():
@@ -92,6 +94,8 @@ def test_tp_service_plan_section_is_expanded():
     pkg = SimpleNamespace(package_id="1", item_name="流式细胞仪")
     content = _build_tp_service_plan_section([pkg], "")
 
+    assert "（一）技术服务" in content
+    assert "（二）售后服务" in content
     assert "项目组织与职责分工" in content
     assert "到货保护与异常处理" in content
     assert "场地勘查与条件确认" in content
@@ -127,7 +131,121 @@ def test_materialized_service_section_is_expanded():
 
     content = _build_materialized_service_section(tender, {"1": product})
 
+    assert "（一）技术服务" in content
+    assert "（二）售后服务" in content
     assert "项目组织与职责分工" in content
     assert "场地勘查与条件确认" in content
     assert "培训记录" in content
     assert "质保期外延续服务" in content
+
+
+def _build_sample_tender_for_section_order() -> TenderDocument:
+    return TenderDocument(
+        project_name="示例项目",
+        project_number="ABC-001",
+        budget=0,
+        purchaser="示例采购人",
+        packages=[
+            ProcurementPackage(
+                package_id="1",
+                item_name="流式细胞仪",
+                quantity=1,
+                budget=0,
+                delivery_time="合同签订后30日内",
+                delivery_place="医院指定地点",
+            )
+        ],
+    )
+
+
+def test_tp_section_order_follows_manual_like_chapters():
+    tender = _build_sample_tender_for_section_order()
+    titles = [section.section_title for section in _build_tp_sections(tender, "")]
+
+    assert titles == [
+        "一、响应文件封面格式",
+        "第一章、资格性证明文件",
+        "四、资格承诺函",
+        "七、法定代表人/单位负责人授权书",
+        "八、法定代表人/单位负责人和授权代表身份证明",
+        "第二章、符合性承诺",
+        "十一、投标人关联单位的说明",
+        "九、小微企业声明函",
+        "十、残疾人福利性单位声明函",
+        "第三章、商务及技术部分",
+        "二、报价书",
+        "三、报价一览表",
+        "六、技术服务和售后服务的内容及措施",
+        "第四章、报价书附件",
+        "五、技术偏离及详细配置明细表",
+        "附一、资格性审查响应对照表",
+        "附二、符合性审查响应对照表",
+        "附三、详细评审响应对照表",
+        "附四、投标无效情形汇总及自检表",
+    ]
+
+
+def test_cs_section_order_follows_manual_like_chapters():
+    tender = _build_sample_tender_for_section_order()
+    titles = [section.section_title for section in _build_cs_sections(tender, "")]
+
+    assert titles == [
+        "一、响应文件封面格式",
+        "第一章、资格性证明文件",
+        "十一、资格承诺函",
+        "六、法定代表人/单位负责人授权书",
+        "七、法定代表人/单位负责人和授权代表身份证明",
+        "第二章、符合性承诺",
+        "十、投标人关联单位的说明",
+        "八、小微企业声明函",
+        "九、残疾人福利性单位声明函",
+        "第三章、商务及技术部分",
+        "二、首轮报价表",
+        "三、分项报价表",
+        "五、技术服务和售后服务的内容及措施",
+        "第四章、报价书附件",
+        "四、技术偏离及详细配置明细表",
+        "附一、资格性审查响应对照表",
+        "附二、符合性审查响应对照表",
+        "附三、详细评审响应对照表",
+        "附四、投标无效情形汇总及自检表",
+    ]
+
+
+def test_docx_reorder_groups_existing_sections_into_chapters():
+    doc = Document()
+    doc.add_paragraph("封面")
+    for title in [
+        "二、报价书",
+        "三、报价一览表",
+        "四、资格承诺函",
+        "五、技术偏离及详细配置明细表",
+        "六、技术服务和售后服务的内容及措施",
+        "七、法定代表人/单位负责人授权书",
+        "八、法定代表人/单位负责人和授权代表身份证明",
+        "九、小微企业声明函",
+        "十、残疾人福利性单位声明函",
+        "十一、投标人关联单位的说明",
+        "附一、资格性审查响应对照表",
+        "附二、符合性审查响应对照表",
+        "附三、详细评审响应对照表",
+        "附四、投标无效情形汇总及自检表",
+    ]:
+        doc.add_paragraph(title)
+        doc.add_paragraph(f"{title}正文")
+
+    changed = _reorder_document_sections(doc, TP_SECTION_GROUPS)
+    texts = [paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.text.strip()]
+
+    assert changed is True
+    assert texts[:6] == [
+        "封面",
+        "第一章、资格性证明文件",
+        "四、资格承诺函",
+        "四、资格承诺函正文",
+        "七、法定代表人/单位负责人授权书",
+        "七、法定代表人/单位负责人授权书正文",
+    ]
+    assert "第四章、报价书附件" in texts
+    assert texts.index("第三章、商务及技术部分") < texts.index("二、报价书")
+    assert texts.index("第四章、报价书附件") < texts.index("五、技术偏离及详细配置明细表")
