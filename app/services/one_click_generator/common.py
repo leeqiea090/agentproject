@@ -1,36 +1,17 @@
 """一键投标文件生成服务（按固定模板生成，强调格式稳定性）"""
 from __future__ import annotations
 
-import logging
 import re
 from datetime import datetime
 from typing import Any
 
-from langchain_openai import ChatOpenAI
-
-from app.services.chunking import split_to_blocks
-from app.services.requirement_processor import (
-    _extract_package_scope_text,
-    _normalize_requirement_line,
-)
+from app.services.requirement_processor import _extract_package_scope_text
 
 from app.schemas import (
-    BidDocumentSection,
-    BidEvidenceBinding,
-    BidGenerationResult,
-    ClauseCategory,
-    DocumentMode,
-    DraftLevel,
-    NormalizedRequirement,
-    ProductProfile,
     ProcurementPackage,
-    RegressionMetrics,
     TenderDocument,
-    TenderSourceBinding,
     ValidationGate,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class BidSectionsValidationError(RuntimeError):
@@ -316,15 +297,6 @@ def _is_medical_project(tender: TenderDocument) -> bool:
     return _contains_any(
         context,
         ("医疗", "器械", "检验", "试剂", "诊断", "流式", "医院"),
-    )
-
-
-def _requires_sme_declaration(tender: TenderDocument) -> bool:
-    """判断是否需要中小企业声明材料。"""
-    context = _tender_context_text(tender)
-    return _contains_any(
-        context,
-        ("中小企业", "小微", "监狱企业", "残疾人福利性单位", "价格扣除", "声明函"),
     )
 
 

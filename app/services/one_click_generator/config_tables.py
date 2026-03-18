@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
@@ -8,7 +7,7 @@ import app.services.one_click_generator.common as _common
 import app.services.one_click_generator.response_tables as _response_tables
 import app.services.evidence_binder as _evidence_binder
 import app.services.requirement_processor as _requirement_processor
-from app.schemas import ClauseCategory, ProcurementPackage
+from app.schemas import ProcurementPackage
 from app.services.one_click_generator.common import (
     _CONFIG_EXIT_HINTS,
     _CONFIG_ITEM_UNITS,
@@ -19,34 +18,16 @@ from app.services.one_click_generator.common import (
     _safe_text,
 )
 from app.services.one_click_generator.response_tables import (
-    _build_requirement_rows,
     _fuzzy_spec_lookup,
-    _row_is_usable_for_package,
     _structured_requirements_for_package,
 )
 from app.services.requirement_processor import (
-    _classify_clause_category,
     _effective_requirements,
     _extract_package_configuration_scope_text,
     _markdown_cell,
     _normalize_requirement_line,
     _package_forbidden_terms,
 )
-
-logger = logging.getLogger(__name__)
-
-
-def _normalize_main_param_note(raw_value: Any, has_real_response: bool) -> str:
-    """归一化主参数备注文本。
-
-    只有当招标文件中明确读取到真实偏离结论时才保留原值；
-    空值、占位符一律返回待确认——禁止自动写"无偏离"。
-    """
-    text = _safe_text(raw_value, "")
-    bad_values = {"", "—", "-", "待填写", "【待填写】", "[待填写]", "待核实", "待补充", "无偏离"}
-    if text in bad_values or "待填写" in text:
-        return "待确认"
-    return text
 
 def __reexport_all(module) -> None:
     """将指定模块的公开成员重新导出到当前命名空间。"""
@@ -445,17 +426,6 @@ def _extract_derived_config_names(text: str) -> list[str]:
         if token in normalized_text:
             candidates.append(mapped_name)
     return candidates
-
-
-def _config_items_need_enrichment(items: list[tuple[str, str, str, str]]) -> bool:
-    """判断配置表是否仍然过薄，需要从技术条款补项。"""
-    meaningful = [
-        item
-        for item in items
-        if not _is_noise_config_item(item[0], item[3])
-        and "待补充" not in item[0]
-    ]
-    return len(meaningful) < 2
 
 
 def _derive_config_items_from_technical_requirements(
@@ -1124,296 +1094,3 @@ def _infer_config_usage(name: str) -> str:
         return "配套附件"
 
     return "配套附件"
-
-
-def _infer_config_role(name: str, product_name: str) -> str:
-    """推断配置项在方案中的角色。"""
-    n = name.strip()
-
-    if any(k in n for k in ("显示器",)):
-        return "用于显示采集与分析界面"
-
-    if any(k in n for k in ("打印机",)):
-        return "用于输出检测结果或报告"
-
-    if any(k in n for k in ("稳压电源", "UPS")):
-        return "用于供电保护和设备稳定运行"
-
-    if any(k in n for k in ("软件", "程序", "平台", "分析软件", "应用软件")):
-        return "用于数据采集、分析与管理"
-
-    if any(k in n for k in ("说明书", "手册", "合格证", "装箱单", "保修卡")):
-        return "用于交付、验收、操作和留档"
-
-    if any(k in n for k in ("试剂", "耗材", "微球", "流式管")):
-        return "用于试机、质控或首批运行"
-
-    if any(k in n for k in ("主机", "整机", "检测主机", "分析主机")):
-        return f"作为{product_name}核心检测单元"
-
-    return "详见配置清单和产品资料"
-
-def _build_main_parameter_table(
-    pkg: ProcurementPackage,
-    tender_raw: str,
-    product: Any = None,
-    *,
-    normalized_result: dict[str, Any] | None = None,
-    evidence_result: dict[str, Any] | None = None,
-    product_profile: dict[str, Any] | None = None,
-) -> str:
-    """构建主参数表。"""
-    def _guess_source_hint(text: str) -> str:
-        """推断来源提示文本。"""
-        t = _safe_text(text, "")
-        if any(k in t for k in ("注册证", "备案凭证", "说明书", "标签", "授权文件")):
-            return "注册证/备案凭证/说明书/标签/授权文件"
-        if any(k in t for k in ("LIS", "分析软件", "功能截图", "双向传输")):
-            return "软件说明书/功能截图/厂家说明"
-        if any(k in t for k in ("室间质评", "能力验证", "检测报告", "质控品", "临检中心")):
-            return "室间质评报告/能力验证报告/检测报告"
-        return "产品说明书/彩页/厂家参数表"
-
-    def _has_real_evidence(row: dict[str, Any]) -> bool:
-        """判断是否存在有效证据。"""
-        return bool(_safe_text(row.get("bidder_evidence"), "")) or bool(
-            _safe_text(row.get("bidder_evidence_source"), "")
-        ) or bool(_safe_text(row.get("evidence_ref"), ""))
-
-    requirement_rows, _ = _build_requirement_rows(
-        pkg,
-        tender_raw,
-        product=product,
-        normalized_result=normalized_result,
-        evidence_result=evidence_result,
-        product_profile=product_profile,
-    )
-
-    technical_rows: list[dict[str, Any]] = []
-    for row in requirement_rows:
-        row_pkg = _safe_text(row.get("package_id"), pkg.package_id)
-        if row_pkg and str(row_pkg) != str(pkg.package_id):
-            continue
-
-        key = _safe_text(row.get("key"), "")
-        req = _safe_text(row.get("requirement"), "")
-
-        bad_scaffold_hints = (
-            "如有多个",
-            "配置请另行加行",
-            "我院设备的技术参数与性能要求的基本格式",
-            "此栏填“国际”或“国内”",
-            "此栏填“国际”或",
-        )
-        row_text = f"{key} {req}"
-        if any(tok in row_text for tok in bad_scaffold_hints):
-            continue
-
-        inferred = _classify_clause_category(key, req)
-        if inferred != ClauseCategory.technical_requirement:
-            continue
-
-        tender_quote = _safe_text(row.get("tender_quote"), "")
-        bidder_quote = _safe_text(row.get("bidder_evidence"), "")
-
-        if not _row_is_usable_for_package(
-            pkg,
-            key,
-            req,
-            tender_quote=tender_quote,
-            bidder_quote=bidder_quote,
-        ):
-            continue
-
-        bad_tail_hints = ("履约保证金", "付款方式", "交货期", "投标报价", "报价书")
-        if any(tok in tender_quote for tok in bad_tail_hints):
-            continue
-
-        row = dict(row)
-        row["category"] = ClauseCategory.technical_requirement.value
-        technical_rows.append(row)
-
-    real_response_count = sum(1 for r in technical_rows if r.get("has_real_response"))
-    total_rows = len(technical_rows)
-    coverage = real_response_count / max(total_rows, 1)
-
-    if total_rows == 0 or coverage < 0.6:
-        lines = [
-            f"### 包{pkg.package_id}：{pkg.item_name}",
-            "| 序号 | 待补条款 | 招标要求 | 建议证据来源 | 回填位置 |",
-            "|---:|---|---|---|---|",
-        ]
-
-        unresolved_rows = technical_rows or requirement_rows
-        idx = 1
-        for row in unresolved_rows:
-            key = _safe_text(
-                row.get("key") or row.get("requirement_name"),
-                "核心参数",
-            )
-            req = _safe_text(
-                row.get("requirement") or row.get("value") or row.get("requirement_value"),
-                "详见招标文件",
-            )
-            has_resp = bool(row.get("has_real_response"))
-            has_ev = _has_real_evidence(row)
-
-            if has_resp and has_ev:
-                continue
-
-            lines.append(
-                f"| {idx} | {_markdown_cell(key)} | {_markdown_cell(req)} | "
-                f"{_guess_source_hint(key + ' ' + req)} | 第三章对应包《技术偏离及详细配置明细表》 |"
-            )
-            idx += 1
-            if idx > 20:
-                break
-
-        if idx == 1:
-            lines.append(
-                "| 1 | 核心参数 | 已形成结构化框架 | 产品说明书/彩页/厂家参数表 | 第三章对应包《技术偏离及详细配置明细表》 |"
-            )
-
-        return "\n".join(lines)
-
-    lines = [
-        f"### 包{pkg.package_id}：{pkg.item_name}",
-        "| 序号 | 技术参数项 | 招标要求 | 响应情况 | 备注 |",
-        "|---:|---|---|---|---|",
-    ]
-
-    for idx, row in enumerate(technical_rows, start=1):
-        response_text = _safe_text(row.get("response"), "")
-        if (
-            not response_text
-            or "待填写" in response_text
-            or "待核实" in response_text
-        ):
-            response_text = "待按产品说明书/厂家参数表逐条回填"
-
-        note = _normalize_main_param_note(
-            row.get("deviation_status"),
-            bool(row.get("has_real_response")),
-        )
-        lines.append(
-            f"| {idx} | {_markdown_cell(str(row['key']))} | {_markdown_cell(str(row['requirement']))} | "
-            f"{_markdown_cell(response_text)} | {note} |"
-        )
-
-    return "\n".join(lines)
-
-def _build_response_checklist_table(
-    pkg: ProcurementPackage,
-    mapped_count: int,
-    total_requirements: int,
-    requirement_rows: list[dict[str, Any]] | None = None,
-) -> str:
-    """构建响应核对表。"""
-    real_response_count = 0
-    high_mapping_count = 0
-    weak_mapping_count = 0
-
-    if requirement_rows:
-        real_response_count = sum(1 for r in requirement_rows if r.get("has_real_response"))
-        high_mapping_count = sum(1 for r in requirement_rows if r.get("mapping_confidence") == "high")
-        weak_mapping_count = sum(1 for r in requirement_rows if r.get("mapping_confidence") == "weak")
-
-    if total_requirements <= 0:
-        evidence_result = (
-            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
-            f"弱映射 {weak_mapping_count} 项，"
-            f"其余待人工补映射/补证"
-        )
-        evidence_status = "待补证"
-        param_conclusion = "未提取到结构化参数，待人工补充"
-        param_status = "待补实参"
-    elif real_response_count == total_requirements:
-        evidence_result = (
-            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
-            f"弱映射 {weak_mapping_count} 项，"
-            f"其余待人工补映射/补证"
-        )
-        evidence_status = "已完成"
-        param_conclusion = f"已证实 {real_response_count}/{total_requirements} 项，全部已填入投标产品实参"
-        param_status = "已完成"
-    elif real_response_count > 0:
-        evidence_result = (
-            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
-            f"弱映射 {weak_mapping_count} 项，"
-            f"其余待人工补映射/补证"
-        )
-        evidence_status = "部分完成"
-        param_conclusion = f"已证实 {real_response_count}/{total_requirements} 项，其余 {total_requirements - real_response_count} 项待补实参"
-        param_status = "部分完成"
-    else:
-        evidence_result = (
-            f"高置信映射 {high_mapping_count}/{total_requirements} 项，"
-            f"弱映射 {weak_mapping_count} 项，"
-            f"其余待人工补映射/补证"
-        )
-        evidence_status = "待补证"
-        param_conclusion = "已形成逐条响应框架，待填入投标产品实参"
-        param_status = "待补实参"
-
-    lines = [
-        "### （三）技术响应检查清单",
-        "| 序号 | 校验项 | 响应结论 | 证据载体 | 校验状态 |",
-        "|---:|---|---|---|---|",
-        f"| 1 | 关键技术参数逐条响应 | {param_conclusion} | 技术偏离表 | {param_status} |",
-        "| 2 | 配置清单完整性 | 已按招标文件配置项展开列示，待匹配投标型号 | 配置明细表 | 待复核 |",
-        "| 3 | 交付与培训要求 | 已保留响应框架，待结合投标方案复核 | 报价书与服务方案 | 待复核 |",
-        "| 4 | 质保与售后要求 | 已保留服务承诺框架，待补投标方细节 | 售后服务方案 | 待复核 |",
-        f"| 5 | 技术条款证据映射 | {evidence_result} | 技术条款证据映射表 | {evidence_status} |",
-    ]
-    return "\n".join(lines)
-
-
-def _build_evidence_mapping_table(
-    pkg: ProcurementPackage,
-    requirement_rows: list[dict[str, Any]],
-    total_requirements: int,
-) -> str:
-    """构建证据映射表。"""
-    lines = [
-        "### （四）技术条款证据映射表",
-        "| 序号 | 技术参数项 | 映射状态 | 证据来源 | 原文片段 | 应用位置 |",
-        "|---:|---|---|---|---|---|",
-    ]
-
-    if not requirement_rows:
-        lines.append("| 1 | 核心技术参数 | 结构化解析结果 / 待补投标方证据 | 未提取到可映射原文片段，需人工复核原文并补齐投标方证据 | 技术偏离表第1行 |")
-        return "\n".join(lines)
-
-    for idx, row in enumerate(requirement_rows, start=1):
-        mapping_conf = _safe_text(row.get("mapping_confidence"), "none")
-        status_text = {
-            "high": "精确命中",
-            "weak": "弱命中待复核",
-            "none": "未命中",
-        }.get(mapping_conf, "未命中")
-
-        has_real = row.get("has_real_response", False)
-        bidder_ev = _safe_text(row.get("bidder_evidence"), "")
-        bidder_source = _safe_text(row.get("bidder_evidence_source"), "")
-        tender_quote = _safe_text(row.get("tender_quote"), "")
-        bidder_page = row.get("bidder_evidence_page")
-
-        if has_real and bidder_ev:
-            page_text = f"（第{bidder_page}页）" if bidder_page is not None else ""
-            source_text = _markdown_cell(bidder_source or "投标方资料")
-            quote_text = _markdown_cell(bidder_ev) + page_text
-            if mapping_conf == "high" and tender_quote:
-                quote_text = f"{quote_text}；{_markdown_cell(tender_quote)}"
-        else:
-            source_text = _markdown_cell("待补投标方证据")
-            quote_text = _markdown_cell(tender_quote) if mapping_conf in {"high", "weak"} else ""
-
-        lines.append(
-            f"| {idx} | {_markdown_cell(str(row['key']))} | {status_text} | {source_text} | "
-            f"{quote_text or ' '} | 技术偏离表第{idx}行 |"
-        )
-
-    if total_requirements > len(requirement_rows):
-        lines.append("|  | 其余参数项 | 招标原文 / 待补投标方证据 | 详见延伸条款，需人工补充映射与投标方证据 | 技术偏离表后续行 |")
-
-    return "\n".join(lines)

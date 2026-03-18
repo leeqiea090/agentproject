@@ -1,7 +1,6 @@
 """招标文件解析服务"""
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -28,6 +27,7 @@ from app.services.requirement_processor import (
     _is_bad_requirement_value,
     _package_forbidden_terms, _extract_match_tokens, _safe_text,
 )
+
 try:
     from docx import Document as _DocxDocument
     from docx.document import Document as _DocxDocumentType

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
@@ -22,11 +21,8 @@ from app.services.requirement_processor import (
     _extract_package_technical_scope_text,
     _is_bad_requirement_name,
     _is_bad_requirement_value,
-    _markdown_cell,
     _package_forbidden_terms,
 )
-
-logger = logging.getLogger(__name__)
 
 _STRUCTURED_NUMERIC_VALUE_PATTERN = re.compile(
     r"(?:≥|≤|>|<|>=|<=|不少于|不低于|不超过|至少|最高|最低)\s*\d+(?:\.\d+)?(?:\s*[%A-Za-z/\-._\u00b0\u03bc\u4e00-\u9fff]+)?$"
@@ -56,21 +52,6 @@ for _module in (_common, _evidence_binder, _requirement_processor,):
     __reexport_all(_module)
 
 del _module
-def _build_response_commitment(req_key: str, req_val: str) -> str:
-    """构建响应承诺。"""
-    key = _markdown_cell(req_key)
-    value = _markdown_cell(req_val)
-    if any(marker in value for marker in _HARD_REQUIREMENT_MARKERS):
-        return f"承诺满足“{key}”且指标不低于“{value}”，按招标条款逐项验收。"
-    return f"承诺满足“{key}：{value}”，交付时提供对应技术资料并配合验收。"
-
-
-def _format_payment_execution_line(payment: str) -> str:
-    """格式化付款执行行。"""
-    if payment == "按招标文件及合同约定执行":
-        return "6. 商务执行：付款方式按招标文件及合同约定执行。"
-    return f"6. 商务执行：付款方式按“{payment}”执行。"
-
 
 def _fuzzy_spec_lookup(product: Any, req_key: str) -> str:
     """在 product.specifications 中做模糊匹配，返回匹配到的值或空字符串。"""
@@ -975,13 +956,6 @@ def _display_bidder_response(raw_value: Any) -> str:
         return "【待填写：品牌型号及实际参数值】"
 
     return text
-
-def _display_model_cell(model_text: str, row_index: int) -> str:
-    """返回模型单元格。"""
-    model_text = _safe_text(model_text, "")
-    if model_text:
-        return model_text if row_index == 1 else "同上"
-    return "【待填写：投标型号】" if row_index == 1 else "同上"
 
 
 def _build_pending_response_guidance(req_key: str, req_val: str) -> str:
