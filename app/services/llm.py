@@ -26,16 +26,20 @@ def _message_to_text(message: Any) -> str:
     return str(content).strip()
 
 
-def get_chat_model(temperature: float | None = None) -> ChatOpenAI:
+def get_chat_model(
+    temperature: float | None = None,
+    api_key: str | None = None,
+) -> ChatOpenAI:
     """创建当前配置对应的聊天模型实例。"""
     settings = get_settings()
-    if not settings.llm_api_key:
+    resolved_api_key = str(api_key or "").strip() or settings.llm_api_key
+    if not resolved_api_key:
         raise RuntimeError("LLM_API_KEY is not set.")
 
     kwargs: dict[str, Any] = {
         "model": settings.llm_model,
         "temperature": settings.llm_temperature if temperature is None else temperature,
-        "api_key": settings.llm_api_key,
+        "api_key": resolved_api_key,
     }
 
     if settings.llm_base_url:

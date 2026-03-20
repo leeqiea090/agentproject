@@ -75,6 +75,82 @@ python -m app.main
 - `app/main.py` 里关闭了 OpenAPI/Swagger，所以默认没有 `/docs`。
 - 招投标模块当前大量使用内存字典做临时存储，服务重启后会丢失内存态数据。
 
+## 3.4 打包成可双击运行的 macOS App
+
+当前仓库最适合的打包方式不是重写成 Electron，而是在现有 `FastAPI + 静态页面` 外面包一层桌面启动器：
+
+- `desktop_launcher.py`：启动本地 FastAPI 服务，再以内嵌窗口打开首页。
+- `BidAgent.spec`：`PyInstaller` 打包配置。
+- `scripts/build_macos_app.sh`：一键构建脚本。
+
+### 构建命令
+
+```bash
+chmod +x scripts/build_macos_app.sh
+PYTHON_BIN=.venv/bin/python ./scripts/build_macos_app.sh
+```
+
+构建成功后，产物默认在：
+
+```bash
+dist/BidAgent.app
+```
+
+如果你要分发给其他 macOS 用户，建议继续打包成 `.dmg`：
+
+```bash
+chmod +x scripts/build_macos_dmg.sh
+PYTHON_BIN=.venv/bin/python ./scripts/build_macos_dmg.sh
+```
+
+默认输出：
+
+```bash
+dist/BidAgent.dmg
+```
+
+如果已经有现成的 `.app`，可以跳过重复构建：
+
+```bash
+SKIP_APP_BUILD=1 ./scripts/build_macos_dmg.sh
+```
+
+### App 运行时目录
+
+桌面版不会往 `.app` 包内写数据，而是统一写到：
+
+```bash
+~/Library/Application Support/BidAgent/
+```
+
+其中包括：
+
+- `data/`：向量库、上传文件、生成文档
+- `.env`：桌面版环境变量配置文件
+
+### 桌面版环境变量
+
+建议在下面这个位置创建配置文件：
+
+```bash
+~/Library/Application Support/BidAgent/.env
+```
+
+最低示例：
+
+```bash
+LLM_API_KEY=your_key
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+```
+
+### 实际限制
+
+- 建议使用 Python `3.12` 或 `3.13` 的虚拟环境构建；当前仓库里的 `LangChain/Pydantic v1` 兼容层在 Python `3.14+` 下已有兼容性警告。
+- 首次使用嵌入模型时，`sentence-transformers` 可能需要联网下载模型。
+- 如果你希望把模型也一起离线封进 App，需要额外预下载 Hugging Face 模型并调整缓存路径。
+- 当前桌面壳本质上仍然是“本地 Web 服务 + 内嵌浏览器”，但对最终使用者来说已经是可双击启动的 `.app`。
+
 ## 4. 关键链路
 
 ### 4.1 知识库链路

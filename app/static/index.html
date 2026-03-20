@@ -235,6 +235,20 @@
       word-break: break-all;
     }
 
+    .field-label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .field-help {
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
     .stack {
       display: grid;
       gap: 12px;
@@ -555,6 +569,23 @@
     <div class="layout">
       <aside>
         <section class="panel">
+          <h2 class="panel-title">0. API 密钥</h2>
+          <p class="panel-subtitle">直接在页面填写；浏览器会自动记住上一次输入，仅保存在当前设备的 localStorage。</p>
+
+          <div class="stack">
+            <div>
+              <label class="field-label" for="apiKeyInput">LLM API Key</label>
+              <input class="input" id="apiKeyInput" type="password" placeholder="请输入 API Key，例如 sk-..." autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field-help" id="apiKeyMemoryText">留空时继续使用服务端环境变量；输入后会优先使用当前页面填写的密钥。</div>
+            <div class="button-row">
+              <button class="btn btn-secondary" id="toggleApiKeyBtn" type="button">显示密钥</button>
+              <button class="btn btn-secondary" id="clearApiKeyBtn" type="button">清空记忆</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
           <h2 class="panel-title">1. 上传并解析</h2>
           <p class="panel-subtitle">上传后先做解析，不会立即生成全部包。</p>
 
@@ -639,6 +670,7 @@
   </div>
 
   <script>
+    const API_KEY_STORAGE_KEY = 'bid-agent-llm-api-key';
     const state = {
       sessionId: '',
       projectName: '',
@@ -650,6 +682,10 @@
       busy: false,
     };
 
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    const apiKeyMemoryText = document.getElementById('apiKeyMemoryText');
+    const toggleApiKeyBtn = document.getElementById('toggleApiKeyBtn');
+    const clearApiKeyBtn = document.getElementById('clearApiKeyBtn');
     const fileInput = document.getElementById('fileInput');
     const chosenFile = document.getElementById('chosenFile');
     const uploadZone = document.getElementById('uploadZone');
@@ -670,6 +706,11 @@
     const promptList = document.getElementById('promptList');
     const emptyState = document.getElementById('emptyState');
 
+    restoreStoredApiKey();
+
+    apiKeyInput.addEventListener('input', persistApiKey);
+    toggleApiKeyBtn.addEventListener('click', toggleApiKeyVisibility);
+    clearApiKeyBtn.addEventListener('click', clearStoredApiKey);
     fileInput.addEventListener('change', () => {
       const file = fileInput.files[0];
       chosenFile.textContent = file ? `已选择：${file.name}` : '';
@@ -703,6 +744,65 @@
       renderPromptState();
     });
     generateBtn.addEventListener('click', generateDocument);
+
+    function getApiKey() {
+      return apiKeyInput.value.trim();
+    }
+
+    function restoreStoredApiKey() {
+      try {
+        apiKeyInput.value = window.localStorage.getItem(API_KEY_STORAGE_KEY) || '';
+      } catch (_) {
+        apiKeyInput.value = '';
+      }
+      updateApiKeyMemoryText();
+    }
+
+    function persistApiKey() {
+      const apiKey = getApiKey();
+      try {
+        if (apiKey) {
+          window.localStorage.setItem(API_KEY_STORAGE_KEY, apiKey);
+        } else {
+          window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+        }
+      } catch (_) {
+        // localStorage 不可用时忽略，页面仍可继续使用本次输入值。
+      }
+      updateApiKeyMemoryText();
+    }
+
+    function clearStoredApiKey() {
+      apiKeyInput.value = '';
+      try {
+        window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+      } catch (_) {
+        // 忽略 localStorage 异常。
+      }
+      updateApiKeyMemoryText();
+      setStatus('ok', '已清空浏览器中记住的 API 密钥。');
+    }
+
+    function toggleApiKeyVisibility() {
+      const isPassword = apiKeyInput.type === 'password';
+      apiKeyInput.type = isPassword ? 'text' : 'password';
+      toggleApiKeyBtn.textContent = isPassword ? '隐藏密钥' : '显示密钥';
+    }
+
+    function updateApiKeyMemoryText() {
+      apiKeyMemoryText.textContent = getApiKey()
+        ? '当前页面填写的密钥会自动保存在本机浏览器，下次打开页面会自动回填。'
+        : '留空时继续使用服务端环境变量；输入后会优先使用当前页面填写的密钥。';
+    }
+
+    function buildRequestHeaders(extraHeaders = {}) {
+      const headers = new Headers(extraHeaders);
+      const apiKey = getApiKey();
+      if (apiKey) {
+        headers.set('X-LLM-API-Key', apiKey);
+      }
+      return headers;
+    }
 
     function setBusy(value) {
       state.busy = value;
@@ -924,6 +1024,7 @@
         formData.append('file', file);
         const response = await fetch('/api/tender/one-click/prepare', {
           method: 'POST',
+          headers: buildRequestHeaders(),
           body: formData,
         });
         const payload = await readJsonOrThrow(response);
@@ -970,7 +1071,7 @@
       try {
         const response = await fetch('/api/tender/one-click/prompts', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildRequestHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             session_id: state.sessionId,
             package_id: packageId,
@@ -1008,7 +1109,7 @@
       try {
         const response = await fetch('/api/tender/one-click/generate-interactive', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildRequestHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             session_id: state.sessionId,
             package_id: state.selectedPackage,

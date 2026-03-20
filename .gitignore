@@ -10,4 +10,5 @@ data/
 tests
 .venv-test/
 textfile/
-、
+build/
+dist/

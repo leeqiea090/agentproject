@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import shutil
+from typing import Annotated
 import uuid
 
-from fastapi import BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.schemas import (
@@ -150,9 +151,10 @@ def _build_interactive_preview(
     tender_doc: TenderDocument,
     raw_text: str,
     package_id: str,
+    api_key: str | None = None,
 ) -> dict:
     package = _resolve_package(tender_doc, package_id)
-    llm = get_chat_model()
+    llm = get_chat_model(api_key=api_key)
     selected_packages = [package.package_id]
     scoped_tender = _single_package_tender(tender_doc, package.package_id)
     gen_result = generate_bid_sections(
@@ -190,7 +192,7 @@ def _build_interactive_preview(
     }
 
 
-def _ensure_session_preview(session_data: dict, package_id: str) -> dict:
+def _ensure_session_preview(session_data: dict, package_id: str, api_key: str | None = None) -> dict:
     package_cache = session_data.setdefault("package_cache", {})
     if package_id not in package_cache:
         tender_doc = _load_tender(session_data)
@@ -198,8 +200,14 @@ def _ensure_session_preview(session_data: dict, package_id: str) -> dict:
             tender_doc=tender_doc,
             raw_text=str(session_data.get("raw_text") or ""),
             package_id=package_id,
+            api_key=api_key,
         )
     return package_cache[package_id]
+
+
+def _normalize_request_api_key(api_key: str | None) -> str | None:
+    value = str(api_key or "").strip()
+    return value or None
 
 
 def _run_one_click_generation(job_id: str, save_path: Path, selected_package: str | None = None) -> None:
@@ -314,7 +322,10 @@ def _run_one_click_generation(job_id: str, save_path: Path, selected_package: st
 
 
 @router.post("/one-click/prepare", response_model=OneClickPrepareResponse, summary="上传招标文件并准备交互式生成")
-async def prepare_one_click_generation(file: UploadFile = File(...)):
+async def prepare_one_click_generation(
+    file: UploadFile = File(...),
+    x_llm_api_key: Annotated[str | None, Header()] = None,
+):
     """解析招标文件，返回包件列表，供前端做单包交互生成。"""
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
@@ -334,7 +345,7 @@ async def prepare_one_click_generation(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
 
     try:
-        llm = get_chat_model()
+        llm = get_chat_model(api_key=_normalize_request_api_key(x_llm_api_key))
         parser = create_tender_parser(llm)
         raw_text = parser.extract_text(save_path)
         tender_doc = parser.parse_tender_document(save_path)
@@ -366,7 +377,10 @@ async def prepare_one_click_generation(file: UploadFile = File(...)):
 
 
 @router.post("/one-click/prompts", response_model=OneClickPromptResponse, summary="生成单包交互式待填写项")
-async def get_one_click_prompts(req: OneClickPromptRequest):
+async def get_one_click_prompts(
+    req: OneClickPromptRequest,
+    x_llm_api_key: Annotated[str | None, Header()] = None,
+):
     """仅针对选中的一个包生成待填写项，重复字段只返回一次。"""
     session_data = one_click_session_storage.get(req.session_id)
     if not session_data:
@@ -375,7 +389,11 @@ async def get_one_click_prompts(req: OneClickPromptRequest):
     tender_doc = _load_tender(session_data)
     scoped_tender = _single_package_tender(tender_doc, req.package_id)
     try:
-        preview_data = _ensure_session_preview(session_data, req.package_id)
+        preview_data = _ensure_session_preview(
+            session_data,
+            req.package_id,
+            api_key=_normalize_request_api_key(x_llm_api_key),
+        )
     except BidSectionsValidationError as exc:
         logger.warning("交互式待填写项生成被硬校验阻断：%s", exc)
         raise HTTPException(status_code=409, detail=str(exc))
@@ -405,7 +423,10 @@ async def get_one_click_prompts(req: OneClickPromptRequest):
 
 
 @router.post("/one-click/generate-interactive", summary="按交互式答案生成单包文档")
-async def generate_interactive_one_click(req: OneClickInteractiveGenerateRequest):
+async def generate_interactive_one_click(
+    req: OneClickInteractiveGenerateRequest,
+    x_llm_api_key: Annotated[str | None, Header()] = None,
+):
     """将前端收集到的答案回填到单包底稿中并输出 Word。"""
     session_data = one_click_session_storage.get(req.session_id)
     if not session_data:
@@ -414,7 +435,11 @@ async def generate_interactive_one_click(req: OneClickInteractiveGenerateRequest
     tender_doc = _load_tender(session_data)
     scoped_tender = _single_package_tender(tender_doc, req.package_id)
     try:
-        preview_data = _ensure_session_preview(session_data, req.package_id)
+        preview_data = _ensure_session_preview(
+            session_data,
+            req.package_id,
+            api_key=_normalize_request_api_key(x_llm_api_key),
+        )
     except BidSectionsValidationError as exc:
         logger.warning("交互式单包文档生成被硬校验阻断：%s", exc)
         raise HTTPException(status_code=409, detail=str(exc))
@@ -461,6 +486,7 @@ async def generate_interactive_one_click(req: OneClickInteractiveGenerateRequest
 async def one_click_generate(
     file: UploadFile = File(...),
     selected_package: str | None = Form(default=None),
+    x_llm_api_key: Annotated[str | None, Header()] = None,
 ):
     """
     上传招标文件（PDF 或 Word），自动解析并生成可下载的底稿骨架 Word 文档。
@@ -487,7 +513,7 @@ async def one_click_generate(
         raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
 
     try:
-        llm = get_chat_model()
+        llm = get_chat_model(api_key=_normalize_request_api_key(x_llm_api_key))
         parser = create_tender_parser(llm)
 
         logger.info("开始提取文本：%s", save_path)
