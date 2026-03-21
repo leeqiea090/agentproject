@@ -210,7 +210,12 @@ def _normalize_request_api_key(api_key: str | None) -> str | None:
     return value or None
 
 
-def _run_one_click_generation(job_id: str, save_path: Path, selected_package: str | None = None) -> None:
+def _run_one_click_generation(
+    job_id: str,
+    save_path: Path,
+    selected_package: str | None = None,
+    api_key: str | None = None,
+) -> None:
     """执行后台一键成稿流程并写出结果文件。"""
     try:
         _set_one_click_job_status(
@@ -220,7 +225,7 @@ def _run_one_click_generation(job_id: str, save_path: Path, selected_package: st
             message="正在解析文档内容…",
             progress=12,
         )
-        llm = get_chat_model()
+        llm = get_chat_model(api_key=api_key)
         parser = create_tender_parser(llm)
         raw_text = parser.extract_text(save_path)
 
@@ -571,6 +576,7 @@ async def start_one_click_generate(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     selected_package: str | None = Form(default=None),
+    x_llm_api_key: Annotated[str | None, Header()] = None,
 ):
     """异步启动一键成稿任务，可选只生成指定包。"""
     filename = file.filename or ""
@@ -597,7 +603,13 @@ async def start_one_click_generate(
         message="文件上传成功，正在准备开始…",
         progress=3,
     )
-    background_tasks.add_task(_run_one_click_generation, job_id, save_path, selected_package)
+    background_tasks.add_task(
+        _run_one_click_generation,
+        job_id,
+        save_path,
+        selected_package,
+        _normalize_request_api_key(x_llm_api_key),
+    )
     return OneClickJobStartResponse(**one_click_job_storage[job_id])
 
 

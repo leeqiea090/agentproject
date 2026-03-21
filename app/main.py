@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.routers.chat import router as agent_router
 from app.routers.kb import router as kb_router
 from app.routers.tender import router as tender_router
+from app.services.llm import reset_request_api_key, set_request_api_key
 import uvicorn
 
 settings = get_settings()
@@ -30,6 +31,16 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(_STATIC_DIR / "index.html")
+
+
+@app.middleware("http")
+async def bind_request_llm_api_key(request: Request, call_next):
+    """将页面透传的 API Key 绑定到当前请求上下文。"""
+    token = set_request_api_key(request.headers.get("X-LLM-API-Key"))
+    try:
+        return await call_next(request)
+    finally:
+        reset_request_api_key(token)
 
 
 app.include_router(kb_router)

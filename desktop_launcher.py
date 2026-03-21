@@ -89,7 +89,6 @@ def _wait_for_server(url: str, timeout_seconds: float = 20.0) -> bool:
 
 
 def _startup_error_html(base_url: str) -> str:
-    support_env = _support_root() / ".env"
     return f"""
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -132,11 +131,10 @@ def _startup_error_html(base_url: str) -> str:
         <h1>应用启动失败</h1>
         <p>本地服务没有在预期时间内完成启动。通常是下面两类原因：</p>
         <ul>
-          <li>缺少必要环境变量，例如 <code>LLM_API_KEY</code></li>
           <li>打包时漏掉依赖或静态资源</li>
+          <li>本地服务启动后立即异常退出</li>
         </ul>
-        <p>建议先检查配置文件：</p>
-        <p><code>{support_env}</code></p>
+        <p>服务启动成功后，模型密钥直接在首页页面里粘贴即可，不再依赖启动时的 <code>.env</code>。</p>
         <p>服务目标地址：</p>
         <p><code>{base_url}</code></p>
       </main>

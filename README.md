@@ -39,13 +39,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3.2 最低环境变量
+### 3.2 环境变量
 
-至少需要配置：
+默认不需要配置 `LLM_API_KEY`。
 
-```bash
-export LLM_API_KEY=your_key
-```
+启动服务后，直接在首页页面里粘贴 API Key，前端会在每次请求时通过 `X-LLM-API-Key` 请求头透传给后端。
 
 常用可选项：
 
@@ -126,20 +124,19 @@ SKIP_APP_BUILD=1 ./scripts/build_macos_dmg.sh
 其中包括：
 
 - `data/`：向量库、上传文件、生成文档
-- `.env`：桌面版环境变量配置文件
+- `.env`：桌面版可选环境变量配置文件
 
-### 桌面版环境变量
+### 桌面版可选环境变量
 
-建议在下面这个位置创建配置文件：
+如需覆盖模型地址、模型名等配置，可在下面这个位置创建配置文件：
 
 ```bash
 ~/Library/Application Support/BidAgent/.env
 ```
 
-最低示例：
+示例：
 
 ```bash
-LLM_API_KEY=your_key
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4o-mini
 ```

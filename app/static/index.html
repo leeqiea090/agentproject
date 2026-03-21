@@ -575,9 +575,9 @@
           <div class="stack">
             <div>
               <label class="field-label" for="apiKeyInput">LLM API Key</label>
-              <input class="input" id="apiKeyInput" type="password" placeholder="请输入 API Key，例如 sk-..." autocomplete="off" spellcheck="false" />
+              <input class="input" id="apiKeyInput" type="password" placeholder="请输入 API Key，例如 sk-..." autocomplete="off" spellcheck="false" required />
             </div>
-            <div class="field-help" id="apiKeyMemoryText">留空时继续使用服务端环境变量；输入后会优先使用当前页面填写的密钥。</div>
+            <div class="field-help" id="apiKeyMemoryText">此页面直接透传你填写的密钥；不再依赖服务端 `.env` 中的 LLM_API_KEY。</div>
             <div class="button-row">
               <button class="btn btn-secondary" id="toggleApiKeyBtn" type="button">显示密钥</button>
               <button class="btn btn-secondary" id="clearApiKeyBtn" type="button">清空记忆</button>
@@ -708,7 +708,10 @@
 
     restoreStoredApiKey();
 
-    apiKeyInput.addEventListener('input', persistApiKey);
+    apiKeyInput.addEventListener('input', () => {
+      persistApiKey();
+      setBusy(state.busy);
+    });
     toggleApiKeyBtn.addEventListener('click', toggleApiKeyVisibility);
     clearApiKeyBtn.addEventListener('click', clearStoredApiKey);
     fileInput.addEventListener('change', () => {
@@ -749,6 +752,16 @@
       return apiKeyInput.value.trim();
     }
 
+    function requireApiKey() {
+      const apiKey = getApiKey();
+      if (!apiKey) {
+        setStatus('error', '请先在页面上粘贴 API 密钥。');
+        apiKeyInput.focus();
+        return '';
+      }
+      return apiKey;
+    }
+
     function restoreStoredApiKey() {
       try {
         apiKeyInput.value = window.localStorage.getItem(API_KEY_STORAGE_KEY) || '';
@@ -781,6 +794,7 @@
       }
       updateApiKeyMemoryText();
       setStatus('ok', '已清空浏览器中记住的 API 密钥。');
+      setBusy(state.busy);
     }
 
     function toggleApiKeyVisibility() {
@@ -792,7 +806,7 @@
     function updateApiKeyMemoryText() {
       apiKeyMemoryText.textContent = getApiKey()
         ? '当前页面填写的密钥会自动保存在本机浏览器，下次打开页面会自动回填。'
-        : '留空时继续使用服务端环境变量；输入后会优先使用当前页面填写的密钥。';
+        : '请先粘贴 API 密钥；页面会在每次请求时自动通过 X-LLM-API-Key 透传给后端。';
     }
 
     function buildRequestHeaders(extraHeaders = {}) {
@@ -806,9 +820,10 @@
 
     function setBusy(value) {
       state.busy = value;
-      analyzeBtn.disabled = value;
-      loadPromptsBtn.disabled = value || !state.sessionId;
-      generateBtn.disabled = value || !state.sessionId || !state.selectedPackage;
+      const missingApiKey = !getApiKey();
+      analyzeBtn.disabled = value || missingApiKey;
+      loadPromptsBtn.disabled = value || missingApiKey || !state.sessionId;
+      generateBtn.disabled = value || missingApiKey || !state.sessionId || !state.selectedPackage;
       packageSelect.disabled = value || !state.packages.length;
     }
 
@@ -1004,6 +1019,9 @@
     }
 
     async function prepareSession() {
+      if (!requireApiKey()) {
+        return;
+      }
       const file = fileInput.files[0];
       if (!file) {
         setStatus('error', '请先选择招标文件。');
@@ -1052,6 +1070,9 @@
     }
 
     async function loadPrompts(packageId, silent = false) {
+      if (!requireApiKey()) {
+        return;
+      }
       if (!state.sessionId) {
         setStatus('error', '请先上传并解析招标文件。');
         return;
@@ -1093,6 +1114,9 @@
     }
 
     async function generateDocument() {
+      if (!requireApiKey()) {
+        return;
+      }
       if (!state.sessionId || !state.selectedPackage) {
         setStatus('error', '请先上传文件并选择目标包。');
         return;
