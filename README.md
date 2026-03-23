@@ -409,7 +409,3 @@ LLM_MODEL=gpt-4o-mini
 - `app/services/docx_builder.py`
 - `tests/test_docx_builder_pagination.py`
 - `scripts/fix_bid_doc_v2.py`
-
-## 9. 一句话总结
-
-把这个项目理解成“招标文件解析器 + 本地知识库 + 两条标书生成管道 + 一套很重的质量门禁/外发治理系统”基本就对了；真正影响效果的核心文件，集中在 `tender_parser.py`、`requirement_processor.py`、`evidence_binder.py`、`one_click_generator/pipeline.py` 和 `tender_workflow/*`。
