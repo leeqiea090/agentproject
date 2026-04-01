@@ -1335,12 +1335,9 @@ def _build_tp_sections(
 ) -> list:
     """构建TP 格式章节。"""
     packages = active_packages or tender.packages
-    sections = []
-
-    sections.append(
-        BidDocumentSection(
-            section_title="一、响应文件封面格式",
-            content=f"""
+    sections = [BidDocumentSection(
+        section_title="一、响应文件封面格式",
+        content=f"""
 政 府 采 购
 响 应 文 件
 
@@ -1352,13 +1349,9 @@ def _build_tp_sections(
 电话：【待填写：联系电话】
 谈判日期：【待填写：日期】
 """.strip(),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="二、报价书",
-            content=f"""
+    ), BidDocumentSection(
+        section_title="二、报价书",
+        content=f"""
 （供应商全称）授权（授权代表姓名）【待填写】（职务、职称）【待填写】为响应供应商代表，
 参加贵方组织的（项目编号：{tender.project_number}，项目名称：{tender.project_name}）谈判的有关活动，并对本项目进行报价。为此：
 
@@ -1374,69 +1367,49 @@ def _build_tp_sections(
 供应商全称：【待填写：投标人名称】
 日期：【待填写：年 月 日】
 """.strip(),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="三、报价一览表",
-            content=_build_tp_quote_summary_table(tender, packages, tender_raw),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="四、资格承诺函",
-            content=_append_vendor_qualification_paste_section(
-                _extract_tp_qualification_commitment_template(tender_raw),
+    ), BidDocumentSection(
+        section_title="三、报价一览表",
+        content=_build_tp_quote_summary_table(tender, packages, tender_raw),
+    ), BidDocumentSection(
+        section_title="四、资格承诺函",
+        content=_append_vendor_qualification_paste_section(
+            _extract_tp_qualification_commitment_template(tender_raw),
+            tender,
+            packages,
+            tender_raw,
+            products=products,
+            required_materials=required_materials,
+        ),
+    ), BidDocumentSection(
+        section_title="五、技术偏离及详细配置明细表",
+        content="\n\n".join(
+            _build_tp_combined_deviation_detail_table(
                 tender,
-                packages,
+                pkg,
                 tender_raw,
-                products=products,
-                required_materials=required_materials,
-            ),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="五、技术偏离及详细配置明细表",
-            content="\n\n".join(
-                _build_tp_combined_deviation_detail_table(
-                    tender,
-                    pkg,
-                    tender_raw,
-                    product=(products or {}).get(pkg.package_id),
-                    normalized_result=normalized_result,
-                    evidence_result=evidence_result,
-                    product_profile=(product_profiles or {}).get(pkg.package_id),
-                )
-                for pkg in packages
-            ).strip(),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="六、技术服务和售后服务的内容及措施",
-            content=_build_tp_service_plan_section(
-                packages,
-                tender_raw,
-                products=products,
+                product=(products or {}).get(pkg.package_id),
                 normalized_result=normalized_result,
                 evidence_result=evidence_result,
-                product_profiles=product_profiles,
-            ),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="七、法定代表人/单位负责人授权书",
-            content=_build_tp_template_section(
-                tender_raw,
-                "七、法定代表人/单位负责人授权书",
-                f"""
+                product_profile=(product_profiles or {}).get(pkg.package_id),
+            )
+            for pkg in packages
+        ).strip(),
+    ), BidDocumentSection(
+        section_title="六、技术服务和售后服务的内容及措施",
+        content=_build_tp_service_plan_section(
+            packages,
+            tender_raw,
+            products=products,
+            normalized_result=normalized_result,
+            evidence_result=evidence_result,
+            product_profiles=product_profiles,
+        ),
+    ), BidDocumentSection(
+        section_title="七、法定代表人/单位负责人授权书",
+        content=_build_tp_template_section(
+            tender_raw,
+            "七、法定代表人/单位负责人授权书",
+            f"""
 （报价单位全称）法定代表人/单位负责人【待填写：法定代表人姓名】授权【待填写：授权代表姓名】为响应供应商代表，
 参加贵处组织的 {tender.project_name}（项目编号：{tender.project_number}）竞争性谈判，全权处理本活动中的一切事宜。
 
@@ -1452,82 +1425,48 @@ def _build_tp_sections(
 传真：【待填写】
 电话：【待填写】
 """.strip(),
-            ),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="八、法定代表人/单位负责人和授权代表身份证明",
-            content=_build_tp_template_section(
-                tender_raw,
-                "八、法定代表人/单位负责人和授权代表身份证明",
-                """
+        ),
+    ), BidDocumentSection(
+        section_title="八、法定代表人/单位负责人和授权代表身份证明",
+        content=_build_tp_template_section(
+            tender_raw,
+            "八、法定代表人/单位负责人和授权代表身份证明",
+            """
 （法定代表人/单位负责人身份证正反面复印件）
 （授权代表身份证正反面复印件）
 供应商全称：【待填写：投标人名称】
 """.strip(),
-            ),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="九、小微企业声明函",
-            content=_build_small_enterprise_declaration_template(tender, packages),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="十、残疾人福利性单位声明函",
-            content=_build_disabled_unit_declaration_template(tender, packages),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="十一、投标人关联单位的说明",
-            content=_build_affiliated_units_statement_template(tender),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title="十二、报价书附件",
-            content=_build_quote_attachment_section(
-                tender,
-                packages,
-                tender_raw,
-                products=products,
-                product_profiles=product_profiles,
-            ),
-        )
-    )
-
-    sections.append(
-        BidDocumentSection(
-            section_title=_TP_APPENDIX_TITLES[0],
-            content=_build_tp_qualification_review_section(tender, packages, tender_raw),
-        )
-    )
-    sections.append(
-        BidDocumentSection(
-            section_title=_TP_APPENDIX_TITLES[1],
-            content=_build_tp_compliance_review_section(tender, packages, tender_raw),
-        )
-    )
-    sections.append(
-        BidDocumentSection(
-            section_title=_TP_APPENDIX_TITLES[2],
-            content=_build_tp_detailed_review_section(tender, packages, tender_raw),
-        )
-    )
-    sections.append(
-        BidDocumentSection(
-            section_title=_TP_APPENDIX_TITLES[3],
-            content=_build_tp_invalid_bid_checklist(tender, tender_raw),
-        )
-    )
+        ),
+    ), BidDocumentSection(
+        section_title="九、小微企业声明函",
+        content=_build_small_enterprise_declaration_template(tender, packages),
+    ), BidDocumentSection(
+        section_title="十、残疾人福利性单位声明函",
+        content=_build_disabled_unit_declaration_template(tender, packages),
+    ), BidDocumentSection(
+        section_title="十一、投标人关联单位的说明",
+        content=_build_affiliated_units_statement_template(tender),
+    ), BidDocumentSection(
+        section_title="十二、报价书附件",
+        content=_build_quote_attachment_section(
+            tender,
+            packages,
+            tender_raw,
+            products=products,
+            product_profiles=product_profiles,
+        ),
+    ), BidDocumentSection(
+        section_title=_TP_APPENDIX_TITLES[0],
+        content=_build_tp_qualification_review_section(tender, packages, tender_raw),
+    ), BidDocumentSection(
+        section_title=_TP_APPENDIX_TITLES[1],
+        content=_build_tp_compliance_review_section(tender, packages, tender_raw),
+    ), BidDocumentSection(
+        section_title=_TP_APPENDIX_TITLES[2],
+        content=_build_tp_detailed_review_section(tender, packages, tender_raw),
+    ), BidDocumentSection(
+        section_title=_TP_APPENDIX_TITLES[3],
+        content=_build_tp_invalid_bid_checklist(tender, tender_raw),
+    )]
 
     return sections
