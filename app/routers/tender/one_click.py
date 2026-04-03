@@ -149,28 +149,18 @@ def _download_filename(
 
 def _build_interactive_preview(
     tender_doc: TenderDocument,
-    raw_text: str,
-    package_id: str,
+        package_id: str,
     api_key: str | None = None,
 ) -> dict:
     package = _resolve_package(tender_doc, package_id)
     llm = get_chat_model(api_key=api_key)
-    selected_packages = [package.package_id]
-    scoped_tender = _single_package_tender(tender_doc, package.package_id)
+    # selected_packages = [package.package_id]
+    # scoped_tender = _single_package_tender(tender_doc, package.package_id)
     gen_result = generate_bid_sections(
-        scoped_tender,
-        raw_text,
-        llm,
-        selected_packages=selected_packages,
-        require_validation_pass=True,
+
     )
     sections, _ = _materialize_sections(
-        sections=gen_result.sections,
-        tender=scoped_tender,
-        company=_PLACEHOLDER_COMPANY,
-        products={},
-        evidence_result=None,
-        product_profiles=gen_result.product_profiles,
+
     )
     interactive_sections = render_editable_draft_sections(sections, add_draft_watermark=False)
     interactive_plan = plan_interactive_fill(interactive_sections, llm=llm)
@@ -198,7 +188,6 @@ def _ensure_session_preview(session_data: dict, package_id: str, api_key: str | 
         tender_doc = _load_tender(session_data)
         package_cache[package_id] = _build_interactive_preview(
             tender_doc=tender_doc,
-            raw_text=str(session_data.get("raw_text") or ""),
             package_id=package_id,
             api_key=api_key,
         )
@@ -227,7 +216,7 @@ def _run_one_click_generation(
         )
         llm = get_chat_model(api_key=api_key)
         parser = create_tender_parser(llm)
-        raw_text = parser.extract_text(save_path)
+        # raw_text = parser.extract_text(save_path)
 
         _set_one_click_job_status(
             job_id,
@@ -255,19 +244,10 @@ def _run_one_click_generation(
             progress=72,
         )
         gen_result = generate_bid_sections(
-            scoped_tender,
-            raw_text,
-            llm,
-            selected_packages=_selected_packages_arg(selected_package),
-            require_validation_pass=True,
+
         )
         sections, _ = _materialize_sections(
-            sections=gen_result.sections,
-            tender=scoped_tender,
-            company=_PLACEHOLDER_COMPANY,
-            products={},
-            evidence_result=None,
-            product_profiles=gen_result.product_profiles,
+
         )
         _set_one_click_job_status(
             job_id,
@@ -529,19 +509,10 @@ async def one_click_generate(
         scoped_tender = _single_package_tender(tender_doc, selected_package)
 
         gen_result = generate_bid_sections(
-            scoped_tender,
-            raw_text,
-            llm,
-            selected_packages=_selected_packages_arg(selected_package),
-            require_validation_pass=True,
+
         )
         sections, _ = _materialize_sections(
-            sections=gen_result.sections,
-            tender=scoped_tender,
-            company=_PLACEHOLDER_COMPANY,
-            products={},
-            evidence_result=None,
-            product_profiles=gen_result.product_profiles,
+
         )
 
         doc_label = _one_click_doc_label(gen_result.draft_level)

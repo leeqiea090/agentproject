@@ -34,3 +34,11 @@ for _module in (
 
 
 del _module
+
+
+def _materialize_sections():
+    return None
+
+
+def _match_requirements_to_product_facts():
+    return None

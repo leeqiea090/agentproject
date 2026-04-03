@@ -32,3 +32,7 @@ for _module in (
 
 
 del _module
+
+
+def generate_bid_sections():
+    return None
