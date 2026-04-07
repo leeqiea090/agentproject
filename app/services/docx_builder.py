@@ -13,7 +13,15 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-from app.schemas import BidDocumentSection, TenderDocument, CompanyProfile, DraftLevel
+from app.schemas import (
+    BidDocumentSection,
+    BidDocumentStyleProfile,
+    BidGenerationPreferences,
+    CompanyProfile,
+    DraftLevel,
+    TenderDocument,
+)
+from app.services.bid_preferences import normalize_generation_preferences, reorder_bid_sections
 from app.services.one_click_generator.format_driven_sections.common import (
     _build_affiliated_units_statement_template,
     _build_disabled_unit_declaration_template,
@@ -40,23 +48,61 @@ def _style_table(table) -> None:
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
 
-def _add_heading(doc: Document, text: str, level: int) -> None:
+def _doc_style(style_profile: BidDocumentStyleProfile | None) -> BidDocumentStyleProfile:
+    """返回可用的文档样式配置。"""
+    return style_profile if style_profile is not None else BidDocumentStyleProfile()
+
+
+def _font_size(size_pt: float | int) -> Pt:
+    """把字号数字转换成 Pt。"""
+    return Pt(float(size_pt))
+
+
+def _apply_run_font(
+    run,
+    *,
+    font_name: str | None = None,
+    size_pt: float | int | None = None,
+    bold: bool | None = None,
+    color: RGBColor | None = None,
+) -> None:
+    """统一设置 run 的字体属性。"""
+    if font_name:
+        run.font.name = font_name
+        run.element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+    if size_pt is not None:
+        run.font.size = _font_size(size_pt)
+    if bold is not None:
+        run.font.bold = bold
+    if color is not None:
+        run.font.color.rgb = color
+
+
+def _add_heading(
+    doc: Document,
+    text: str,
+    level: int,
+    *,
+    style_profile: BidDocumentStyleProfile | None = None,
+) -> None:
     """添加标题（1~3级），并避免标题落在页末单独成页/孤行。"""
+    style = _doc_style(style_profile)
     heading = doc.add_heading(text, level=level)
     heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
     run = heading.runs[0] if heading.runs else heading.add_run(text)
-    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-    run.font.name = "黑体"
-    run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体")
-    run.font.bold = True
-
-    if level == 1:
-        run.font.size = Pt(16)
-    elif level == 2:
-        run.font.size = Pt(14)
-    else:
-        run.font.size = Pt(12)
+    size_pt = style.heading1_font_size_pt
+    if level == 2:
+        size_pt = style.heading2_font_size_pt
+    elif level >= 3:
+        size_pt = style.heading3_font_size_pt
+    _apply_run_font(
+        run,
+        font_name=style.heading_font_family,
+        size_pt=size_pt,
+        bold=True,
+        color=RGBColor(0x00, 0x00, 0x00),
+    )
 
     fmt = heading.paragraph_format
     fmt.keep_with_next = True      # 标题和下一段绑定，避免标题单独留页尾
@@ -66,25 +112,44 @@ def _add_heading(doc: Document, text: str, level: int) -> None:
     fmt.space_after = Pt(6)
 
 
-def _add_paragraph(doc: Document, text: str, bold: bool = False) -> None:
+def _add_paragraph(
+    doc: Document,
+    text: str,
+    bold: bool = False,
+    *,
+    style_profile: BidDocumentStyleProfile | None = None,
+) -> None:
     """添加普通段落"""
+    style = _doc_style(style_profile)
     para = doc.add_paragraph()
     run = para.add_run(text)
-    run.font.size = Pt(11)
-    run.font.bold = bold
+    _apply_run_font(
+        run,
+        font_name=style.body_font_family,
+        size_pt=style.body_font_size_pt,
+        bold=bold,
+    )
     para.paragraph_format.space_after = Pt(4)
 
 
-def _add_toc_title(doc: Document, text: str = "目录") -> None:
+def _add_toc_title(
+    doc: Document,
+    text: str = "目录",
+    *,
+    style_profile: BidDocumentStyleProfile | None = None,
+) -> None:
     """添加目录页标题，但不使用 Heading 样式，避免目录把自己收录进去。"""
+    style = _doc_style(style_profile)
     para = doc.add_paragraph()
     para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     run = para.add_run(text)
-    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-    run.font.name = "黑体"
-    run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体")
-    run.font.bold = True
-    run.font.size = Pt(16)
+    _apply_run_font(
+        run,
+        font_name=style.heading_font_family,
+        size_pt=style.heading1_font_size_pt,
+        bold=True,
+        color=RGBColor(0x00, 0x00, 0x00),
+    )
 
     fmt = para.paragraph_format
     fmt.keep_with_next = True
@@ -94,7 +159,13 @@ def _add_toc_title(doc: Document, text: str = "目录") -> None:
     fmt.space_after = Pt(6)
 
 
-def _append_inline_runs(para, text: str, size: Pt) -> None:
+def _append_inline_runs(
+    para,
+    text: str,
+    size: Pt,
+    *,
+    font_name: str | None = None,
+) -> None:
     """将含 **粗体** 的文本写入段落"""
     parts = re.split(r"(\*\*.*?\*\*)", text)
     for part in parts:
@@ -105,6 +176,9 @@ def _append_inline_runs(para, text: str, size: Pt) -> None:
             run.bold = True
         else:
             run = para.add_run(part)
+        if font_name:
+            run.font.name = font_name
+            run.element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
         run.font.size = size
 
 
@@ -130,9 +204,14 @@ def _heading_body_fallback_text(title: str) -> str:
     return "请按招标文件原格式填写本节内容。"
 
 
-def _append_heading_body_fallback(doc: Document, title: str) -> None:
+def _append_heading_body_fallback(
+    doc: Document,
+    title: str,
+    *,
+    style_profile: BidDocumentStyleProfile | None = None,
+) -> None:
     """在缺少正文时追加标题兜底内容。"""
-    _add_paragraph(doc, _heading_body_fallback_text(title))
+    _add_paragraph(doc, _heading_body_fallback_text(title), style_profile=style_profile)
 
 
 def _normalize_title(text: str) -> str:
@@ -649,9 +728,15 @@ def _insert_toc_field(paragraph, levels: str = "1-2") -> None:
     run._r.append(fld_end)
 
 
-def _add_toc(doc: Document, sections: Iterable[BidDocumentSection]) -> None:
+def _add_toc(
+    doc: Document,
+    sections: Iterable[BidDocumentSection],
+    *,
+    style_profile: BidDocumentStyleProfile | None = None,
+) -> None:
     """添加可点击跳转的 Word 自动目录。"""
-    _add_toc_title(doc, "目录")
+    style = _doc_style(style_profile)
+    _add_toc_title(doc, style.toc_title, style_profile=style)
 
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(6)
@@ -702,8 +787,10 @@ def _render_markdown_table(
     lines: list[str],
     tender: TenderDocument | None = None,
     section_title: str = "",
+    style_profile: BidDocumentStyleProfile | None = None,
 ) -> None:
     """将 Markdown 表格渲染为 Word 表格，并优先复用招标模板列宽。"""
+    style = _doc_style(style_profile)
     data_rows = [l for l in lines if not re.match(r"^\|[-| :]+\|$", l.strip())]
     if not data_rows:
         return
@@ -759,10 +846,14 @@ def _render_markdown_table(
 
             p = cell.paragraphs[0]
             run = p.runs[0] if p.runs else p.add_run(clean_text)
-            run.font.size = Pt(10)
+            _apply_run_font(
+                run,
+                font_name=style.heading_font_family if i == 0 else style.body_font_family,
+                size_pt=style.table_font_size_pt,
+                bold=(i == 0),
+            )
 
             if i == 0:
-                run.font.bold = True
                 _set_cell_bg(cell, "D9E1F2")
 
             p.alignment = _cell_alignment_for_header(header_cells[j], is_header=(i == 0))
@@ -780,11 +871,13 @@ def _parse_and_render_markdown(
     content: str,
     tender: TenderDocument | None = None,
     section_title: str = "",
+    style_profile: BidDocumentStyleProfile | None = None,
 ) -> bool:
     """
     将 Markdown 文本逐行解析并写入 Word 文档。
     支持：# 标题、**粗体**、- 列表、| 表格、普通段落
     """
+    style = _doc_style(style_profile)
     lines = content.splitlines()
     i = 0
     rendered_body = False
@@ -817,7 +910,7 @@ def _parse_and_render_markdown(
                 and last_heading_text
                 and last_heading_source != "outline"
             ):
-                _append_heading_body_fallback(doc, last_heading_text)
+                _append_heading_body_fallback(doc, last_heading_text, style_profile=style)
                 rendered_body = True
                 body_since_heading = True
             if (
@@ -827,7 +920,7 @@ def _parse_and_render_markdown(
                 and last_heading_source != "outline"
             ):
                 doc.add_page_break()
-            _add_heading(doc, heading_text, level)
+            _add_heading(doc, heading_text, level, style_profile=style)
             seen_inner_heading = True
             body_since_heading = False
             last_heading_text = heading_text
@@ -842,14 +935,19 @@ def _parse_and_render_markdown(
         # 无序列表
         elif stripped.startswith("- ") or stripped.startswith("* "):
             para = doc.add_paragraph(style="List Bullet")
-            _append_inline_runs(para, stripped[2:], Pt(10.5))
+            _append_inline_runs(para, stripped[2:], Pt(10.5), font_name=style.body_font_family)
             rendered_body = True
             body_since_heading = True
 
         # 有序列表
         elif re.match(r"^\d+[\.、]\s*", stripped):
             para = doc.add_paragraph(style="List Number")
-            _append_inline_runs(para, re.sub(r"^\d+[\.、]\s*", "", stripped), Pt(10.5))
+            _append_inline_runs(
+                para,
+                re.sub(r"^\d+[\.、]\s*", "", stripped),
+                Pt(10.5),
+                font_name=style.body_font_family,
+            )
             rendered_body = True
             body_since_heading = True
 
@@ -860,7 +958,7 @@ def _parse_and_render_markdown(
                 and last_heading_text
                 and last_heading_source != "outline"
             ):
-                _append_heading_body_fallback(doc, last_heading_text)
+                _append_heading_body_fallback(doc, last_heading_text, style_profile=style)
                 rendered_body = True
                 body_since_heading = True
             doc.add_page_break()
@@ -883,7 +981,13 @@ def _parse_and_render_markdown(
             while i < len(lines) and lines[i].strip().startswith("|"):
                 table_lines.append(lines[i])
                 i += 1
-            _render_markdown_table(doc, table_lines, tender=tender, section_title=section_title)
+            _render_markdown_table(
+                doc,
+                table_lines,
+                tender=tender,
+                section_title=section_title,
+                style_profile=style,
+            )
             rendered_body = True
             body_since_heading = True
             continue
@@ -891,7 +995,7 @@ def _parse_and_render_markdown(
         # 普通段落（含粗体处理）
         else:
             para = doc.add_paragraph()
-            _append_inline_runs(para, stripped, Pt(11))
+            _append_inline_runs(para, stripped, Pt(style.body_font_size_pt), font_name=style.body_font_family)
             para.paragraph_format.space_after = Pt(4)
             rendered_body = True
             body_since_heading = True
@@ -904,19 +1008,24 @@ def _parse_and_render_markdown(
         and last_heading_text
         and last_heading_source != "outline"
     ):
-        _append_heading_body_fallback(doc, last_heading_text)
+        _append_heading_body_fallback(doc, last_heading_text, style_profile=style)
         rendered_body = True
 
     return rendered_body
 
 
-def _set_document_style(doc: Document) -> None:
+def _set_document_style(
+    doc: Document,
+    *,
+    style_profile: BidDocumentStyleProfile | None = None,
+) -> None:
     """设置文档全局样式"""
+    style_profile = _doc_style(style_profile)
     style = doc.styles["Normal"]
-    style.font.name = "仿宋"
-    style.font.size = Pt(11)
+    style.font.name = style_profile.body_font_family
+    style.font.size = _font_size(style_profile.body_font_size_pt)
     # 兼容中文字体
-    style.element.rPr.rFonts.set(qn("w:eastAsia"), "仿宋")
+    style.element.rPr.rFonts.set(qn("w:eastAsia"), style_profile.body_font_family)
 
     # 页边距
     section = doc.sections[0]
@@ -932,30 +1041,45 @@ def _add_cover(
     company: CompanyProfile,
     *,
     draft_level: DraftLevel | str | None = None,
+    style_profile: BidDocumentStyleProfile | None = None,
 ) -> None:
     """生成投标文件封面"""
+    style = _doc_style(style_profile)
+
     def _center_line(text: str, size: int, *, bold: bool = False) -> None:
         """在封面中追加一行居中的文本。"""
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p.add_run(text)
-        run.font.size = Pt(size)
-        run.font.bold = bold
-        run.font.name = "黑体" if bold else "仿宋"
-        run.element.rPr.rFonts.set(qn("w:eastAsia"), "黑体" if bold else "仿宋")
+        _apply_run_font(
+            run,
+            font_name=style.cover_font_family if bold else style.cover_meta_font_family,
+            size_pt=size,
+            bold=bold,
+        )
         p.paragraph_format.space_after = Pt(6)
 
-    _center_line(tender.project_name or "【待填写：项目名称】", 18, bold=True)
+    _center_line(tender.project_name or "【待填写：项目名称】", int(style.cover_project_font_size_pt), bold=True)
     doc.add_paragraph()
-    _center_line("投 标 底 稿" if _is_internal_draft(draft_level) else "投 标 文 件", 24, bold=True)
+    _center_line(
+        "投 标 底 稿" if _is_internal_draft(draft_level) else "投 标 文 件",
+        int(style.cover_title_font_size_pt),
+        bold=True,
+    )
     doc.add_paragraph()
-    _center_line(f"招标编号：{tender.project_number or '【待填写：项目编号】'}", 14)
+    _center_line(f"招标编号：{tender.project_number or '【待填写：项目编号】'}", int(style.cover_meta_font_size_pt))
     doc.add_paragraph()
     doc.add_paragraph()
-    _center_line(f"投标单位：{_normalize_cover_placeholder(company.name, '投标人名称')}（盖章）", 14)
-    _center_line(f"单位地址：{_normalize_cover_placeholder(company.address, '单位地址')}", 12)
+    _center_line(
+        f"投标单位：{_normalize_cover_placeholder(company.name, '投标人名称')}（盖章）",
+        int(style.cover_meta_font_size_pt),
+    )
+    _center_line(
+        f"单位地址：{_normalize_cover_placeholder(company.address, '单位地址')}",
+        int(max(style.cover_meta_font_size_pt - 2, 10)),
+    )
     doc.add_paragraph()
-    _center_line(_resolve_document_date(company), 12)
+    _center_line(_resolve_document_date(company), int(max(style.cover_meta_font_size_pt - 2, 10)))
 
 
 def _is_cover_section(section: BidDocumentSection) -> bool:
@@ -1375,6 +1499,7 @@ def build_bid_docx(
     output_path: Path,
     *,
     draft_level: DraftLevel | str | None = None,
+    generation_preferences: BidGenerationPreferences | dict | None = None,
 ) -> Path:
     """
     将投标文件各章节内容写入 Word (.docx) 文件。
@@ -1385,14 +1510,19 @@ def build_bid_docx(
         company: 企业信息
         output_path: 输出 .docx 文件路径
         draft_level: 稿件等级，internal_draft 时按底稿样式输出封面
+        generation_preferences: 章节顺序、字体和目录等输出偏好
 
     Returns:
         输出文件路径
     """
+    preferences = normalize_generation_preferences(generation_preferences)
     sections = _backfill_required_sections(sections, tender=tender)
+    if preferences is not None:
+        sections = reorder_bid_sections(sections, preferences)
     _assert_new_structure_only(sections, tender=tender)
+    style_profile = preferences.document_style if preferences is not None else BidDocumentStyleProfile()
     doc = Document()
-    _set_document_style(doc)
+    _set_document_style(doc, style_profile=style_profile)
     _enable_update_fields_on_open(doc)
 
     # 逐章节渲染（跳过自动生成的封面/目录章节，避免重复）
@@ -1408,22 +1538,28 @@ def build_bid_docx(
             draft_level,
         )
         rendered_cover = (
-            _parse_and_render_markdown(doc, cover_content, tender=tender, section_title=cover_section.section_title)
+            _parse_and_render_markdown(
+                doc,
+                cover_content,
+                tender=tender,
+                section_title=cover_section.section_title,
+                style_profile=style_profile,
+            )
             if cover_content else False
         )
         if not rendered_cover:
-            _append_heading_body_fallback(doc, cover_section.section_title)
+            _append_heading_body_fallback(doc, cover_section.section_title, style_profile=style_profile)
         render_sections = render_sections[1:]
         if render_sections:
             doc.add_page_break()
     elif mode == "zb":
-        _add_cover(doc, tender, company, draft_level=draft_level)
+        _add_cover(doc, tender, company, draft_level=draft_level, style_profile=style_profile)
         if render_sections:
             doc.add_page_break()
 
     # 自动目录页
     if render_sections:
-        _add_toc(doc, render_sections)
+        _add_toc(doc, render_sections, style_profile=style_profile)
         doc.add_page_break()
 
     for idx, section in enumerate(render_sections):
@@ -1433,24 +1569,36 @@ def build_bid_docx(
         )
 
         # 章节标题
-        _add_heading(doc, section.section_title, 1)
+        _add_heading(doc, section.section_title, 1, style_profile=style_profile)
         # doc.add_paragraph()
 
         # 章节内容（Markdown → Word）
         rendered_body = (
-            _parse_and_render_markdown(doc, clean_content, tender=tender, section_title=section.section_title)
+            _parse_and_render_markdown(
+                doc,
+                clean_content,
+                tender=tender,
+                section_title=section.section_title,
+                style_profile=style_profile,
+            )
             if clean_content else False
         )
 
         # 附件列表
         if section.attachments:
-            _add_paragraph(doc, "附件：", bold=True)
+            _add_paragraph(doc, "附件：", bold=True, style_profile=style_profile)
             for att in section.attachments:
-                doc.add_paragraph(att, style="List Bullet")
+                para = doc.add_paragraph(style="List Bullet")
+                run = para.add_run(att)
+                _apply_run_font(
+                    run,
+                    font_name=style_profile.body_font_family,
+                    size_pt=style_profile.body_font_size_pt,
+                )
             rendered_body = True
 
         if not rendered_body:
-            _append_heading_body_fallback(doc, section.section_title)
+            _append_heading_body_fallback(doc, section.section_title, style_profile=style_profile)
 
         if idx < len(render_sections) - 1:
             doc.add_page_break()

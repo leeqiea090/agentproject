@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 import shutil
 from typing import Annotated
@@ -11,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from app.schemas import (
     BidDocumentSection,
+    BidGenerationPreferences,
     DraftLevel,
     OneClickInteractiveGenerateRequest,
     OneClickJobStartResponse,
@@ -20,6 +22,11 @@ from app.schemas import (
     OneClickPromptRequest,
     OneClickPromptResponse,
     TenderDocument,
+)
+from app.services.bid_preferences import (
+    apply_generation_preferences,
+    normalize_generation_preferences,
+    ordered_section_titles,
 )
 from app.services.docx_builder import build_bid_docx
 from app.services.interactive_fill import (
@@ -149,18 +156,17 @@ def _download_filename(
 
 def _build_interactive_preview(
     tender_doc: TenderDocument,
-        package_id: str,
+    raw_text: str,
+    package_id: str,
     api_key: str | None = None,
 ) -> dict:
     package = _resolve_package(tender_doc, package_id)
     llm = get_chat_model(api_key=api_key)
-    # selected_packages = [package.package_id]
-    # scoped_tender = _single_package_tender(tender_doc, package.package_id)
-    gen_result = generate_bid_sections(
-
-    )
-    sections, _ = _materialize_sections(
-
+    _, gen_result, sections = _generate_one_click_sections(
+        tender_doc,
+        raw_text,
+        selected_package=package.package_id,
+        llm=llm,
     )
     interactive_sections = render_editable_draft_sections(sections, add_draft_watermark=False)
     interactive_plan = plan_interactive_fill(interactive_sections, llm=llm)
@@ -188,6 +194,7 @@ def _ensure_session_preview(session_data: dict, package_id: str, api_key: str | 
         tender_doc = _load_tender(session_data)
         package_cache[package_id] = _build_interactive_preview(
             tender_doc=tender_doc,
+            raw_text=str(session_data.get("raw_text") or ""),
             package_id=package_id,
             api_key=api_key,
         )
@@ -199,11 +206,50 @@ def _normalize_request_api_key(api_key: str | None) -> str | None:
     return value or None
 
 
+def _parse_generation_preferences_json(raw: str | None) -> BidGenerationPreferences | None:
+    """解析表单传入的生成偏好 JSON。"""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+        return normalize_generation_preferences(payload)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"生成偏好参数不合法：{exc}")
+
+
+def _generate_one_click_sections(
+    tender_doc: TenderDocument,
+    raw_text: str,
+    *,
+    selected_package: str | None,
+    llm,
+) -> tuple[TenderDocument, object, list[BidDocumentSection]]:
+    """生成单包 one-click 章节并完成基础实装。"""
+    scoped_tender = _single_package_tender(tender_doc, selected_package)
+    gen_result = generate_bid_sections(
+        tender_doc,
+        raw_text,
+        llm,
+        products={},
+        selected_packages=_selected_packages_arg(selected_package),
+    )
+    sections, _ = _materialize_sections(
+        sections=gen_result.sections,
+        tender=scoped_tender,
+        company=_PLACEHOLDER_COMPANY,
+        products={},
+        product_profiles=gen_result.product_profiles,
+    )
+    return scoped_tender, gen_result, sections
+
+
 def _run_one_click_generation(
     job_id: str,
     save_path: Path,
     selected_package: str | None = None,
     api_key: str | None = None,
+    generation_preferences: BidGenerationPreferences | None = None,
 ) -> None:
     """执行后台一键成稿流程并写出结果文件。"""
     try:
@@ -225,8 +271,8 @@ def _run_one_click_generation(
             message="正在抽取招标需求…",
             progress=32,
         )
+        raw_text = parser.extract_text(save_path)
         tender_doc = parser.parse_tender_document(save_path)
-        scoped_tender = _single_package_tender(tender_doc, selected_package)
 
         _set_one_click_job_status(
             job_id,
@@ -243,11 +289,16 @@ def _run_one_click_generation(
             message="正在生成投标文件章节…",
             progress=72,
         )
-        gen_result = generate_bid_sections(
-
+        scoped_tender, gen_result, sections = _generate_one_click_sections(
+            tender_doc,
+            raw_text,
+            selected_package=selected_package,
+            llm=llm,
         )
-        sections, _ = _materialize_sections(
-
+        sections = apply_generation_preferences(
+            sections,
+            generation_preferences,
+            llm=llm,
         )
         _set_one_click_job_status(
             job_id,
@@ -264,6 +315,7 @@ def _run_one_click_generation(
             _PLACEHOLDER_COMPANY,
             output_file,
             draft_level=gen_result.draft_level,
+            generation_preferences=generation_preferences,
         )
         if not output_file.exists() or output_file.stat().st_size == 0:
             raise RuntimeError("Word 文件生成失败，输出文件为空")
@@ -388,6 +440,8 @@ async def get_one_click_prompts(
         logger.error("交互式待填写项生成失败：%s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"生成待填写项失败：{exc}")
     prompts = serialize_interactive_prompts(preview_data["prompts"])
+    preferences = normalize_generation_preferences(req.generation_preferences)
+    preview_sections = [BidDocumentSection(**item) for item in preview_data.get("sections", [])]
     package = scoped_tender.packages[0] if scoped_tender.packages else None
 
     return OneClickPromptResponse(
@@ -399,7 +453,7 @@ async def get_one_click_prompts(
         prompt_count=len(prompts),
         manual_placeholder_count=int(preview_data.get("manual_placeholder_count") or 0),
         manual_placeholder_examples=list(preview_data.get("manual_placeholder_examples", [])),
-        section_titles=list(preview_data.get("section_titles", [])),
+        section_titles=ordered_section_titles(preview_sections, preferences),
         prompts=prompts,
         draft_level=str(preview_data.get("draft_level") or ""),
         validation_gate=preview_data.get("validation_gate"),
@@ -439,6 +493,18 @@ async def generate_interactive_one_click(
 
     answers = {str(key).strip(): str(value).strip() for key, value in req.answers.items() if str(value).strip()}
     final_sections = apply_interactive_answers(sections, preview_data.get("prompts", []), answers)
+    preferences = normalize_generation_preferences(req.generation_preferences)
+    llm = None
+    if preferences is not None and (
+        preferences.language_style.value != "standard"
+        or preferences.custom_language_instruction
+    ):
+        llm = get_chat_model(api_key=_normalize_request_api_key(x_llm_api_key))
+    final_sections = apply_generation_preferences(
+        final_sections,
+        preferences,
+        llm=llm,
+    )
     company = build_company_from_answers(answers)
     draft_level = preview_data.get("draft_level") or DraftLevel.internal_draft.value
     output_id = str(uuid.uuid4())
@@ -451,6 +517,7 @@ async def generate_interactive_one_click(
             company,
             output_file,
             draft_level=draft_level,
+            generation_preferences=preferences,
         )
     except Exception as exc:
         logger.error("交互式单包文档生成失败：%s", exc, exc_info=True)
@@ -471,6 +538,7 @@ async def generate_interactive_one_click(
 async def one_click_generate(
     file: UploadFile = File(...),
     selected_package: str | None = Form(default=None),
+    generation_preferences_json: str | None = Form(default=None),
     x_llm_api_key: Annotated[str | None, Header()] = None,
 ):
     """
@@ -497,6 +565,7 @@ async def one_click_generate(
         logger.error("文件保存失败: %s", exc)
         raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
 
+    generation_preferences = _parse_generation_preferences_json(generation_preferences_json)
     try:
         llm = get_chat_model(api_key=_normalize_request_api_key(x_llm_api_key))
         parser = create_tender_parser(llm)
@@ -506,13 +575,16 @@ async def one_click_generate(
 
         logger.info("开始解析招标结构")
         tender_doc = parser.parse_tender_document(save_path)
-        scoped_tender = _single_package_tender(tender_doc, selected_package)
-
-        gen_result = generate_bid_sections(
-
+        scoped_tender, gen_result, sections = _generate_one_click_sections(
+            tender_doc,
+            raw_text,
+            selected_package=selected_package,
+            llm=llm,
         )
-        sections, _ = _materialize_sections(
-
+        sections = apply_generation_preferences(
+            sections,
+            generation_preferences,
+            llm=llm,
         )
 
         doc_label = _one_click_doc_label(gen_result.draft_level)
@@ -523,6 +595,7 @@ async def one_click_generate(
             _PLACEHOLDER_COMPANY,
             output_file,
             draft_level=gen_result.draft_level,
+            generation_preferences=generation_preferences,
         )
 
         logger.info("投标文件生成成功：%s", output_file)
@@ -547,6 +620,7 @@ async def start_one_click_generate(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     selected_package: str | None = Form(default=None),
+    generation_preferences_json: str | None = Form(default=None),
     x_llm_api_key: Annotated[str | None, Header()] = None,
 ):
     """异步启动一键成稿任务，可选只生成指定包。"""
@@ -574,12 +648,14 @@ async def start_one_click_generate(
         message="文件上传成功，正在准备开始…",
         progress=3,
     )
+    generation_preferences = _parse_generation_preferences_json(generation_preferences_json)
     background_tasks.add_task(
         _run_one_click_generation,
         job_id,
         save_path,
         selected_package,
         _normalize_request_api_key(x_llm_api_key),
+        generation_preferences,
     )
     return OneClickJobStartResponse(**one_click_job_storage[job_id])
 

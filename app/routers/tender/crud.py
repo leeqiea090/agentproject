@@ -19,6 +19,7 @@ from app.schemas import (
     TenderParseResponse,
     TenderUploadResponse,
 )
+from app.services.bid_preferences import apply_generation_preferences, normalize_generation_preferences
 from app.services.docx_builder import build_bid_docx
 from app.services.llm import get_chat_model
 from app.services.one_click_generator import generate_bid_sections
@@ -403,6 +404,12 @@ async def generate_bid_document(request: BidGenerateRequest):
             }
 
         stored_sections = _sections_for_storage_or_response(materialized_sections, sections, outbound_view)
+        generation_preferences = normalize_generation_preferences(request.generation_preferences)
+        stored_sections = apply_generation_preferences(
+            stored_sections,
+            generation_preferences,
+            llm=llm,
+        )
         docx_draft_level = (
             DraftLevel.external_ready
             if bool(outbound_view.get("generated"))
@@ -419,10 +426,12 @@ async def generate_bid_document(request: BidGenerateRequest):
                 company_profile,
                 output_file,
                 draft_level=docx_draft_level,
+                generation_preferences=generation_preferences,
             )
             file_path = str(output_file)
             download_url = f"/api/tender/bid/download/{bid_id}?format=docx"
         outbound_view["file_path"] = file_path
+        outbound_view["section_titles"] = [section.section_title for section in stored_sections]
 
         # 保存结果
         bid_storage[bid_id] = {
@@ -437,6 +446,13 @@ async def generate_bid_document(request: BidGenerateRequest):
             "materialize_report": materialize_report,
             "consistency_report": consistency_report,
             "outbound_report": outbound_view,
+            "draft_level": draft_level_str,
+            "document_mode": doc_mode_str,
+            "generation_preferences": (
+                generation_preferences.model_dump()
+                if generation_preferences is not None
+                else None
+            ),
         }
 
         logger.info(
@@ -538,6 +554,7 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
             sections = [BidDocumentSection(**s) for s in bid_info["sections"]]
             tender_doc = TenderDocument(**tender_info["parsed_data"])
             output_file = BID_OUTPUT_DIR / f"{bid_id}.docx"
+            generation_preferences = normalize_generation_preferences(bid_info.get("generation_preferences"))
 
             try:
                 build_bid_docx(
@@ -550,6 +567,7 @@ async def download_bid_document(bid_id: str, format: str = "docx"):
                         if str((bid_info.get("outbound_report") or {}).get("status", "")).strip() == "阻断外发"
                         else bid_info.get("draft_level") or DraftLevel.external_ready.value
                     ),
+                    generation_preferences=generation_preferences,
                 )
             except Exception as e:
                 logger.error(f"Word文件生成失败: {str(e)}")

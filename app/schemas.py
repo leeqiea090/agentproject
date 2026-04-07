@@ -566,6 +566,66 @@ class ProductSpecification(BaseModel):
 
 # --- 投标文件生成相关 ---
 
+
+class BidLanguageStyle(str, Enum):
+    """投标文件语言风格。"""
+    standard = "standard"
+    formal_precise = "formal_precise"
+    concise_professional = "concise_professional"
+    assertive_commitment = "assertive_commitment"
+    explanatory = "explanatory"
+
+
+class BidDocumentStyleProfile(BaseModel):
+    """Word 输出样式偏好。"""
+    toc_title: str = Field(default="目录", description="自动目录标题")
+    body_font_family: str = Field(default="仿宋", description="正文字体")
+    heading_font_family: str = Field(default="黑体", description="章节标题字体")
+    cover_font_family: str = Field(default="黑体", description="封面主标题字体")
+    cover_meta_font_family: str = Field(default="仿宋", description="封面信息字体")
+    body_font_size_pt: float = Field(default=11, ge=9, le=16, description="正文字号")
+    heading1_font_size_pt: float = Field(default=16, ge=12, le=24, description="一级标题字号")
+    heading2_font_size_pt: float = Field(default=14, ge=10, le=22, description="二级标题字号")
+    heading3_font_size_pt: float = Field(default=12, ge=9, le=20, description="三级标题字号")
+    table_font_size_pt: float = Field(default=10, ge=8, le=14, description="表格字号")
+    cover_title_font_size_pt: float = Field(default=24, ge=16, le=36, description="封面主标题字号")
+    cover_project_font_size_pt: float = Field(default=18, ge=12, le=30, description="封面项目名称字号")
+    cover_meta_font_size_pt: float = Field(default=14, ge=10, le=24, description="封面附属信息字号")
+
+    @model_validator(mode="after")
+    def _normalize_text_fields(self) -> BidDocumentStyleProfile:
+        self.toc_title = (self.toc_title or "").strip() or "目录"
+        self.body_font_family = (self.body_font_family or "").strip() or "仿宋"
+        self.heading_font_family = (self.heading_font_family or "").strip() or "黑体"
+        self.cover_font_family = (self.cover_font_family or "").strip() or "黑体"
+        self.cover_meta_font_family = (self.cover_meta_font_family or "").strip() or self.body_font_family
+        return self
+
+
+class BidGenerationPreferences(BaseModel):
+    """投标文件生成偏好。"""
+    section_order: list[str] = Field(default_factory=list, description="章节/目录偏好顺序")
+    language_style: BidLanguageStyle = Field(default=BidLanguageStyle.standard, description="生成语言风格")
+    custom_language_instruction: str = Field(default="", description="补充语言风格说明")
+    document_style: BidDocumentStyleProfile = Field(
+        default_factory=BidDocumentStyleProfile,
+        description="Word 输出样式偏好",
+    )
+
+    @model_validator(mode="after")
+    def _normalize_preferences(self) -> BidGenerationPreferences:
+        seen: set[str] = set()
+        normalized_order: list[str] = []
+        for title in self.section_order:
+            text = str(title or "").strip()
+            if not text or text in seen:
+                continue
+            normalized_order.append(text)
+            seen.add(text)
+        self.section_order = normalized_order
+        self.custom_language_instruction = (self.custom_language_instruction or "").strip()
+        return self
+
 class BidGenerateRequest(BaseModel):
     """投标文件生成请求"""
     tender_id: str = Field(description="招标文件ID")
@@ -576,6 +636,7 @@ class BidGenerateRequest(BaseModel):
     add_performance_cases: bool = Field(default=False, description="是否添加业绩案例")
     custom_service_plan: str = Field(default="", description="自定义售后服务方案")
     document_mode: DocumentMode | None = Field(default=None, description="文档模式：single_package / multi_package_draft，不传则自动判定")
+    generation_preferences: BidGenerationPreferences | None = Field(default=None, description="输出样式与章节顺序偏好")
 
 
 class BidDocumentSection(BaseModel):
@@ -714,6 +775,7 @@ class TenderWorkflowRequest(BaseModel):
     product_ids: dict[str, str] = Field(default_factory=dict, description="包号→产品ID映射")
     continue_on_material_gaps: bool = Field(default=False, description="资料不全时是否继续生成标书")
     generate_docx: bool = Field(default=True, description="是否生成docx文件")
+    generation_preferences: BidGenerationPreferences | None = Field(default=None, description="输出样式与章节顺序偏好")
 
 
 class TenderWorkflowResponse(BaseModel):
@@ -750,6 +812,7 @@ class OneClickPromptRequest(BaseModel):
     """请求单包待填写项。"""
     session_id: str = Field(description="交互式会话ID")
     package_id: str = Field(description="目标包号")
+    generation_preferences: BidGenerationPreferences | None = Field(default=None, description="输出样式与章节顺序偏好")
 
 
 class OneClickInteractivePrompt(BaseModel):
@@ -787,6 +850,7 @@ class OneClickInteractiveGenerateRequest(BaseModel):
     session_id: str = Field(description="交互式会话ID")
     package_id: str = Field(description="目标包号")
     answers: dict[str, str] = Field(default_factory=dict, description="字段键或标签到答案的映射")
+    generation_preferences: BidGenerationPreferences | None = Field(default=None, description="输出样式与章节顺序偏好")
 
 
 class OneClickJobStartResponse(BaseModel):

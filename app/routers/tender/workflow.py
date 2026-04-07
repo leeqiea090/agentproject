@@ -17,6 +17,7 @@ from app.schemas import (
     TenderWorkflowStep3Result,
     TenderWorkflowStep4Result,
 )
+from app.services.bid_preferences import apply_generation_preferences, normalize_generation_preferences
 from app.services.docx_builder import build_bid_docx
 from app.services.llm import get_chat_model
 from app.services.retriever import ingest_text_to_kb
@@ -508,6 +509,12 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             hard_validation_result=hard_validation_dict,
             evidence_result=evidence_dict,
         )
+        generation_preferences = normalize_generation_preferences(req.generation_preferences)
+        sanitized_sections = apply_generation_preferences(
+            sanitized_sections,
+            generation_preferences,
+            llm=workflow_agent.llm,
+        )
 
         bid_id = generation_dict["bid_id"]
         company_for_docx = company or _PLACEHOLDER_COMPANY
@@ -519,6 +526,7 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
                 company_for_docx,
                 output_file,
                 draft_level=DraftLevel.external_ready,
+                generation_preferences=generation_preferences,
             )
             file_path = str(output_file)
         else:
@@ -527,6 +535,12 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             generation_dict["download_url"] = ""
 
         stored_sections = _sections_for_storage_or_response(sections, sanitized_sections, sanitize_stage_data)
+        stored_sections = apply_generation_preferences(
+            stored_sections,
+            generation_preferences,
+            llm=None,
+        )
+        generation_dict["section_titles"] = [section.section_title for section in stored_sections]
         outbound_view = _build_external_delivery_view(
             sanitized_sections,
             sanitize_stage_data,
@@ -546,6 +560,12 @@ async def run_tender_workflow(req: TenderWorkflowRequest):
             "materialize_report": materialize_dict,
             "consistency_report": hard_validation_dict,
             "outbound_report": outbound_view,
+            "draft_level": DraftLevel.external_ready.value,
+            "generation_preferences": (
+                generation_preferences.model_dump()
+                if generation_preferences is not None
+                else None
+            ),
         }
 
         sanitize_stage_data = {

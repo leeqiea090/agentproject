@@ -512,6 +512,19 @@
       line-height: 1.8;
     }
 
+    .preference-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .preference-box {
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.72);
+      padding: 14px;
+    }
+
     .hidden { display: none !important; }
 
     @media (max-width: 1024px) {
@@ -533,6 +546,10 @@
       }
 
       .summary-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .preference-grid {
         grid-template-columns: 1fr;
       }
 
@@ -612,8 +629,71 @@
           </div>
         </section>
 
+        <section class="panel hidden" id="preferencePanel">
+          <h2 class="panel-title">3. 生成偏好</h2>
+          <p class="panel-subtitle">可自定义目录顺序、字体与语言风格。目录顺序按“每行一个章节”填写，未列出的章节会自动排在后面。</p>
+
+          <div class="stack">
+            <div class="preference-grid">
+              <div class="preference-box">
+                <label class="field-label" for="languageStyleSelect">语言风格</label>
+                <select class="select" id="languageStyleSelect">
+                  <option value="standard">标准模板风格</option>
+                  <option value="formal_precise">正式严谨</option>
+                  <option value="concise_professional">简洁专业</option>
+                  <option value="assertive_commitment">承诺强化</option>
+                  <option value="explanatory">说明性更强</option>
+                </select>
+              </div>
+              <div class="preference-box">
+                <label class="field-label" for="bodyFontSelect">正文字体</label>
+                <select class="select" id="bodyFontSelect">
+                  <option value="仿宋">仿宋</option>
+                  <option value="宋体">宋体</option>
+                  <option value="楷体">楷体</option>
+                  <option value="微软雅黑">微软雅黑</option>
+                  <option value="黑体">黑体</option>
+                  <option value="思源宋体">思源宋体</option>
+                </select>
+              </div>
+              <div class="preference-box">
+                <label class="field-label" for="headingFontSelect">标题字体</label>
+                <select class="select" id="headingFontSelect">
+                  <option value="黑体">黑体</option>
+                  <option value="宋体">宋体</option>
+                  <option value="楷体">楷体</option>
+                  <option value="微软雅黑">微软雅黑</option>
+                  <option value="仿宋">仿宋</option>
+                  <option value="思源黑体">思源黑体</option>
+                </select>
+              </div>
+              <div class="preference-box">
+                <label class="field-label" for="coverFontSelect">封面主标题字体</label>
+                <select class="select" id="coverFontSelect">
+                  <option value="黑体">黑体</option>
+                  <option value="宋体">宋体</option>
+                  <option value="楷体">楷体</option>
+                  <option value="微软雅黑">微软雅黑</option>
+                  <option value="仿宋">仿宋</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label class="field-label" for="customLanguageInput">补充语言要求</label>
+              <textarea class="textarea" id="customLanguageInput" placeholder="例如：强调合规措辞，避免口语化；服务章节尽量写得更稳重。"></textarea>
+            </div>
+
+            <div>
+              <label class="field-label" for="sectionOrderInput">目录顺序</label>
+              <textarea class="textarea" id="sectionOrderInput" placeholder="每行一个章节标题，示例：&#10;响应文件封面格式&#10;报价书&#10;技术服务和售后服务的内容及措施"></textarea>
+              <div class="field-help">建议先点一次“生成待填写项”，系统会把当前识别到的章节自动填进这里，你可以再手动调整顺序。</div>
+            </div>
+          </div>
+        </section>
+
         <section class="panel hidden" id="actionPanel">
-          <h2 class="panel-title">3. 生成文档</h2>
+          <h2 class="panel-title">4. 生成文档</h2>
           <p class="panel-subtitle">系统会把你填写的答案回填到当前包的所有对应位置。</p>
 
           <div class="button-row">
@@ -679,6 +759,7 @@
       selectedPackage: '',
       promptsByPackage: {},
       answersByPackage: {},
+      preferencesByPackage: {},
       busy: false,
     };
 
@@ -693,6 +774,13 @@
     const packagePanel = document.getElementById('packagePanel');
     const packageSelect = document.getElementById('packageSelect');
     const loadPromptsBtn = document.getElementById('loadPromptsBtn');
+    const preferencePanel = document.getElementById('preferencePanel');
+    const languageStyleSelect = document.getElementById('languageStyleSelect');
+    const bodyFontSelect = document.getElementById('bodyFontSelect');
+    const headingFontSelect = document.getElementById('headingFontSelect');
+    const coverFontSelect = document.getElementById('coverFontSelect');
+    const customLanguageInput = document.getElementById('customLanguageInput');
+    const sectionOrderInput = document.getElementById('sectionOrderInput');
     const actionPanel = document.getElementById('actionPanel');
     const generateBtn = document.getElementById('generateBtn');
     const statusBox = document.getElementById('statusBox');
@@ -743,8 +831,21 @@
     loadPromptsBtn.addEventListener('click', () => loadPrompts(packageSelect.value));
     packageSelect.addEventListener('change', () => {
       state.selectedPackage = packageSelect.value;
+      syncPreferenceFormFromState();
       updateCurrentPackage();
       renderPromptState();
+    });
+    [languageStyleSelect, bodyFontSelect, headingFontSelect, coverFontSelect, customLanguageInput].forEach(input => {
+      input.addEventListener('input', () => {
+        persistCurrentPreferenceState();
+      });
+      input.addEventListener('change', () => {
+        persistCurrentPreferenceState();
+      });
+    });
+    sectionOrderInput.addEventListener('input', () => {
+      persistCurrentPreferenceState({ markSectionOrderCustomized: true });
+      renderSections(getCurrentPromptPayload());
     });
     generateBtn.addEventListener('click', generateDocument);
 
@@ -818,6 +919,137 @@
       return headers;
     }
 
+    function preferenceKey(packageId = state.selectedPackage) {
+      return packageId || '__default__';
+    }
+
+    function defaultPreferenceState() {
+      return {
+        language_style: 'standard',
+        custom_language_instruction: '',
+        section_order: [],
+        section_order_customized: false,
+        document_style: {
+          body_font_family: '仿宋',
+          heading_font_family: '黑体',
+          cover_font_family: '黑体',
+          cover_meta_font_family: '仿宋',
+        },
+      };
+    }
+
+    function ensurePreferenceState(packageId = state.selectedPackage) {
+      const key = preferenceKey(packageId);
+      if (!state.preferencesByPackage[key]) {
+        state.preferencesByPackage[key] = defaultPreferenceState();
+      }
+      return state.preferencesByPackage[key];
+    }
+
+    function parseSectionOrderText(value) {
+      const lines = String(value || '')
+        .split('\n')
+        .map(item => item.trim())
+        .filter(Boolean);
+      return Array.from(new Set(lines));
+    }
+
+    function syncPreferenceFormFromState() {
+      const preference = ensurePreferenceState();
+      languageStyleSelect.value = preference.language_style || 'standard';
+      customLanguageInput.value = preference.custom_language_instruction || '';
+      bodyFontSelect.value = (preference.document_style && preference.document_style.body_font_family) || '仿宋';
+      headingFontSelect.value = (preference.document_style && preference.document_style.heading_font_family) || '黑体';
+      coverFontSelect.value = (preference.document_style && preference.document_style.cover_font_family) || '黑体';
+      sectionOrderInput.value = (preference.section_order || []).join('\n');
+    }
+
+    function persistCurrentPreferenceState({ markSectionOrderCustomized = false } = {}) {
+      const preference = ensurePreferenceState();
+      preference.language_style = languageStyleSelect.value || 'standard';
+      preference.custom_language_instruction = customLanguageInput.value.trim();
+      preference.section_order = parseSectionOrderText(sectionOrderInput.value);
+      if (markSectionOrderCustomized) {
+        preference.section_order_customized = true;
+      }
+      preference.document_style = {
+        body_font_family: bodyFontSelect.value || '仿宋',
+        heading_font_family: headingFontSelect.value || '黑体',
+        cover_font_family: coverFontSelect.value || '黑体',
+        cover_meta_font_family: bodyFontSelect.value || '仿宋',
+      };
+    }
+
+    function seedSectionOrderFromTitles(packageId, titles) {
+      const preference = ensurePreferenceState(packageId);
+      if (preference.section_order_customized && (preference.section_order || []).length) {
+        return;
+      }
+      preference.section_order = Array.from(new Set((titles || []).filter(Boolean)));
+      if (packageId === state.selectedPackage) {
+        syncPreferenceFormFromState();
+      }
+    }
+
+    function buildGenerationPreferencesPayload() {
+      persistCurrentPreferenceState();
+      const preference = ensurePreferenceState();
+      return {
+        section_order: preference.section_order || [],
+        language_style: preference.language_style || 'standard',
+        custom_language_instruction: preference.custom_language_instruction || '',
+        document_style: {
+          body_font_family: (preference.document_style && preference.document_style.body_font_family) || '仿宋',
+          heading_font_family: (preference.document_style && preference.document_style.heading_font_family) || '黑体',
+          cover_font_family: (preference.document_style && preference.document_style.cover_font_family) || '黑体',
+          cover_meta_font_family: (preference.document_style && preference.document_style.cover_meta_font_family) || '仿宋',
+        },
+      };
+    }
+
+    function normalizeTitle(text) {
+      return String(text || '')
+        .replace(/[\s#`*:：、（）()\-—_]/g, '')
+        .replace(/^第?[一二三四五六七八九十百0-9]+章/, '')
+        .replace(/^附?[一二三四五六七八九十百0-9]+/, '');
+    }
+
+    function getOrderedTitles(titles) {
+      const preference = ensurePreferenceState();
+      const preferred = preference.section_order || [];
+      if (!preferred.length) {
+        return titles || [];
+      }
+      const decorated = (titles || []).map((title, index) => {
+        const normalized = normalizeTitle(title);
+        let priority = 2;
+        let matchIndex = preferred.length;
+        preferred.forEach((wanted, wantedIndex) => {
+          const wantedNormalized = normalizeTitle(wanted);
+          if (!wantedNormalized || priority < 2 && matchIndex <= wantedIndex) {
+            return;
+          }
+          if (normalized === wantedNormalized) {
+            priority = 0;
+            matchIndex = wantedIndex;
+            return;
+          }
+          if (normalized.startsWith(wantedNormalized) || wantedNormalized.startsWith(normalized)) {
+            priority = Math.min(priority, 1);
+            matchIndex = Math.min(matchIndex, wantedIndex);
+          }
+        });
+        return { title, index, priority, matchIndex };
+      });
+
+      decorated.sort((a, b) => {
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        if (a.matchIndex !== b.matchIndex) return a.matchIndex - b.matchIndex;
+        return a.index - b.index;
+      });
+      return decorated.map(item => item.title);
+    }
+
     function setBusy(value) {
       state.busy = value;
       const missingApiKey = !getApiKey();
@@ -825,6 +1057,12 @@
       loadPromptsBtn.disabled = value || missingApiKey || !state.sessionId;
       generateBtn.disabled = value || missingApiKey || !state.sessionId || !state.selectedPackage;
       packageSelect.disabled = value || !state.packages.length;
+      languageStyleSelect.disabled = value;
+      bodyFontSelect.disabled = value;
+      headingFontSelect.disabled = value;
+      coverFontSelect.disabled = value;
+      customLanguageInput.disabled = value;
+      sectionOrderInput.disabled = value;
     }
 
     function setStatus(type, message) {
@@ -860,7 +1098,9 @@
       state.selectedPackage = '';
       state.promptsByPackage = {};
       state.answersByPackage = {};
+      state.preferencesByPackage = {};
       packagePanel.classList.add('hidden');
+      preferencePanel.classList.add('hidden');
       actionPanel.classList.add('hidden');
       sectionPanel.classList.add('hidden');
       sectionList.innerHTML = '';
@@ -874,6 +1114,7 @@
       emptyState.classList.remove('hidden');
       emptyState.innerHTML = '当前还没有待填写项。<br />先完成“上传并解析”与“选择目标包”。';
       promptCountText.textContent = '先上传文件并选择包件。';
+      syncPreferenceFormFromState();
       setStatus('', '');
       setBusy(false);
     }
@@ -901,7 +1142,7 @@
     }
 
     function renderSections(promptPayload) {
-      const titles = promptPayload.section_titles || [];
+      const titles = getOrderedTitles(promptPayload.section_titles || []);
       if (!titles.length) {
         sectionPanel.classList.add('hidden');
         sectionList.innerHTML = '';
@@ -930,6 +1171,7 @@
       }
 
       packagePanel.classList.remove('hidden');
+      preferencePanel.classList.toggle('hidden', !state.sessionId);
       actionPanel.classList.toggle('hidden', !state.sessionId);
 
       renderSections(promptPayload);
@@ -1053,8 +1295,10 @@
         state.packages = payload.packages || [];
         state.selectedPackage = payload.default_package_id || (state.packages[0] && state.packages[0].package_id) || '';
         populatePackageSelect();
+        syncPreferenceFormFromState();
         updateSummary();
         packagePanel.classList.remove('hidden');
+        preferencePanel.classList.remove('hidden');
         actionPanel.classList.remove('hidden');
         setStatus('ok', `已解析完成，共识别 ${state.packages.length} 个包件。请先选择一个包，再生成待填写项。`);
         renderPromptState();
@@ -1096,6 +1340,7 @@
           body: JSON.stringify({
             session_id: state.sessionId,
             package_id: packageId,
+            generation_preferences: buildGenerationPreferencesPayload(),
           }),
         });
         const payload = await readJsonOrThrow(response);
@@ -1103,6 +1348,7 @@
         if (!state.answersByPackage[packageId]) {
           state.answersByPackage[packageId] = {};
         }
+        seedSectionOrderFromTitles(packageId, payload.section_titles || []);
         renderSections(payload);
         renderPromptState();
         setStatus('ok', `包${packageId} 的待填写项已准备好，共 ${payload.prompt_count || 0} 项。`);
@@ -1138,6 +1384,7 @@
             session_id: state.sessionId,
             package_id: state.selectedPackage,
             answers: getCurrentAnswers(),
+            generation_preferences: buildGenerationPreferencesPayload(),
           }),
         });
 
