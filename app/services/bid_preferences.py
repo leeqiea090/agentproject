@@ -455,9 +455,26 @@ def apply_generation_preferences(
     llm: Any | None = None,
     apply_language_style: bool = True,
 ) -> list[BidDocumentSection]:
-    """对章节应用排序和语言风格偏好。"""
+    """对章节应用结构、排序和语言风格偏好。"""
     prefs = normalize_generation_preferences(preferences)
     ordered_sections = apply_section_structure(sections, prefs)
+    return apply_language_preferences(
+        ordered_sections,
+        prefs,
+        llm=llm,
+        apply_language_style=apply_language_style,
+    )
+
+
+def apply_language_preferences(
+    sections: list[BidDocumentSection],
+    preferences: BidGenerationPreferences | dict[str, Any] | None,
+    *,
+    llm: Any | None = None,
+    apply_language_style: bool = True,
+) -> list[BidDocumentSection]:
+    """仅对已有章节应用语言风格偏好，不再重复重组结构。"""
+    prefs = normalize_generation_preferences(preferences)
     if (
         prefs is None
         or not apply_language_style
@@ -466,10 +483,10 @@ def apply_generation_preferences(
         or llm is None
         or not hasattr(llm, "invoke")
     ):
-        return ordered_sections
+        return list(sections)
 
     styled_sections: list[BidDocumentSection] = []
-    for section in ordered_sections:
+    for section in sections:
         if not _should_polish_section(section):
             styled_sections.append(section)
             continue

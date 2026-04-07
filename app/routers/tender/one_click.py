@@ -25,6 +25,7 @@ from app.schemas import (
 )
 from app.services.bid_preferences import (
     apply_generation_preferences,
+    apply_language_preferences,
     normalize_generation_preferences,
     ordered_section_titles,
 )
@@ -159,6 +160,7 @@ def _build_interactive_preview(
     raw_text: str,
     package_id: str,
     api_key: str | None = None,
+    generation_preferences: BidGenerationPreferences | None = None,
 ) -> dict:
     package = _resolve_package(tender_doc, package_id)
     llm = get_chat_model(api_key=api_key)
@@ -169,6 +171,11 @@ def _build_interactive_preview(
         llm=llm,
     )
     interactive_sections = render_editable_draft_sections(sections, add_draft_watermark=False)
+    interactive_sections = apply_generation_preferences(
+        interactive_sections,
+        generation_preferences,
+        apply_language_style=False,
+    )
     interactive_plan = plan_interactive_fill(interactive_sections, llm=llm)
     interactive_sections = interactive_plan["sections"]
     manual_placeholders = interactive_plan["manual_items"]
@@ -188,17 +195,32 @@ def _build_interactive_preview(
     }
 
 
-def _ensure_session_preview(session_data: dict, package_id: str, api_key: str | None = None) -> dict:
+def _preferences_cache_key(generation_preferences: BidGenerationPreferences | None) -> str:
+    """为交互式预览生成与目录结构相关的缓存键。"""
+    prefs = normalize_generation_preferences(generation_preferences)
+    if prefs is None:
+        return "__default__"
+    return json.dumps(prefs.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _ensure_session_preview(
+    session_data: dict,
+    package_id: str,
+    api_key: str | None = None,
+    generation_preferences: BidGenerationPreferences | None = None,
+) -> dict:
     package_cache = session_data.setdefault("package_cache", {})
-    if package_id not in package_cache:
+    cache_key = f"{package_id}::{_preferences_cache_key(generation_preferences)}"
+    if cache_key not in package_cache:
         tender_doc = _load_tender(session_data)
-        package_cache[package_id] = _build_interactive_preview(
+        package_cache[cache_key] = _build_interactive_preview(
             tender_doc=tender_doc,
             raw_text=str(session_data.get("raw_text") or ""),
             package_id=package_id,
             api_key=api_key,
+            generation_preferences=generation_preferences,
         )
-    return package_cache[package_id]
+    return package_cache[cache_key]
 
 
 def _normalize_request_api_key(api_key: str | None) -> str | None:
@@ -425,11 +447,13 @@ async def get_one_click_prompts(
 
     tender_doc = _load_tender(session_data)
     scoped_tender = _single_package_tender(tender_doc, req.package_id)
+    preferences = normalize_generation_preferences(req.generation_preferences)
     try:
         preview_data = _ensure_session_preview(
             session_data,
             req.package_id,
             api_key=_normalize_request_api_key(x_llm_api_key),
+            generation_preferences=preferences,
         )
     except BidSectionsValidationError as exc:
         logger.warning("交互式待填写项生成被硬校验阻断：%s", exc)
@@ -440,7 +464,6 @@ async def get_one_click_prompts(
         logger.error("交互式待填写项生成失败：%s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"生成待填写项失败：{exc}")
     prompts = serialize_interactive_prompts(preview_data["prompts"])
-    preferences = normalize_generation_preferences(req.generation_preferences)
     preview_sections = [BidDocumentSection(**item) for item in preview_data.get("sections", [])]
     package = scoped_tender.packages[0] if scoped_tender.packages else None
 
@@ -473,11 +496,13 @@ async def generate_interactive_one_click(
 
     tender_doc = _load_tender(session_data)
     scoped_tender = _single_package_tender(tender_doc, req.package_id)
+    preferences = normalize_generation_preferences(req.generation_preferences)
     try:
         preview_data = _ensure_session_preview(
             session_data,
             req.package_id,
             api_key=_normalize_request_api_key(x_llm_api_key),
+            generation_preferences=preferences,
         )
     except BidSectionsValidationError as exc:
         logger.warning("交互式单包文档生成被硬校验阻断：%s", exc)
@@ -493,14 +518,13 @@ async def generate_interactive_one_click(
 
     answers = {str(key).strip(): str(value).strip() for key, value in req.answers.items() if str(value).strip()}
     final_sections = apply_interactive_answers(sections, preview_data.get("prompts", []), answers)
-    preferences = normalize_generation_preferences(req.generation_preferences)
     llm = None
     if preferences is not None and (
         preferences.language_style.value != "standard"
         or preferences.custom_language_instruction
     ):
         llm = get_chat_model(api_key=_normalize_request_api_key(x_llm_api_key))
-    final_sections = apply_generation_preferences(
+    final_sections = apply_language_preferences(
         final_sections,
         preferences,
         llm=llm,
