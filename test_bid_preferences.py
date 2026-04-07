@@ -115,8 +115,8 @@ def test_apply_section_structure_strips_duplicate_child_heading():
     structured = apply_section_structure(sections, prefs)
 
     assert structured[0].content.count("资格承诺函") == 1
-    assert "## 资格承诺函" in structured[0].content
-    assert "# 资格承诺函" not in structured[0].content
+    assert structured[0].content.count("## 资格承诺函") == 1
+    assert "\n# 资格承诺函\n" not in f"\n{structured[0].content}\n"
 
 
 def test_apply_section_structure_supports_custom_sections_and_hidden_sections():
