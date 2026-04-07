@@ -21,7 +21,11 @@ from app.schemas import (
     DraftLevel,
     TenderDocument,
 )
-from app.services.bid_preferences import normalize_generation_preferences, reorder_bid_sections
+from app.services.bid_preferences import (
+    format_main_section_title,
+    normalize_generation_preferences,
+    reorder_bid_sections,
+)
 from app.services.one_click_generator.format_driven_sections.common import (
     _build_affiliated_units_statement_template,
     _build_disabled_unit_declaration_template,
@@ -1562,14 +1566,15 @@ def build_bid_docx(
         _add_toc(doc, render_sections, style_profile=style_profile)
         doc.add_page_break()
 
-    for idx, section in enumerate(render_sections):
+    for idx, section in enumerate(render_sections, start=1):
         clean_content = _ensure_toc_subheadings(
             section.section_title,
             _clean_markdown_content(section.section_title, section.content),
         )
+        display_title = format_main_section_title(section.section_title, idx, preferences)
 
         # 章节标题
-        _add_heading(doc, section.section_title, 1, style_profile=style_profile)
+        _add_heading(doc, display_title, 1, style_profile=style_profile)
         # doc.add_paragraph()
 
         # 章节内容（Markdown → Word）
@@ -1600,7 +1605,7 @@ def build_bid_docx(
         if not rendered_body:
             _append_heading_body_fallback(doc, section.section_title, style_profile=style_profile)
 
-        if idx < len(render_sections) - 1:
+        if idx < len(render_sections):
             doc.add_page_break()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -640,10 +640,21 @@
 
         <section class="panel hidden" id="preferencePanel">
           <h2 class="panel-title">3. 生成偏好</h2>
-          <p class="panel-subtitle">可自定义目录顺序、字体与语言风格。目录顺序按“每行一个章节”填写，未列出的章节会自动排在后面。</p>
+          <p class="panel-subtitle">可自定义目录顺序、章节编号风格、字体与语言风格。目录顺序建议只写章节名称，不写编号；未列出的章节会自动排在后面。</p>
 
           <div class="stack">
             <div class="preference-grid">
+              <div class="preference-box">
+                <label class="field-label" for="sectionNumberingStyleSelect">章节编号风格</label>
+                <select class="select" id="sectionNumberingStyleSelect">
+                  <option value="cn_comma">一、报价书</option>
+                  <option value="cn_paren">（一）报价书</option>
+                  <option value="chapter_cn">第一章 报价书</option>
+                  <option value="chapter_cn_colon">第一章：报价书</option>
+                  <option value="chapter_arabic">第1章 报价书</option>
+                  <option value="arabic_dot">1. 报价书</option>
+                </select>
+              </div>
               <div class="preference-box">
                 <label class="field-label" for="languageStyleSelect">语言风格</label>
                 <select class="select" id="languageStyleSelect">
@@ -695,8 +706,8 @@
 
             <div>
               <label class="field-label" for="sectionOrderInput">目录顺序</label>
-              <textarea class="textarea" id="sectionOrderInput" placeholder="每行一个章节标题，示例：&#10;响应文件封面格式&#10;报价书&#10;技术服务和售后服务的内容及措施"></textarea>
-              <div class="field-help">建议先点一次“生成待填写项”，系统会把当前识别到的章节自动填进这里，你可以再手动调整顺序。</div>
+              <textarea class="textarea" id="sectionOrderInput" placeholder="每行一个章节名称，示例：&#10;响应文件封面格式&#10;报价书&#10;技术服务和售后服务的内容及措施"></textarea>
+              <div class="field-help">建议先点一次“生成待填写项”，系统会把当前识别到的章节名称自动填进这里。这里不必手工写“一、/第一章”之类编号，编号风格由上面的选项统一控制。</div>
             </div>
           </div>
         </section>
@@ -784,6 +795,7 @@
     const packageSelect = document.getElementById('packageSelect');
     const loadPromptsBtn = document.getElementById('loadPromptsBtn');
     const preferencePanel = document.getElementById('preferencePanel');
+    const sectionNumberingStyleSelect = document.getElementById('sectionNumberingStyleSelect');
     const languageStyleSelect = document.getElementById('languageStyleSelect');
     const bodyFontSelect = document.getElementById('bodyFontSelect');
     const headingFontSelect = document.getElementById('headingFontSelect');
@@ -844,12 +856,14 @@
       updateCurrentPackage();
       renderPromptState();
     });
-    [languageStyleSelect, bodyFontSelect, headingFontSelect, coverFontSelect, customLanguageInput].forEach(input => {
+    [sectionNumberingStyleSelect, languageStyleSelect, bodyFontSelect, headingFontSelect, coverFontSelect, customLanguageInput].forEach(input => {
       input.addEventListener('input', () => {
         persistCurrentPreferenceState();
+        renderSections(getCurrentPromptPayload());
       });
       input.addEventListener('change', () => {
         persistCurrentPreferenceState();
+        renderSections(getCurrentPromptPayload());
       });
     });
     sectionOrderInput.addEventListener('input', () => {
@@ -934,6 +948,7 @@
 
     function defaultPreferenceState() {
       return {
+        section_numbering_style: 'cn_comma',
         language_style: 'standard',
         custom_language_instruction: '',
         section_order: [],
@@ -947,6 +962,36 @@
       };
     }
 
+    function stripTitlePrefix(text) {
+      return String(text || '')
+        .trim()
+        .replace(/^第[一二三四五六七八九十百零\d]+章\s*[:：.．、\-]?\s*/, '')
+        .replace(/^[（(][一二三四五六七八九十百零\d]+[）)]\s*/, '')
+        .replace(/^[一二三四五六七八九十百零]+[、.．]\s*/, '')
+        .replace(/^\d+[、.．)]\s*/, '')
+        .replace(/^附[一二三四五六七八九十百零\d]+[、.．)]?\s*/, '')
+        .trim();
+    }
+
+    function isNonNumberedTitle(text) {
+      const title = stripTitlePrefix(text);
+      return title.includes('封面') || title.includes('目录');
+    }
+
+    function toCnNumber(value) {
+      const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+      const num = Number(value || 0);
+      if (!Number.isFinite(num) || num <= 0) return String(value || '');
+      if (num < 10) return digits[num];
+      if (num < 20) return `十${num % 10 ? digits[num % 10] : ''}`;
+      if (num < 100) {
+        const tens = Math.floor(num / 10);
+        const ones = num % 10;
+        return `${digits[tens]}十${ones ? digits[ones] : ''}`;
+      }
+      return String(num);
+    }
+
     function ensurePreferenceState(packageId = state.selectedPackage) {
       const key = preferenceKey(packageId);
       if (!state.preferencesByPackage[key]) {
@@ -958,13 +1003,14 @@
     function parseSectionOrderText(value) {
       const lines = String(value || '')
         .split('\n')
-        .map(item => item.trim())
+        .map(item => stripTitlePrefix(item))
         .filter(Boolean);
       return Array.from(new Set(lines));
     }
 
     function syncPreferenceFormFromState() {
       const preference = ensurePreferenceState();
+      sectionNumberingStyleSelect.value = preference.section_numbering_style || 'cn_comma';
       languageStyleSelect.value = preference.language_style || 'standard';
       customLanguageInput.value = preference.custom_language_instruction || '';
       bodyFontSelect.value = (preference.document_style && preference.document_style.body_font_family) || '仿宋';
@@ -975,6 +1021,7 @@
 
     function persistCurrentPreferenceState({ markSectionOrderCustomized = false } = {}) {
       const preference = ensurePreferenceState();
+      preference.section_numbering_style = sectionNumberingStyleSelect.value || 'cn_comma';
       preference.language_style = languageStyleSelect.value || 'standard';
       preference.custom_language_instruction = customLanguageInput.value.trim();
       preference.section_order = parseSectionOrderText(sectionOrderInput.value);
@@ -994,7 +1041,7 @@
       if (preference.section_order_customized && (preference.section_order || []).length) {
         return;
       }
-      preference.section_order = Array.from(new Set((titles || []).filter(Boolean)));
+      preference.section_order = Array.from(new Set((titles || []).map(item => stripTitlePrefix(item)).filter(Boolean)));
       if (packageId === state.selectedPackage) {
         syncPreferenceFormFromState();
       }
@@ -1005,6 +1052,7 @@
       const preference = ensurePreferenceState();
       return {
         section_order: preference.section_order || [],
+        section_numbering_style: preference.section_numbering_style || 'cn_comma',
         language_style: preference.language_style || 'standard',
         custom_language_instruction: preference.custom_language_instruction || '',
         document_style: {
@@ -1017,10 +1065,8 @@
     }
 
     function normalizeTitle(text) {
-      return String(text || '')
-        .replace(/[\s#`*:：、（）()\-—_]/g, '')
-        .replace(/^第?[一二三四五六七八九十百0-9]+章/, '')
-        .replace(/^附?[一二三四五六七八九十百0-9]+/, '');
+      return stripTitlePrefix(text)
+        .replace(/[\s#`*:：、（）()\-—_]/g, '');
     }
 
     function getOrderedTitles(titles) {
@@ -1059,6 +1105,34 @@
       return decorated.map(item => item.title);
     }
 
+    function formatDisplayTitle(title, index, style) {
+      const base = stripTitlePrefix(title);
+      if (!base) return '';
+      if (isNonNumberedTitle(base)) {
+        return base;
+      }
+      const cnIndex = toCnNumber(index);
+      if (style === 'cn_paren') return `（${cnIndex}）${base}`;
+      if (style === 'chapter_cn') return `第${cnIndex}章 ${base}`;
+      if (style === 'chapter_cn_colon') return `第${cnIndex}章：${base}`;
+      if (style === 'chapter_arabic') return `第${index}章 ${base}`;
+      if (style === 'arabic_dot') return `${index}. ${base}`;
+      return `${cnIndex}、${base}`;
+    }
+
+    function getDisplayTitles(titles) {
+      const preference = ensurePreferenceState();
+      const style = preference.section_numbering_style || 'cn_comma';
+      let counter = 0;
+      return (titles || []).map(title => {
+        if (isNonNumberedTitle(title)) {
+          return stripTitlePrefix(title);
+        }
+        counter += 1;
+        return formatDisplayTitle(title, counter, style);
+      });
+    }
+
     function setBusy(value) {
       state.busy = value;
       const missingApiKey = !getApiKey();
@@ -1066,6 +1140,7 @@
       loadPromptsBtn.disabled = value || missingApiKey || !state.sessionId;
       generateBtn.disabled = value || missingApiKey || !state.sessionId || !state.selectedPackage;
       packageSelect.disabled = value || !state.packages.length;
+      sectionNumberingStyleSelect.disabled = value;
       languageStyleSelect.disabled = value;
       bodyFontSelect.disabled = value;
       headingFontSelect.disabled = value;
@@ -1151,7 +1226,7 @@
     }
 
     function renderSections(promptPayload) {
-      const titles = getOrderedTitles(promptPayload.section_titles || []);
+      const titles = getDisplayTitles(getOrderedTitles(promptPayload.section_titles || []));
       if (!titles.length) {
         sectionPanel.classList.add('hidden');
         sectionList.innerHTML = '';

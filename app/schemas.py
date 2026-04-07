@@ -576,6 +576,16 @@ class BidLanguageStyle(str, Enum):
     explanatory = "explanatory"
 
 
+class BidSectionNumberingStyle(str, Enum):
+    """章节编号风格。"""
+    cn_comma = "cn_comma"
+    cn_paren = "cn_paren"
+    chapter_cn = "chapter_cn"
+    chapter_cn_colon = "chapter_cn_colon"
+    chapter_arabic = "chapter_arabic"
+    arabic_dot = "arabic_dot"
+
+
 class BidDocumentStyleProfile(BaseModel):
     """Word 输出样式偏好。"""
     toc_title: str = Field(default="目录", description="自动目录标题")
@@ -605,6 +615,10 @@ class BidDocumentStyleProfile(BaseModel):
 class BidGenerationPreferences(BaseModel):
     """投标文件生成偏好。"""
     section_order: list[str] = Field(default_factory=list, description="章节/目录偏好顺序")
+    section_numbering_style: BidSectionNumberingStyle = Field(
+        default=BidSectionNumberingStyle.cn_comma,
+        description="章节编号样式",
+    )
     language_style: BidLanguageStyle = Field(default=BidLanguageStyle.standard, description="生成语言风格")
     custom_language_instruction: str = Field(default="", description="补充语言风格说明")
     document_style: BidDocumentStyleProfile = Field(

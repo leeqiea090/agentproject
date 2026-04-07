@@ -12,6 +12,7 @@ from app.schemas import (
     BidDocumentSection,
     BidGenerationPreferences,
     BidLanguageStyle,
+    BidSectionNumberingStyle,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,12 +36,99 @@ _STYLE_GUIDANCE = {
     BidLanguageStyle.explanatory: "适度增加说明性表达，让实施安排、服务措施和响应逻辑更易读。",
 }
 
+_NON_NUMBERED_TITLE_KEYWORDS = ("封面", "目录")
+_CN_DIGITS = "零一二三四五六七八九"
+
+
+def _int_to_cn(num: int) -> str:
+    """将整数转换成常用中文数字。"""
+    if num <= 0:
+        return str(num)
+    if num < 10:
+        return _CN_DIGITS[num]
+    if num < 20:
+        return "十" + (_CN_DIGITS[num % 10] if num % 10 else "")
+    if num < 100:
+        tens, ones = divmod(num, 10)
+        return _CN_DIGITS[tens] + "十" + (_CN_DIGITS[ones] if ones else "")
+    return str(num)
+
+
+def strip_section_number_prefix(text: str) -> str:
+    """去掉章节编号前缀，仅保留标题文本。"""
+    normalized = str(text or "").strip()
+    patterns = (
+        r"^第[一二三四五六七八九十百零\d]+章\s*[:：.．、\-]?\s*",
+        r"^[（(][一二三四五六七八九十百零\d]+[）)]\s*",
+        r"^[一二三四五六七八九十百零]+[、.．]\s*",
+        r"^\d+[、.．)]\s*",
+        r"^附[一二三四五六七八九十百零\d]+[、.．)]?\s*",
+    )
+    for pattern in patterns:
+        updated = re.sub(pattern, "", normalized)
+        if updated != normalized:
+            normalized = updated.strip()
+            break
+    return normalized or str(text or "").strip()
+
 
 def _normalize_title(text: str) -> str:
-    normalized = re.sub(r"[\s#`*:：、（）()\-—_]", "", text or "")
-    normalized = re.sub(r"^第?[一二三四五六七八九十百0123456789]+章", "", normalized)
-    normalized = re.sub(r"^附?[一二三四五六七八九十百0123456789]+", "", normalized)
-    return normalized
+    normalized = strip_section_number_prefix(text)
+    return re.sub(r"[\s#`*:：、（）()\-—_]", "", normalized or "")
+
+
+def is_non_numbered_section_title(title: str) -> bool:
+    """判断标题是否不参与正文章节编号。"""
+    stripped = str(title or "").strip()
+    return any(token in stripped for token in _NON_NUMBERED_TITLE_KEYWORDS)
+
+
+def format_main_section_title(
+    title: str,
+    index: int,
+    preferences: BidGenerationPreferences | dict[str, Any] | None,
+) -> str:
+    """按偏好格式化一级章节标题。"""
+    prefs = normalize_generation_preferences(preferences)
+    base_title = strip_section_number_prefix(title)
+    if is_non_numbered_section_title(base_title):
+        return base_title
+    if prefs is None:
+        prefs = BidGenerationPreferences()
+
+    style = prefs.section_numbering_style
+    cn_index = _int_to_cn(index)
+    if style == BidSectionNumberingStyle.cn_paren:
+        return f"（{cn_index}）{base_title}"
+    if style == BidSectionNumberingStyle.chapter_cn:
+        return f"第{cn_index}章 {base_title}"
+    if style == BidSectionNumberingStyle.chapter_cn_colon:
+        return f"第{cn_index}章：{base_title}"
+    if style == BidSectionNumberingStyle.chapter_arabic:
+        return f"第{index}章 {base_title}"
+    if style == BidSectionNumberingStyle.arabic_dot:
+        return f"{index}. {base_title}"
+    return f"{cn_index}、{base_title}"
+
+
+def format_section_titles(
+    titles: list[str],
+    preferences: BidGenerationPreferences | dict[str, Any] | None,
+) -> list[str]:
+    """按偏好格式化章节标题列表。"""
+    prefs = normalize_generation_preferences(preferences)
+    if prefs is None:
+        prefs = BidGenerationPreferences()
+
+    formatted: list[str] = []
+    counter = 0
+    for title in titles:
+        if is_non_numbered_section_title(title):
+            formatted.append(strip_section_number_prefix(title))
+            continue
+        counter += 1
+        formatted.append(format_main_section_title(title, counter, prefs))
+    return formatted
 
 
 def normalize_generation_preferences(
@@ -90,9 +178,14 @@ def reorder_bid_sections(
 def ordered_section_titles(
     sections: list[BidDocumentSection],
     preferences: BidGenerationPreferences | dict[str, Any] | None,
+    *,
+    formatted: bool = False,
 ) -> list[str]:
     """返回按偏好排序后的章节标题。"""
-    return [section.section_title for section in reorder_bid_sections(sections, preferences)]
+    titles = [section.section_title for section in reorder_bid_sections(sections, preferences)]
+    if not formatted:
+        return titles
+    return format_section_titles(titles, preferences)
 
 
 def _llm_message_to_text(message: Any) -> str:
