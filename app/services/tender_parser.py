@@ -2,6 +2,7 @@
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any, Sequence
 
 import pypdf
@@ -46,6 +47,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 _FALLBACK_PARSE_CHAR_LIMITS = (24000, 16000, 10000)
+_PARSE_NETWORK_RETRY_ATTEMPTS = 3
+_PARSE_NETWORK_RETRY_DELAY_SECONDS = 1.0
 DEFAULT_CS_SECTION_TITLES = [
     "一、响应文件封面格式",
     "二、首轮报价表",
@@ -719,6 +722,25 @@ class TenderParser:
         self._check_finish_reason(response, context="parse_tender")
         response_text = self._response_text(response.content)
         return self._extract_json_dict(response_text)
+
+    @staticmethod
+    def _is_retryable_parse_error(exc: Exception) -> bool:
+        """判断当前解析异常是否适合重试。"""
+        text = str(exc or "").strip().lower()
+        if not text:
+            return False
+        retryable_markers = (
+            "connection error",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "rate limit",
+            "502",
+            "503",
+            "504",
+            "apiconnectionerror",
+        )
+        return any(marker in text for marker in retryable_markers)
 
     def _ensure_parse_tokens(self, llm: ChatOpenAI) -> Runnable[
                                                            PromptValue | str | Sequence[Any], AIMessage] | ChatOpenAI:
@@ -1515,22 +1537,26 @@ class TenderParser:
 
         for limit in candidate_lengths:
             candidate_text = tender_text[:limit]
-            try:
-                parsed_data = self._parse_with_llm(candidate_text)
-                tender_doc = TenderDocument(**parsed_data)
-                tender_doc = self._normalize_procurement_type(tender_doc, candidate_text)
+            for attempt in range(1, _PARSE_NETWORK_RETRY_ATTEMPTS + 1):
+                try:
+                    parsed_data = self._parse_with_llm(candidate_text)
+                    tender_doc = TenderDocument(**parsed_data)
+                    tender_doc = self._normalize_procurement_type(tender_doc, candidate_text)
 
-                if self._needs_technical_enrichment(tender_doc):
-                    tender_doc = self._enrich_package_requirements(tender_doc, candidate_text)
+                    if self._needs_technical_enrichment(tender_doc):
+                        tender_doc = self._enrich_package_requirements(tender_doc, candidate_text)
 
-                tender_doc = self._enrich_package_quantities(tender_doc, candidate_text)
-                tender_doc = self._enrich_format_templates(tender_doc, candidate_text)
-                tender_doc = self._enrich_docx_table_layouts(tender_doc, file_path)
-                logger.info(f"成功解析招标文件: {tender_doc.project_name}（输入长度={limit}）")
-                return tender_doc
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                logger.warning("解析尝试失败（输入长度=%d）：%s", limit, exc)
+                    tender_doc = self._enrich_package_quantities(tender_doc, candidate_text)
+                    tender_doc = self._enrich_format_templates(tender_doc, candidate_text)
+                    tender_doc = self._enrich_docx_table_layouts(tender_doc, file_path)
+                    logger.info(f"成功解析招标文件: {tender_doc.project_name}（输入长度={limit}）")
+                    return tender_doc
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    logger.warning("解析尝试失败（输入长度=%d，第%d次）：%s", limit, attempt, exc)
+                    if not self._is_retryable_parse_error(exc) or attempt >= _PARSE_NETWORK_RETRY_ATTEMPTS:
+                        break
+                    time.sleep(_PARSE_NETWORK_RETRY_DELAY_SECONDS * attempt)
 
         settings = get_settings()
         logger.error(

@@ -33,6 +33,5 @@ for _module in (
 
 del _module
 
-
-def generate_bid_sections():
-    return None
+# 显式绑定真实实现，避免被占位函数或同名符号意外覆盖。
+generate_bid_sections = _pipeline.generate_bid_sections

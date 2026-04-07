@@ -35,10 +35,5 @@ for _module in (
 
 del _module
 
-
-def _materialize_sections():
-    return None
-
-
-def _match_requirements_to_product_facts():
-    return None
+_materialize_sections = _materialization._materialize_sections
+_match_requirements_to_product_facts = _product_facts._match_requirements_to_product_facts
