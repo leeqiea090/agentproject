@@ -424,6 +424,7 @@
     .structure-list {
       display: grid;
       gap: 10px;
+      min-height: 360px;
     }
 
     .section-item {
@@ -672,6 +673,11 @@
       .structure-children {
         margin-left: 14px;
         padding-left: 10px;
+      }
+
+      .section-list,
+      .structure-list {
+        min-height: 280px;
       }
     }
   </style>
@@ -1297,10 +1303,25 @@
       });
     }
 
+    function getVisibleTopLevelDisplayIndex(items, currentIndex) {
+      let counter = 0;
+      for (let index = 0; index <= currentIndex; index += 1) {
+        const item = (items || [])[index];
+        if (!item) continue;
+        const raw = stripTitlePrefix(item.custom_title || item.section_title || '');
+        if (!raw || item.include === false || isNonNumberedTitle(raw)) {
+          continue;
+        }
+        counter += 1;
+      }
+      return counter;
+    }
+
     function getStructureDisplayTitle(item, index, style, parentId = '') {
       const raw = stripTitlePrefix(item.custom_title || item.section_title || '');
       if (!raw) return '';
-      if (parentId) return raw;
+      if (parentId || item.include === false || isNonNumberedTitle(raw)) return raw;
+      if (!index) return raw;
       return formatDisplayTitle(raw, index, style);
     }
 
@@ -1486,7 +1507,8 @@
       const style = ensurePreferenceState().section_numbering_style || 'cn_comma';
       return (items || []).map((item, index) => {
         const titleValue = item.custom_title || item.section_title || '';
-        const displayTitle = getStructureDisplayTitle(item, index + 1, style, parentId);
+        const displayIndex = parentId ? 0 : getVisibleTopLevelDisplayIndex(items, index);
+        const displayTitle = getStructureDisplayTitle(item, displayIndex, style, parentId);
         return `
           <div class="structure-node">
             <div class="structure-card${item.include === false ? ' structure-disabled' : ''}" draggable="true" data-id="${escapeAttribute(item.id)}" data-parent-id="${escapeAttribute(parentId)}">
@@ -1511,6 +1533,7 @@
                 <button class="btn-mini" type="button" data-action="indent" data-id="${escapeAttribute(item.id)}">嵌入上一章</button>
                 <button class="btn-mini" type="button" data-action="outdent" data-id="${escapeAttribute(item.id)}">提升一级</button>
                 <button class="btn-mini" type="button" data-action="add-child" data-id="${escapeAttribute(item.id)}">新增子章节</button>
+                <button class="btn-mini" type="button" data-action="add-sibling" data-id="${escapeAttribute(item.id)}">新增同级章节</button>
                 ${item.is_custom ? `<button class="btn-mini" type="button" data-action="remove" data-id="${escapeAttribute(item.id)}">删除</button>` : ''}
               </div>
             </div>
@@ -1557,6 +1580,16 @@
         if (!ctx) return;
         ctx.item.children = normalizeStructureList(ctx.item.children || []);
         ctx.item.children.push(createStructureItem('新子章节', { is_custom: true, custom_title: '新子章节' }));
+        markStructureChanged();
+      } else if (action === 'add-sibling' && itemId) {
+        const ctx = findStructureNode(getCurrentSectionStructure(), itemId);
+        if (!ctx) return;
+        const defaultTitle = ctx.parentItem ? '新子章节' : '新章节';
+        ctx.parentArray.splice(
+          ctx.index + 1,
+          0,
+          createStructureItem(defaultTitle, { is_custom: true, custom_title: defaultTitle }),
+        );
         markStructureChanged();
       } else if (action === 'remove' && itemId) {
         const ctx = findStructureNode(getCurrentSectionStructure(), itemId);

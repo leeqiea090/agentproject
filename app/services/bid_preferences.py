@@ -196,12 +196,38 @@ def _merge_child_sections_into_content(
 
     md_heading = "#" * max(2, min(heading_level, 6))
     for child in child_sections:
-        child_content = str(child.content or "").strip()
+        child_content = _strip_duplicate_leading_heading(child.section_title, str(child.content or ""))
         if child_content:
             blocks.append(f"{md_heading} {child.section_title}\n\n{child_content}")
         else:
             blocks.append(f"{md_heading} {child.section_title}")
     return "\n\n".join(block for block in blocks if block).strip()
+
+
+def _strip_duplicate_leading_heading(section_title: str, content: str) -> str:
+    """去掉嵌套章节正文开头与标题重复的 Markdown 标题。"""
+    lines = str(content or "").splitlines()
+    normalized_title = _normalize_title(section_title)
+    cleaned: list[str] = []
+    heading_checked = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not heading_checked and not stripped:
+            continue
+        if not heading_checked:
+            heading_checked = True
+            if stripped.startswith("#"):
+                raw_heading = re.sub(r"^#+\s*", "", stripped)
+                normalized_heading = _normalize_title(raw_heading)
+                if (
+                    normalized_heading == normalized_title
+                    or (normalized_title and normalized_heading.startswith(normalized_title))
+                    or (normalized_title and normalized_title.startswith(normalized_heading))
+                ):
+                    continue
+        cleaned.append(line.rstrip())
+    return "\n".join(cleaned).strip()
 
 
 def apply_section_structure(
