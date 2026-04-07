@@ -1,5 +1,6 @@
 from app.schemas import BidDocumentSection, BidGenerationPreferences
 from app.services.bid_preferences import (
+    apply_section_structure,
     format_section_titles,
     normalize_generation_preferences,
     reorder_bid_sections,
@@ -68,3 +69,28 @@ def test_format_section_titles_supports_chapter_style():
         "第一章 报价书",
         "第二章 技术服务和售后服务的内容及措施",
     ]
+
+
+def test_apply_section_structure_merges_child_content_into_parent():
+    sections = [
+        BidDocumentSection(section_title="报价书", content="报价书正文"),
+        BidDocumentSection(section_title="资格承诺函", content="资格承诺正文"),
+    ]
+    prefs = BidGenerationPreferences(
+        section_structure=[
+            {
+                "section_title": "报价书",
+                "children": [
+                    {"section_title": "资格承诺函"},
+                ],
+            },
+        ]
+    )
+
+    structured = apply_section_structure(sections, prefs)
+
+    assert len(structured) == 1
+    assert structured[0].section_title == "报价书"
+    assert "报价书正文" in structured[0].content
+    assert "## 资格承诺函" in structured[0].content
+    assert "资格承诺正文" in structured[0].content
