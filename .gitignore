@@ -13,6 +13,5 @@ textfile/
 build/
 dist/
 docs/
-.venv312-check
-.venv312-test/
-.venv312-test-check/
+.venv312-check/
+
