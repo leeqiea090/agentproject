@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import socket
 import sys
@@ -16,6 +17,7 @@ from dotenv import load_dotenv
 
 APP_NAME = "BidAgent"
 WINDOW_TITLE = "招投标 AI Agent"
+_INVALID_FILENAME_CHARS = '\\/:*?"<>|\r\n'
 
 
 def _bundle_root() -> Path:
@@ -29,6 +31,60 @@ def _bundle_root() -> Path:
 
 def _support_root() -> Path:
     return Path.home() / "Library" / "Application Support" / APP_NAME
+
+
+def _default_download_dir() -> Path:
+    candidate = Path.home() / "Downloads"
+    return candidate if candidate.exists() else Path.home()
+
+
+def _safe_save_filename(filename: str) -> str:
+    sanitized = str(filename or "").strip()
+    for char in _INVALID_FILENAME_CHARS:
+        sanitized = sanitized.replace(char, "_")
+    sanitized = sanitized.strip(" .")
+    return sanitized or "投标文件.docx"
+
+
+def _decode_base64_payload(payload: str) -> bytes:
+    raw = str(payload or "").strip()
+    if raw.startswith("data:") and "," in raw:
+        raw = raw.split(",", 1)[1]
+    return base64.b64decode(raw, validate=True)
+
+
+class DesktopBridge:
+    def __init__(self) -> None:
+        self.window = None
+
+    def bind_window(self, window) -> None:
+        self.window = window
+
+    def save_file(self, filename: str, base64_payload: str) -> dict[str, str | bool]:
+        if self.window is None:
+            return {"saved": False, "cancelled": False, "path": "", "error": "桌面窗口尚未初始化"}
+
+        try:
+            data = _decode_base64_payload(base64_payload)
+        except Exception as exc:  # noqa: BLE001
+            return {"saved": False, "cancelled": False, "path": "", "error": f"文件内容解析失败：{exc}"}
+
+        selection = self.window.create_file_dialog(
+            webview.SAVE_DIALOG,
+            directory=str(_default_download_dir()),
+            save_filename=_safe_save_filename(filename),
+        )
+        if not selection:
+            return {"saved": False, "cancelled": True, "path": "", "error": ""}
+
+        target = Path(selection[0] if isinstance(selection, (list, tuple)) else selection)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except Exception as exc:  # noqa: BLE001
+            return {"saved": False, "cancelled": False, "path": str(target), "error": f"保存文件失败：{exc}"}
+
+        return {"saved": True, "cancelled": False, "path": str(target), "error": ""}
 
 
 def _load_runtime_env() -> None:
@@ -146,6 +202,7 @@ def _startup_error_html(base_url: str) -> str:
 def main() -> None:
     _load_runtime_env()
     host, port = _configure_runtime()
+    bridge = DesktopBridge()
 
     from app.main import app
 
@@ -163,13 +220,15 @@ def main() -> None:
 
     base_url = f"http://{host}:{port}/"
     if _wait_for_server(base_url):
-        webview.create_window(
+        window = webview.create_window(
             WINDOW_TITLE,
             url=base_url,
             width=1440,
             height=920,
             min_size=(1100, 760),
+            js_api=bridge,
         )
+        bridge.bind_window(window)
     else:
         webview.create_window(
             f"{WINDOW_TITLE} - 启动失败",

@@ -1918,15 +1918,15 @@
           throw new Error('生成的文件为空');
         }
 
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = inferFilename(response, `包${state.selectedPackage}_投标文件.docx`);
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 1200);
-        setStatus('ok', `包${state.selectedPackage} 文档已生成并开始下载。`);
+        const filename = inferFilename(response, `包${state.selectedPackage}_投标文件.docx`);
+        const saveResult = await saveGeneratedDocument(blob, filename);
+        if (saveResult.cancelled) {
+          setStatus('info', '已取消保存文档。');
+        } else if (saveResult.desktop) {
+          setStatus('ok', `包${state.selectedPackage} 文档已保存至：${escapeHtml(saveResult.path || filename)}`);
+        } else {
+          setStatus('ok', `包${state.selectedPackage} 文档已生成并开始下载。`);
+        }
       } catch (error) {
         setStatus('error', `生成失败：${getErrorMessage(error)}`);
       } finally {
@@ -1964,6 +1964,58 @@
       const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
       if (plainMatch && plainMatch[1]) return plainMatch[1];
       return fallback;
+    }
+
+    function hasDesktopSaveBridge() {
+      return Boolean(
+        window.pywebview &&
+        window.pywebview.api &&
+        typeof window.pywebview.api.save_file === 'function'
+      );
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || '');
+          const commaIndex = result.indexOf(',');
+          resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function saveGeneratedDocument(blob, filename) {
+      if (hasDesktopSaveBridge()) {
+        const payload = await blobToBase64(blob);
+        const result = await window.pywebview.api.save_file(filename, payload);
+        if (!result || typeof result !== 'object') {
+          throw new Error('桌面保存失败：未收到有效响应');
+        }
+        if (result.cancelled) {
+          return { cancelled: true, desktop: true, path: '' };
+        }
+        if (!result.saved) {
+          throw new Error(result.error || '桌面保存失败');
+        }
+        return {
+          cancelled: false,
+          desktop: true,
+          path: String(result.path || ''),
+        };
+      }
+
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1200);
+      return { cancelled: false, desktop: false, path: '' };
     }
 
     function getErrorMessage(error) {
