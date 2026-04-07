@@ -272,11 +272,6 @@
       resize: vertical;
     }
 
-    #sectionOrderInput {
-      min-height: 360px;
-      line-height: 1.7;
-    }
-
     .input:focus,
     .select:focus,
     .textarea:focus {
@@ -425,9 +420,10 @@
       font-weight: 700;
     }
 
-    .section-list {
+    .section-list,
+    .structure-list {
       display: grid;
-      gap: 8px;
+      gap: 10px;
     }
 
     .section-item {
@@ -437,6 +433,113 @@
       border: 1px solid var(--line);
       font-size: 13px;
       color: var(--ink);
+    }
+
+    .structure-toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .structure-node {
+      display: grid;
+      gap: 10px;
+    }
+
+    .structure-card {
+      border-radius: 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.88);
+      display: grid;
+      gap: 10px;
+    }
+
+    .structure-card.dragging {
+      opacity: .45;
+    }
+
+    .structure-card.drag-over {
+      border-color: rgba(15, 91, 120, 0.55);
+      box-shadow: 0 0 0 4px rgba(15, 91, 120, 0.08);
+    }
+
+    .structure-main {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .drag-handle {
+      border: 1px solid var(--line);
+      background: rgba(15, 91, 120, 0.06);
+      color: var(--brand);
+      border-radius: 12px;
+      width: 40px;
+      min-width: 40px;
+      height: 44px;
+      cursor: grab;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .structure-title {
+      flex: 1;
+    }
+
+    .structure-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .structure-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .btn-mini {
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.96);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .structure-children {
+      margin-left: 28px;
+      padding-left: 14px;
+      border-left: 2px dashed rgba(15, 91, 120, 0.14);
+      display: grid;
+      gap: 10px;
+    }
+
+    .structure-dropzone {
+      border: 1px dashed rgba(15, 91, 120, 0.22);
+      border-radius: 14px;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      background: rgba(248, 250, 252, 0.78);
+    }
+
+    .structure-dropzone.drag-over {
+      border-color: rgba(15, 91, 120, 0.55);
+      background: rgba(216, 239, 247, 0.42);
+      color: var(--brand);
+    }
+
+    .structure-disabled {
+      opacity: .55;
     }
 
     .prompt-toolbar {
@@ -558,12 +661,17 @@
         grid-template-columns: 1fr;
       }
 
-      #sectionOrderInput {
-        min-height: 280px;
-      }
-
       .prompt-head {
         flex-direction: column;
+      }
+
+      .structure-main {
+        align-items: stretch;
+      }
+
+      .structure-children {
+        margin-left: 14px;
+        padding-left: 10px;
       }
     }
   </style>
@@ -704,10 +812,8 @@
               <textarea class="textarea" id="customLanguageInput" placeholder="例如：强调合规措辞，避免口语化；服务章节尽量写得更稳重。"></textarea>
             </div>
 
-            <div>
-              <label class="field-label" for="sectionOrderInput">目录顺序</label>
-              <textarea class="textarea" id="sectionOrderInput" placeholder="每行一个章节名称，示例：&#10;响应文件封面格式&#10;报价书&#10;技术服务和售后服务的内容及措施"></textarea>
-              <div class="field-help">建议先点一次“生成待填写项”，系统会把当前识别到的章节名称自动填进这里。这里不必手工写“一、/第一章”之类编号，编号风格由上面的选项统一控制。</div>
+            <div class="field-help">
+              章节数量、顺序和嵌套结构请在下面的“本次将生成的章节结构”区域里直接拖动调整。
             </div>
           </div>
         </section>
@@ -745,8 +851,12 @@
         </section>
 
         <section class="panel hidden" id="sectionPanel">
-          <h2 class="panel-title">本次将生成的章节</h2>
-          <p class="panel-subtitle">先看清楚当前包包含哪些章节，再决定补哪些字段。</p>
+          <h2 class="panel-title">本次将生成的章节结构</h2>
+          <p class="panel-subtitle">可拖动调整顺序；拖到某个章节下方区域即可嵌入为子章节。也可新增自定义章节、隐藏章节或把子章节提升出来。</p>
+          <div class="structure-toolbar">
+            <button class="btn btn-secondary" id="resetStructureBtn" type="button">恢复默认结构</button>
+            <button class="btn btn-secondary" id="addCustomSectionBtn" type="button">新增自定义章节</button>
+          </div>
           <div class="section-list" id="sectionList"></div>
         </section>
 
@@ -780,6 +890,8 @@
       promptsByPackage: {},
       answersByPackage: {},
       preferencesByPackage: {},
+      draggingSectionId: '',
+      draggingParentId: '',
       busy: false,
     };
 
@@ -801,7 +913,6 @@
     const headingFontSelect = document.getElementById('headingFontSelect');
     const coverFontSelect = document.getElementById('coverFontSelect');
     const customLanguageInput = document.getElementById('customLanguageInput');
-    const sectionOrderInput = document.getElementById('sectionOrderInput');
     const actionPanel = document.getElementById('actionPanel');
     const generateBtn = document.getElementById('generateBtn');
     const statusBox = document.getElementById('statusBox');
@@ -811,6 +922,8 @@
     const packageChips = document.getElementById('packageChips');
     const sectionPanel = document.getElementById('sectionPanel');
     const sectionList = document.getElementById('sectionList');
+    const resetStructureBtn = document.getElementById('resetStructureBtn');
+    const addCustomSectionBtn = document.getElementById('addCustomSectionBtn');
     const promptCountText = document.getElementById('promptCountText');
     const promptList = document.getElementById('promptList');
     const emptyState = document.getElementById('emptyState');
@@ -866,10 +979,16 @@
         renderSections(getCurrentPromptPayload());
       });
     });
-    sectionOrderInput.addEventListener('input', () => {
-      persistCurrentPreferenceState({ markSectionOrderCustomized: true });
-      renderSections(getCurrentPromptPayload());
-    });
+    resetStructureBtn.addEventListener('click', resetCurrentSectionStructure);
+    addCustomSectionBtn.addEventListener('click', addCustomTopLevelSection);
+    sectionList.addEventListener('click', handleSectionStructureClick);
+    sectionList.addEventListener('input', handleSectionStructureInput);
+    sectionList.addEventListener('change', handleSectionStructureInput);
+    sectionList.addEventListener('dragstart', handleSectionDragStart);
+    sectionList.addEventListener('dragend', handleSectionDragEnd);
+    sectionList.addEventListener('dragover', handleSectionDragOver);
+    sectionList.addEventListener('dragleave', handleSectionDragLeave);
+    sectionList.addEventListener('drop', handleSectionDrop);
     generateBtn.addEventListener('click', generateDocument);
 
     function getApiKey() {

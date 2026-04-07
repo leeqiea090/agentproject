@@ -131,6 +131,135 @@ def format_section_titles(
     return formatted
 
 
+def normalize_section_structure(
+    section_structure: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """归一化章节结构树。"""
+    normalized_items: list[dict[str, Any]] = []
+    for raw in section_structure or []:
+        if not isinstance(raw, dict):
+            continue
+        source_title = strip_section_number_prefix(
+            raw.get("section_title") or raw.get("title") or raw.get("custom_title") or ""
+        )
+        custom_title = strip_section_number_prefix(raw.get("custom_title") or "")
+        if not source_title and not custom_title:
+            continue
+        children = normalize_section_structure(raw.get("children") if isinstance(raw.get("children"), list) else [])
+        normalized_items.append(
+            {
+                "section_title": source_title or custom_title,
+                "custom_title": custom_title,
+                "include": bool(raw.get("include", True)),
+                "is_custom": bool(raw.get("is_custom", False)),
+                "children": children,
+            }
+        )
+    return normalized_items
+
+
+def structure_top_level_titles(
+    section_structure: list[dict[str, Any]] | None,
+) -> list[str]:
+    """返回结构树的顶层章节标题。"""
+    return [
+        str(item.get("custom_title") or item.get("section_title") or "").strip()
+        for item in normalize_section_structure(section_structure)
+        if str(item.get("custom_title") or item.get("section_title") or "").strip()
+    ]
+
+
+def _collect_structure_titles(
+    section_structure: list[dict[str, Any]],
+    *,
+    include_nested: bool,
+) -> list[str]:
+    titles: list[str] = []
+    for item in normalize_section_structure(section_structure):
+        title = str(item.get("custom_title") or item.get("section_title") or "").strip()
+        if title:
+            titles.append(title)
+        if include_nested and item.get("children"):
+            titles.extend(_collect_structure_titles(item["children"], include_nested=include_nested))
+    return titles
+
+
+def _merge_child_sections_into_content(
+    base_content: str,
+    child_sections: list[BidDocumentSection],
+    *,
+    heading_level: int = 2,
+) -> str:
+    blocks: list[str] = []
+    if str(base_content or "").strip():
+        blocks.append(str(base_content).strip())
+
+    md_heading = "#" * max(2, min(heading_level, 6))
+    for child in child_sections:
+        child_content = str(child.content or "").strip()
+        if child_content:
+            blocks.append(f"{md_heading} {child.section_title}\n\n{child_content}")
+        else:
+            blocks.append(f"{md_heading} {child.section_title}")
+    return "\n\n".join(block for block in blocks if block).strip()
+
+
+def apply_section_structure(
+    sections: list[BidDocumentSection],
+    preferences: BidGenerationPreferences | dict[str, Any] | None,
+) -> list[BidDocumentSection]:
+    """按章节结构树重组章节列表。"""
+    prefs = normalize_generation_preferences(preferences)
+    structure = normalize_section_structure(getattr(prefs, "section_structure", []) if prefs is not None else [])
+    if not structure:
+        return reorder_bid_sections(sections, prefs)
+
+    source_sections = reorder_bid_sections(sections, prefs)
+    section_map = {
+        _normalize_title(section.section_title): section
+        for section in source_sections
+    }
+
+    def _materialize_item(item: dict[str, Any], depth: int = 2) -> BidDocumentSection | None:
+        if not bool(item.get("include", True)):
+            return None
+
+        source_title = str(item.get("section_title") or "").strip()
+        custom_title = str(item.get("custom_title") or "").strip()
+        display_title = custom_title or source_title
+        source = section_map.get(_normalize_title(source_title))
+
+        child_sections: list[BidDocumentSection] = []
+        for child in item.get("children", []) or []:
+            built_child = _materialize_item(child, depth + 1)
+            if built_child is not None:
+                child_sections.append(built_child)
+
+        base_content = str(getattr(source, "content", "") or "").strip() if source is not None else ""
+        merged_content = _merge_child_sections_into_content(base_content, child_sections, heading_level=depth)
+        if not merged_content:
+            merged_content = "【待填写：本章节内容】"
+
+        attachments: list[str] = []
+        if source is not None:
+            attachments.extend(list(getattr(source, "attachments", []) or []))
+        for child in child_sections:
+            attachments.extend(list(child.attachments or []))
+
+        return BidDocumentSection(
+            section_title=display_title or source_title,
+            content=merged_content,
+            attachments=attachments,
+        )
+
+    materialized: list[BidDocumentSection] = []
+    for item in structure:
+        built = _materialize_item(item)
+        if built is not None:
+            materialized.append(built)
+    return materialized
+
+
 def normalize_generation_preferences(
     preferences: BidGenerationPreferences | dict[str, Any] | None,
 ) -> BidGenerationPreferences | None:
@@ -182,10 +311,14 @@ def ordered_section_titles(
     formatted: bool = False,
 ) -> list[str]:
     """返回按偏好排序后的章节标题。"""
-    titles = [section.section_title for section in reorder_bid_sections(sections, preferences)]
+    prefs = normalize_generation_preferences(preferences)
+    if prefs is not None and prefs.section_structure:
+        titles = structure_top_level_titles(prefs.section_structure)
+    else:
+        titles = [section.section_title for section in reorder_bid_sections(sections, prefs)]
     if not formatted:
         return titles
-    return format_section_titles(titles, preferences)
+    return format_section_titles(titles, prefs)
 
 
 def _llm_message_to_text(message: Any) -> str:
@@ -283,7 +416,7 @@ def apply_generation_preferences(
 ) -> list[BidDocumentSection]:
     """对章节应用排序和语言风格偏好。"""
     prefs = normalize_generation_preferences(preferences)
-    ordered_sections = reorder_bid_sections(sections, prefs)
+    ordered_sections = apply_section_structure(sections, prefs)
     if (
         prefs is None
         or not apply_language_style

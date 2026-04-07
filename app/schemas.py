@@ -615,6 +615,7 @@ class BidDocumentStyleProfile(BaseModel):
 class BidGenerationPreferences(BaseModel):
     """投标文件生成偏好。"""
     section_order: list[str] = Field(default_factory=list, description="章节/目录偏好顺序")
+    section_structure: list[dict[str, Any]] = Field(default_factory=list, description="章节结构树")
     section_numbering_style: BidSectionNumberingStyle = Field(
         default=BidSectionNumberingStyle.cn_comma,
         description="章节编号样式",
