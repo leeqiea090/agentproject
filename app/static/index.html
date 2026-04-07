@@ -1067,11 +1067,12 @@
 
     function defaultPreferenceState() {
       return {
+        section_structure: [],
+        section_structure_customized: false,
         section_numbering_style: 'cn_comma',
         language_style: 'standard',
         custom_language_instruction: '',
         section_order: [],
-        section_order_customized: false,
         document_style: {
           body_font_family: '仿宋',
           heading_font_family: '黑体',
@@ -1079,6 +1080,10 @@
           cover_meta_font_family: '仿宋',
         },
       };
+    }
+
+    function makeSectionNodeId() {
+      return `section_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     }
 
     function stripTitlePrefix(text) {
@@ -1111,20 +1116,57 @@
       return String(num);
     }
 
+    function createStructureItem(title = '', options = {}) {
+      const rawTitle = stripTitlePrefix(options.section_title || title || options.custom_title || '新章节');
+      return {
+        id: options.id || makeSectionNodeId(),
+        section_title: rawTitle || '新章节',
+        custom_title: stripTitlePrefix(options.custom_title || ''),
+        include: options.include !== false,
+        is_custom: Boolean(options.is_custom),
+        children: normalizeStructureList(options.children || []),
+      };
+    }
+
+    function normalizeStructureList(items) {
+      return (items || [])
+        .map(item => {
+          if (!item || typeof item !== 'object') return null;
+          return createStructureItem(item.section_title || item.custom_title || '', item);
+        })
+        .filter(Boolean);
+    }
+
+    function getCurrentSectionStructure() {
+      const preference = ensurePreferenceState();
+      if (!Array.isArray(preference.section_structure)) {
+        preference.section_structure = [];
+      }
+      return preference.section_structure;
+    }
+
+    function flattenTopLevelTitles(items) {
+      return (items || [])
+        .map(item => stripTitlePrefix(item.custom_title || item.section_title || ''))
+        .filter(Boolean);
+    }
+
+    function serializeSectionStructure(items) {
+      return (items || []).map(item => ({
+        section_title: stripTitlePrefix(item.section_title || ''),
+        custom_title: stripTitlePrefix(item.custom_title || ''),
+        include: item.include !== false,
+        is_custom: Boolean(item.is_custom),
+        children: serializeSectionStructure(item.children || []),
+      }));
+    }
+
     function ensurePreferenceState(packageId = state.selectedPackage) {
       const key = preferenceKey(packageId);
       if (!state.preferencesByPackage[key]) {
         state.preferencesByPackage[key] = defaultPreferenceState();
       }
       return state.preferencesByPackage[key];
-    }
-
-    function parseSectionOrderText(value) {
-      const lines = String(value || '')
-        .split('\n')
-        .map(item => stripTitlePrefix(item))
-        .filter(Boolean);
-      return Array.from(new Set(lines));
     }
 
     function syncPreferenceFormFromState() {
@@ -1135,17 +1177,17 @@
       bodyFontSelect.value = (preference.document_style && preference.document_style.body_font_family) || '仿宋';
       headingFontSelect.value = (preference.document_style && preference.document_style.heading_font_family) || '黑体';
       coverFontSelect.value = (preference.document_style && preference.document_style.cover_font_family) || '黑体';
-      sectionOrderInput.value = (preference.section_order || []).join('\n');
     }
 
-    function persistCurrentPreferenceState({ markSectionOrderCustomized = false } = {}) {
+    function persistCurrentPreferenceState({ markStructureCustomized = false } = {}) {
       const preference = ensurePreferenceState();
       preference.section_numbering_style = sectionNumberingStyleSelect.value || 'cn_comma';
       preference.language_style = languageStyleSelect.value || 'standard';
       preference.custom_language_instruction = customLanguageInput.value.trim();
-      preference.section_order = parseSectionOrderText(sectionOrderInput.value);
-      if (markSectionOrderCustomized) {
-        preference.section_order_customized = true;
+      preference.section_structure = normalizeStructureList(preference.section_structure || []);
+      preference.section_order = flattenTopLevelTitles(preference.section_structure);
+      if (markStructureCustomized) {
+        preference.section_structure_customized = true;
       }
       preference.document_style = {
         body_font_family: bodyFontSelect.value || '仿宋',
@@ -1155,12 +1197,14 @@
       };
     }
 
-    function seedSectionOrderFromTitles(packageId, titles) {
+    function seedSectionStructureFromTitles(packageId, titles) {
       const preference = ensurePreferenceState(packageId);
-      if (preference.section_order_customized && (preference.section_order || []).length) {
+      if (preference.section_structure_customized && (preference.section_structure || []).length) {
         return;
       }
-      preference.section_order = Array.from(new Set((titles || []).map(item => stripTitlePrefix(item)).filter(Boolean)));
+      preference.section_structure = Array.from(new Set((titles || []).map(item => stripTitlePrefix(item)).filter(Boolean)))
+        .map(title => createStructureItem(title));
+      preference.section_order = flattenTopLevelTitles(preference.section_structure);
       if (packageId === state.selectedPackage) {
         syncPreferenceFormFromState();
       }
@@ -1171,6 +1215,7 @@
       const preference = ensurePreferenceState();
       return {
         section_order: preference.section_order || [],
+        section_structure: serializeSectionStructure(preference.section_structure || []),
         section_numbering_style: preference.section_numbering_style || 'cn_comma',
         language_style: preference.language_style || 'standard',
         custom_language_instruction: preference.custom_language_instruction || '',
@@ -1250,6 +1295,98 @@
         counter += 1;
         return formatDisplayTitle(title, counter, style);
       });
+    }
+
+    function getStructureDisplayTitle(item, index, style, parentId = '') {
+      const raw = stripTitlePrefix(item.custom_title || item.section_title || '');
+      if (!raw) return '';
+      if (parentId) return raw;
+      return formatDisplayTitle(raw, index, style);
+    }
+
+    function findStructureNode(items, targetId, parentArray = null, parentItem = null) {
+      for (let index = 0; index < (items || []).length; index += 1) {
+        const item = items[index];
+        if (item.id === targetId) {
+          return { item, index, parentArray: parentArray || items, parentItem };
+        }
+        const nested = findStructureNode(item.children || [], targetId, item.children || [], item);
+        if (nested) return nested;
+      }
+      return null;
+    }
+
+    function containsStructureNode(items, targetId) {
+      return Boolean(findStructureNode(items || [], targetId));
+    }
+
+    function getStructureArrayByParentId(parentId) {
+      const root = getCurrentSectionStructure();
+      if (!parentId) return root;
+      const parentCtx = findStructureNode(root, parentId);
+      if (!parentCtx) return root;
+      parentCtx.item.children = normalizeStructureList(parentCtx.item.children || []);
+      return parentCtx.item.children;
+    }
+
+    function markStructureChanged() {
+      persistCurrentPreferenceState({ markStructureCustomized: true });
+      renderSections(getCurrentPromptPayload());
+    }
+
+    function moveStructureNode(dragId, targetParentId, beforeId = '') {
+      const root = getCurrentSectionStructure();
+      const dragCtx = findStructureNode(root, dragId);
+      if (!dragCtx) return;
+      if ((beforeId && containsStructureNode([dragCtx.item], beforeId)) || (targetParentId && containsStructureNode([dragCtx.item], targetParentId))) {
+        return;
+      }
+      const draggedItem = dragCtx.item;
+      dragCtx.parentArray.splice(dragCtx.index, 1);
+      const targetArray = getStructureArrayByParentId(targetParentId);
+      if (!beforeId) {
+        targetArray.push(draggedItem);
+      } else {
+        const insertIndex = targetArray.findIndex(item => item.id === beforeId);
+        targetArray.splice(insertIndex >= 0 ? insertIndex : targetArray.length, 0, draggedItem);
+      }
+      markStructureChanged();
+    }
+
+    function indentStructureItem(itemId) {
+      const root = getCurrentSectionStructure();
+      const ctx = findStructureNode(root, itemId);
+      if (!ctx || !ctx.parentArray || ctx.index <= 0) return;
+      const previous = ctx.parentArray[ctx.index - 1];
+      const [item] = ctx.parentArray.splice(ctx.index, 1);
+      previous.children = normalizeStructureList(previous.children || []);
+      previous.children.push(item);
+      markStructureChanged();
+    }
+
+    function outdentStructureItem(itemId) {
+      const root = getCurrentSectionStructure();
+      const ctx = findStructureNode(root, itemId);
+      if (!ctx || !ctx.parentItem) return;
+      const parentCtx = findStructureNode(root, ctx.parentItem.id);
+      if (!parentCtx) return;
+      const [item] = ctx.parentArray.splice(ctx.index, 1);
+      parentCtx.parentArray.splice(parentCtx.index + 1, 0, item);
+      markStructureChanged();
+    }
+
+    function addCustomTopLevelSection() {
+      getCurrentSectionStructure().push(createStructureItem('新章节', { is_custom: true, custom_title: '新章节' }));
+      markStructureChanged();
+    }
+
+    function resetCurrentSectionStructure() {
+      const payload = getCurrentPromptPayload();
+      const preference = ensurePreferenceState();
+      preference.section_structure_customized = false;
+      seedSectionStructureFromTitles(state.selectedPackage, payload.section_titles || []);
+      persistCurrentPreferenceState();
+      renderSections(payload);
     }
 
     function setBusy(value) {
