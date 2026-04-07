@@ -25,6 +25,7 @@ from app.services.bid_preferences import (
     format_main_section_title,
     normalize_generation_preferences,
     reorder_bid_sections,
+    strip_section_number_prefix,
 )
 from app.services.one_click_generator.format_driven_sections.common import (
     _build_affiliated_units_statement_template,
@@ -223,6 +224,16 @@ def _normalize_title(text: str) -> str:
     return re.sub(r"[\s#`*:：、（）()\-—_]", "", text or "")
 
 
+def _section_title_key(text: str) -> str:
+    """章节标题归一化键，忽略编号差异。"""
+    return _normalize_title(strip_section_number_prefix(text or ""))
+
+
+def _compact_title(text: str) -> str:
+    """标题紧凑键，仅忽略空白，保留结构前缀。"""
+    return re.sub(r"\s+", "", text or "")
+
+
 _CN_NUM_MAP = {
     "一": 1,
     "二": 2,
@@ -262,6 +273,10 @@ _DEFAULT_TOC_SUBHEADINGS = {
     "附三、详细评审响应对照表": "详细评审明细",
     "附四、投标无效情形汇总及自检表": "无效情形自检",
 }
+_DEFAULT_TOC_SUBHEADINGS_BY_KEY = {
+    _section_title_key(title): subtitle
+    for title, subtitle in _DEFAULT_TOC_SUBHEADINGS.items()
+}
 
 
 def _normalize_level2_heading_text(heading_text: str) -> str:
@@ -296,7 +311,7 @@ def _ensure_toc_subheadings(section_title: str, content: str) -> str:
     if has_level2 or has_numeric_level3:
         return normalized_content
 
-    subtitle = _DEFAULT_TOC_SUBHEADINGS.get((section_title or "").strip())
+    subtitle = _DEFAULT_TOC_SUBHEADINGS_BY_KEY.get(_section_title_key(section_title))
     if not subtitle:
         return normalized_content
     if not normalized_content:
@@ -1351,22 +1366,27 @@ def _backfill_required_sections(sections, tender=None):
         "十一、资格承诺函": _build_hlj_supplier_qualification_commitment_template(),
     }
 
-    existing = {
-        (getattr(s, "section_title", "") or "").strip(): s
-        for s in (sections or [])
-        if (getattr(s, "section_title", "") or "").strip()
-    }
+    existing: dict[str, BidDocumentSection] = {}
+    for section in sections or []:
+        title = (getattr(section, "section_title", "") or "").strip()
+        key = _section_title_key(title)
+        if not key or key in existing:
+            continue
+        existing[key] = section
 
     ordered = _required_titles_for_tender(tender, sections=sections)
     if not ordered:
         return list(sections or [])
 
-    ordered_set = set(ordered)
+    ordered_keys = {_section_title_key(title) for title in ordered if _section_title_key(title)}
+    used_section_ids: set[int] = set()
     filled = []
 
     for title in ordered:
-        if title in existing:
-            filled.append(existing[title])
+        existing_section = existing.get(_section_title_key(title))
+        if existing_section is not None:
+            filled.append(existing_section)
+            used_section_ids.add(id(existing_section))
         else:
             filled.append(
                 BidDocumentSection(
@@ -1398,7 +1418,9 @@ def _backfill_required_sections(sections, tender=None):
         title = (getattr(s, "section_title", "") or "").strip()
         if not title:
             continue
-        if title in ordered_set:
+        if id(s) in used_section_ids:
+            continue
+        if _section_title_key(title) in ordered_keys:
             continue
 
         if mode == "zb":
@@ -1419,12 +1441,13 @@ def _assert_new_structure_only(sections, tender=None) -> None:
         for s in (sections or [])
         if (getattr(s, "section_title", "") or "").strip()
     ]
+    title_keys = {_section_title_key(title) for title in titles if _section_title_key(title)}
 
     exact_titles = [str(x).strip() for x in (getattr(tender, "response_section_titles", []) or []) if str(x).strip()]
     mode = _detect_structure_mode_from_tender(tender=tender, sections=sections)
 
     if _usable_exact_titles(tender=tender, exact_titles=exact_titles):
-        missing = [x for x in exact_titles if x not in titles]
+        missing = [x for x in exact_titles if _section_title_key(x) not in title_keys]
         if missing:
             raise RuntimeError(f"检测到招标文件第六章/响应文件格式中的必需章节缺失: {'；'.join(missing)}")
         return
@@ -1488,8 +1511,18 @@ def _assert_new_structure_only(sections, tender=None) -> None:
     else:
         return
 
-    missing = [x for x in required if x not in titles]
-    hit = [x for x in titles if x in forbidden or _is_bad_zb_section_title(x)]
+    required_keys = {_section_title_key(title): title for title in required if _section_title_key(title)}
+    forbidden_keys = {_compact_title(title) for title in forbidden if _compact_title(title)}
+    missing = [
+        title
+        for key, title in required_keys.items()
+        if key not in title_keys
+    ]
+    hit = [
+        title
+        for title in titles
+        if _compact_title(title) in forbidden_keys or (mode == "zb" and _is_bad_zb_section_title(title))
+    ]
 
     if missing:
         raise RuntimeError(f"检测到当前采购方式对应必需章节缺失: {'；'.join(missing)}")

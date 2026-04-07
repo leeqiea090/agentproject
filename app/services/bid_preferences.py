@@ -189,18 +189,24 @@ def _merge_child_sections_into_content(
     child_sections: list[BidDocumentSection],
     *,
     heading_level: int = 2,
+    heading_prefix_path: tuple[int, ...] = (),
 ) -> str:
     blocks: list[str] = []
     if str(base_content or "").strip():
         blocks.append(str(base_content).strip())
 
     md_heading = "#" * max(2, min(heading_level, 6))
-    for child in child_sections:
+    for index, child in enumerate(child_sections, start=1):
+        prefix_path = (*heading_prefix_path, index)
+        child_prefix = ".".join(str(num) for num in prefix_path)
+        if len(prefix_path) == 1:
+            child_prefix = f"{child_prefix}."
+        child_heading = f"{child_prefix} {child.section_title}".strip()
         child_content = _strip_duplicate_leading_heading(child.section_title, str(child.content or ""))
         if child_content:
-            blocks.append(f"{md_heading} {child.section_title}\n\n{child_content}")
+            blocks.append(f"{md_heading} {child_heading}\n\n{child_content}")
         else:
-            blocks.append(f"{md_heading} {child.section_title}")
+            blocks.append(f"{md_heading} {child_heading}")
     return "\n\n".join(block for block in blocks if block).strip()
 
 
@@ -246,7 +252,11 @@ def apply_section_structure(
         for section in source_sections
     }
 
-    def _materialize_item(item: dict[str, Any], depth: int = 2) -> BidDocumentSection | None:
+    def _materialize_item(
+        item: dict[str, Any],
+        depth: int = 2,
+        order_path: tuple[int, ...] = (),
+    ) -> BidDocumentSection | None:
         if not bool(item.get("include", True)):
             return None
 
@@ -256,13 +266,18 @@ def apply_section_structure(
         source = section_map.get(_normalize_title(source_title))
 
         child_sections: list[BidDocumentSection] = []
-        for child in item.get("children", []) or []:
-            built_child = _materialize_item(child, depth + 1)
+        for child_index, child in enumerate(item.get("children", []) or [], start=1):
+            built_child = _materialize_item(child, depth + 1, (*order_path, child_index))
             if built_child is not None:
                 child_sections.append(built_child)
 
         base_content = str(getattr(source, "content", "") or "").strip() if source is not None else ""
-        merged_content = _merge_child_sections_into_content(base_content, child_sections, heading_level=depth)
+        merged_content = _merge_child_sections_into_content(
+            base_content,
+            child_sections,
+            heading_level=depth,
+            heading_prefix_path=order_path,
+        )
         if not merged_content:
             merged_content = "【待填写：本章节内容】"
 

@@ -92,7 +92,7 @@ def test_apply_section_structure_merges_child_content_into_parent():
     assert len(structured) == 1
     assert structured[0].section_title == "报价书"
     assert "报价书正文" in structured[0].content
-    assert "## 资格承诺函" in structured[0].content
+    assert "## 1. 资格承诺函" in structured[0].content
     assert "资格承诺正文" in structured[0].content
 
 
@@ -115,7 +115,7 @@ def test_apply_section_structure_strips_duplicate_child_heading():
     structured = apply_section_structure(sections, prefs)
 
     assert structured[0].content.count("资格承诺函") == 1
-    assert structured[0].content.count("## 资格承诺函") == 1
+    assert structured[0].content.count("## 1. 资格承诺函") == 1
     assert "\n# 资格承诺函\n" not in f"\n{structured[0].content}\n"
 
 
@@ -147,3 +147,34 @@ def test_apply_section_structure_supports_custom_sections_and_hidden_sections():
     assert [section.section_title for section in structured] == ["商务响应", "实施补充说明"]
     assert structured[0].content == "报价书正文"
     assert structured[1].content == "【待填写：本章节内容】"
+
+
+def test_apply_section_structure_numbers_nested_sections_by_order():
+    sections = [
+        BidDocumentSection(section_title="报价书", content="报价书正文"),
+        BidDocumentSection(section_title="资格承诺函", content="资格承诺正文"),
+        BidDocumentSection(section_title="关联单位说明", content="关联单位正文"),
+        BidDocumentSection(section_title="身份证明", content="身份证明正文"),
+    ]
+    prefs = BidGenerationPreferences(
+        section_structure=[
+            {
+                "section_title": "报价书",
+                "children": [
+                    {
+                        "section_title": "资格承诺函",
+                        "children": [
+                            {"section_title": "关联单位说明"},
+                        ],
+                    },
+                    {"section_title": "身份证明"},
+                ],
+            },
+        ]
+    )
+
+    structured = apply_section_structure(sections, prefs)
+
+    assert "## 1. 资格承诺函" in structured[0].content
+    assert "### 1.1 关联单位说明" in structured[0].content
+    assert "## 2. 身份证明" in structured[0].content
