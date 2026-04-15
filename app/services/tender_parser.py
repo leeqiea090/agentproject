@@ -541,9 +541,10 @@ def _iter_docx_blocks(doc: _DocxDocumentType):
         return
     for child in doc.element.body.iterchildren():
         if isinstance(child, CT_P):
-            yield _DocxParagraph(child, doc)
+            yield _DocxParagraph
         elif isinstance(child, CT_Tbl):
-            yield _DocxTable(child, doc)
+            yield _DocxTable
+
 
 def _default_section_titles(procurement_type: str) -> list[str]:
     """返回默认章节标题。"""

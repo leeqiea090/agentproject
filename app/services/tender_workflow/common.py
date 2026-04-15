@@ -135,7 +135,6 @@ _GENERIC_VALUE_PATTERNS = (
 
 
 def _is_generic_value(value: str) -> bool:
-    """Check if a requirement value is a generic/collapsed placeholder rather than real content."""
     v = _safe_text(value)
     if not v or len(v) < 4:
         return True

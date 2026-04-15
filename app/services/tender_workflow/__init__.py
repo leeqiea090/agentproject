@@ -37,3 +37,11 @@ del _module
 
 _materialize_sections = _materialization._materialize_sections
 _match_requirements_to_product_facts = _product_facts._match_requirements_to_product_facts
+
+
+class TenderWorkflowAgent:
+    pass
+
+
+def _build_document_ingestion_view():
+    return None

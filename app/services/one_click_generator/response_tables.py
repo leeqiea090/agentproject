@@ -63,21 +63,17 @@ def _fuzzy_spec_lookup(product: Any, req_key: str) -> str:
     normalized_key = _as_text(req_key)
     if not normalized_key:
         return ""
-    # Exact match
     if normalized_key in specs:
         return _as_text(specs[normalized_key])
-    # Short key match
     short_key = normalized_key.split("：", 1)[0].strip()
     if short_key in specs:
         return _as_text(specs[short_key])
-    # Substring match
     for spec_key, spec_val in specs.items():
         k = _as_text(spec_key)
         if not k:
             continue
         if k in normalized_key or normalized_key in k:
             return _as_text(spec_val)
-    # Token overlap match
     key_tokens = [t for t in re.split(r"[，,、；;：:（）()\[\]\s/]+", short_key) if len(t) >= 2]
     if key_tokens:
         for spec_key, spec_val in specs.items():

@@ -235,10 +235,12 @@ def generate_bid_sections(
     8. 双输出分层（internal_draft / external_ready）
     9. 7 项回归指标
     """
-    global external_gate_enabled, material_stage
     logger.info("开始一键生成投标文件章节 - 模式: %s", mode)
     logger.debug("招标原文长度：%d 字符", len(tender_raw))
     products = products or {}
+    material_stage = "tender_only"
+    material_notes: list[str] = []
+    external_gate_enabled = False
 
     # ── Step 0a: 文档接入 — 可引用块 ──
     doc_blocks = split_to_blocks(tender_raw)
@@ -321,13 +323,14 @@ def generate_bid_sections(
         # 构建 ProductProfile
         profile = build_product_profile_for_package(pkg.package_id, product, bid_bindings)
         all_profiles[pkg.package_id] = profile
-        material_stage, material_notes = _infer_material_stage(products, all_profiles)
-        external_gate_enabled = material_stage == "evidence_ready"
-        logger.info(
-            "资料阶段: %s%s",
-            material_stage,
-            f"（{'；'.join(material_notes)}）" if material_notes else "",
-        )
+
+    material_stage, material_notes = _infer_material_stage(products, all_profiles)
+    external_gate_enabled = material_stage == "evidence_ready"
+    logger.info(
+        "资料阶段: %s%s",
+        material_stage,
+        f"（{'；'.join(material_notes)}）" if material_notes else "",
+    )
 
     # ── Step 3: 包件隔离生成章节 ──
     # 如果调用方已经给了结构化结果，这里用“本地推导结果 + 外部结果覆写”的方式合并，保证接口兼容。

@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import shutil
+from threading import RLock
 from typing import Annotated
 import uuid
 
@@ -65,6 +66,7 @@ _ONE_CLICK_STEP_LABELS = {
     "completed": "处理完成",
     "error": "处理失败",
 }
+_ONE_CLICK_JOB_LOCK = RLock()
 
 
 def _one_click_doc_label(draft_level: DraftLevel | str | None) -> str:
@@ -90,18 +92,40 @@ def _set_one_click_job_status(
     error: str = "",
 ) -> None:
     """更新一键成稿任务的状态记录。"""
-    one_click_job_storage[job_id] = {
-        "job_id": job_id,
-        "status": status,
-        "step_code": step_code,
-        "step_label": _ONE_CLICK_STEP_LABELS.get(step_code, step_code),
-        "message": message,
-        "progress": max(0, min(100, progress)),
-        "filename": filename,
-        "download_url": download_url,
-        "error": error,
-        "updated_time": datetime.now(),
-    }
+    with _ONE_CLICK_JOB_LOCK:
+        current = dict(one_click_job_storage.get(job_id, {}))
+        current.update(
+            {
+                "job_id": job_id,
+                "status": status,
+                "step_code": step_code,
+                "step_label": _ONE_CLICK_STEP_LABELS.get(step_code, step_code),
+                "message": message,
+                "progress": max(0, min(100, progress)),
+                "filename": filename,
+                "download_url": download_url,
+                "error": error,
+                "updated_time": datetime.now(),
+            }
+        )
+        one_click_job_storage[job_id] = current
+
+
+def _update_one_click_job(job_id: str, **fields) -> dict:
+    """增量更新任务元数据，避免覆盖已有字段。"""
+    with _ONE_CLICK_JOB_LOCK:
+        current = dict(one_click_job_storage.get(job_id, {}))
+        current.update(fields)
+        current["updated_time"] = datetime.now()
+        one_click_job_storage[job_id] = current
+        return dict(current)
+
+
+def _get_one_click_job(job_id: str) -> dict | None:
+    """读取任务状态快照。"""
+    with _ONE_CLICK_JOB_LOCK:
+        current = one_click_job_storage.get(job_id)
+        return dict(current) if isinstance(current, dict) else None
 
 
 def _load_tender(session_data: dict) -> TenderDocument:
@@ -266,6 +290,146 @@ def _generate_one_click_sections(
     return scoped_tender, gen_result, sections
 
 
+def _build_interactive_document(
+    session_id: str,
+    package_id: str,
+    answers: dict[str, str] | None,
+    *,
+    api_key: str | None = None,
+    generation_preferences: BidGenerationPreferences | None = None,
+    output_id: str | None = None,
+) -> tuple[Path, str, str]:
+    """基于交互式答案生成单包文档，并返回输出文件与下载名。"""
+    session_data = one_click_session_storage.get(session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="交互式会话不存在或已失效")
+
+    tender_doc = _load_tender(session_data)
+    scoped_tender = _single_package_tender(tender_doc, package_id)
+    preferences = normalize_generation_preferences(generation_preferences)
+    try:
+        preview_data = _ensure_session_preview(
+            session_data,
+            package_id,
+            api_key=api_key,
+            generation_preferences=preferences,
+        )
+    except BidSectionsValidationError as exc:
+        logger.warning("交互式单包文档生成被硬校验阻断：%s", exc)
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("交互式单包预生成失败：%s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成单包预览失败：{exc}")
+
+    sections = [BidDocumentSection(**item) for item in preview_data.get("sections", [])]
+    if not sections:
+        raise HTTPException(status_code=409, detail="当前包尚未生成待填写项，请先请求 prompts")
+
+    normalized_answers = {
+        str(key).strip(): str(value).strip()
+        for key, value in (answers or {}).items()
+        if str(value).strip()
+    }
+    final_sections = apply_interactive_answers(sections, preview_data.get("prompts", []), normalized_answers)
+    llm = None
+    if preferences is not None and (
+        preferences.language_style.value != "standard"
+        or preferences.custom_language_instruction
+    ):
+        llm = get_chat_model(api_key=api_key)
+    final_sections = apply_language_preferences(
+        final_sections,
+        preferences,
+        llm=llm,
+    )
+    company = build_company_from_answers(normalized_answers)
+    draft_level = preview_data.get("draft_level") or DraftLevel.internal_draft.value
+    resolved_output_id = str(output_id or uuid.uuid4())
+    output_file = _one_click_output_path(resolved_output_id, draft_level)
+
+    try:
+        build_bid_docx(
+            final_sections,
+            scoped_tender,
+            company,
+            output_file,
+            draft_level=draft_level,
+            generation_preferences=preferences,
+        )
+    except Exception as exc:
+        logger.error("交互式单包文档生成失败：%s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成失败：{exc}")
+
+    if not output_file.exists() or output_file.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="Word 文件生成失败，输出文件为空")
+
+    doc_label = _one_click_doc_label(draft_level)
+    filename = _download_filename(doc_label, scoped_tender, package_id)
+    return output_file, filename, str(draft_level)
+
+
+def _run_interactive_generation(
+    job_id: str,
+    session_id: str,
+    package_id: str,
+    answers: dict[str, str] | None,
+    api_key: str | None = None,
+    generation_preferences: BidGenerationPreferences | None = None,
+) -> None:
+    """后台执行交互式单包文档生成。"""
+    try:
+        _set_one_click_job_status(
+            job_id,
+            status="running",
+            step_code="generating",
+            message=f"正在生成包{package_id}的 Word 文档…",
+            progress=45,
+        )
+        output_file, filename, draft_level = _build_interactive_document(
+            session_id=session_id,
+            package_id=package_id,
+            answers=answers,
+            api_key=api_key,
+            generation_preferences=generation_preferences,
+            output_id=job_id,
+        )
+        _set_one_click_job_status(
+            job_id,
+            status="completed",
+            step_code="completed",
+            message=f"包{package_id}文档已生成完成，可直接下载。",
+            progress=100,
+            filename=filename,
+            download_url=f"/api/tender/one-click/download/{job_id}",
+        )
+        _update_one_click_job(
+            job_id,
+            output_file=str(output_file),
+            draft_level=draft_level,
+        )
+    except HTTPException as exc:
+        _set_one_click_job_status(
+            job_id,
+            status="error",
+            step_code="error",
+            message=f"生成失败：{exc.detail}",
+            progress=0,
+            error=str(exc.detail),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("交互式后台生成失败：%s", exc, exc_info=True)
+        _set_one_click_job_status(
+            job_id,
+            status="error",
+            step_code="error",
+            message=f"生成失败：{exc}",
+            progress=0,
+            error=str(exc),
+        )
+
+
 def _run_one_click_generation(
     job_id: str,
     save_path: Path,
@@ -359,10 +523,13 @@ def _run_one_click_generation(
             filename=filename,
             download_url=download_url,
         )
-        one_click_job_storage[job_id]["validation_gate"] = gen_result.validation_gate.model_dump()
-        one_click_job_storage[job_id]["regression_metrics"] = gen_result.regression_metrics.model_dump()
-        one_click_job_storage[job_id]["draft_level"] = gen_result.draft_level.value
-        one_click_job_storage[job_id]["output_file"] = str(output_file)
+        _update_one_click_job(
+            job_id,
+            validation_gate=gen_result.validation_gate.model_dump(),
+            regression_metrics=gen_result.regression_metrics.model_dump(),
+            draft_level=gen_result.draft_level.value,
+            output_file=str(output_file),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("一键生成后台任务失败：%s", exc, exc_info=True)
         _set_one_click_job_status(
@@ -490,72 +657,61 @@ async def generate_interactive_one_click(
     x_llm_api_key: Annotated[str | None, Header()] = None,
 ):
     """将前端收集到的答案回填到单包底稿中并输出 Word。"""
+    output_file, filename, _ = _build_interactive_document(
+        session_id=req.session_id,
+        package_id=req.package_id,
+        answers=req.answers,
+        api_key=_normalize_request_api_key(x_llm_api_key),
+        generation_preferences=req.generation_preferences,
+    )
+    return FileResponse(
+        output_file,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=filename,
+    )
+
+
+@router.post(
+    "/one-click/generate-interactive/start",
+    response_model=OneClickJobStartResponse,
+    summary="后台启动交互式单包文档生成",
+)
+async def start_generate_interactive_one_click(
+    background_tasks: BackgroundTasks,
+    req: OneClickInteractiveGenerateRequest,
+    x_llm_api_key: Annotated[str | None, Header()] = None,
+):
+    """后台启动交互式单包文档生成，允许继续切换到其他包操作。"""
     session_data = one_click_session_storage.get(req.session_id)
     if not session_data:
         raise HTTPException(status_code=404, detail="交互式会话不存在或已失效")
 
     tender_doc = _load_tender(session_data)
-    scoped_tender = _single_package_tender(tender_doc, req.package_id)
-    preferences = normalize_generation_preferences(req.generation_preferences)
-    try:
-        preview_data = _ensure_session_preview(
-            session_data,
-            req.package_id,
-            api_key=_normalize_request_api_key(x_llm_api_key),
-            generation_preferences=preferences,
-        )
-    except BidSectionsValidationError as exc:
-        logger.warning("交互式单包文档生成被硬校验阻断：%s", exc)
-        raise HTTPException(status_code=409, detail=str(exc))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("交互式单包预生成失败：%s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"生成单包预览失败：{exc}")
-    sections = [BidDocumentSection(**item) for item in preview_data.get("sections", [])]
-    if not sections:
-        raise HTTPException(status_code=409, detail="当前包尚未生成待填写项，请先请求 prompts")
-
-    answers = {str(key).strip(): str(value).strip() for key, value in req.answers.items() if str(value).strip()}
-    final_sections = apply_interactive_answers(sections, preview_data.get("prompts", []), answers)
-    llm = None
-    if preferences is not None and (
-        preferences.language_style.value != "standard"
-        or preferences.custom_language_instruction
-    ):
-        llm = get_chat_model(api_key=_normalize_request_api_key(x_llm_api_key))
-    final_sections = apply_language_preferences(
-        final_sections,
-        preferences,
-        llm=llm,
+    package = _resolve_package(tender_doc, req.package_id)
+    job_id = str(uuid.uuid4())
+    _set_one_click_job_status(
+        job_id,
+        status="queued",
+        step_code="queued",
+        message=f"包{req.package_id}已加入后台生成队列…",
+        progress=3,
     )
-    company = build_company_from_answers(answers)
-    draft_level = preview_data.get("draft_level") or DraftLevel.internal_draft.value
-    output_id = str(uuid.uuid4())
-    output_file = _one_click_output_path(output_id, draft_level)
-
-    try:
-        build_bid_docx(
-            final_sections,
-            scoped_tender,
-            company,
-            output_file,
-            draft_level=draft_level,
-            generation_preferences=preferences,
-        )
-    except Exception as exc:
-        logger.error("交互式单包文档生成失败：%s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"生成失败：{exc}")
-
-    if not output_file.exists() or output_file.stat().st_size == 0:
-        raise HTTPException(status_code=500, detail="Word 文件生成失败，输出文件为空")
-
-    doc_label = _one_click_doc_label(draft_level)
-    return FileResponse(
-        output_file,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=_download_filename(doc_label, scoped_tender, req.package_id),
+    _update_one_click_job(
+        job_id,
+        session_id=req.session_id,
+        package_id=req.package_id,
+        item_name=package.item_name if package else "",
     )
+    background_tasks.add_task(
+        _run_interactive_generation,
+        job_id,
+        req.session_id,
+        req.package_id,
+        req.answers,
+        _normalize_request_api_key(x_llm_api_key),
+        normalize_generation_preferences(req.generation_preferences),
+    )
+    return OneClickJobStartResponse(**_get_one_click_job(job_id))
 
 
 @router.post("/one-click", summary="一键生成底稿骨架")
@@ -681,13 +837,13 @@ async def start_one_click_generate(
         _normalize_request_api_key(x_llm_api_key),
         generation_preferences,
     )
-    return OneClickJobStartResponse(**one_click_job_storage[job_id])
+    return OneClickJobStartResponse(**_get_one_click_job(job_id))
 
 
 @router.get("/one-click/status/{job_id}", response_model=OneClickJobStatusResponse, summary="查询一键生成任务状态")
 async def get_one_click_job_status(job_id: str):
     """查询一键成稿任务状态。"""
-    job_info = one_click_job_storage.get(job_id)
+    job_info = _get_one_click_job(job_id)
     if not job_info:
         raise HTTPException(status_code=404, detail="任务不存在")
     return OneClickJobStatusResponse(**job_info)
@@ -696,7 +852,7 @@ async def get_one_click_job_status(job_id: str):
 @router.get("/one-click/download/{job_id}", summary="下载一键生成结果")
 async def download_one_click_result(job_id: str):
     """下载一键成稿生成的文件。"""
-    job_info = one_click_job_storage.get(job_id)
+    job_info = _get_one_click_job(job_id)
     if not job_info:
         raise HTTPException(status_code=404, detail="任务不存在")
     if job_info.get("status") != "completed":
