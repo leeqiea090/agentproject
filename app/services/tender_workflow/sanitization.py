@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import re
+from typing import Any
+
 import app.services.tender_workflow.common as _common
 import app.services.tender_workflow.classification as _classification
 import app.services.tender_workflow.product_facts as _product_facts
 import app.services.tender_workflow.evidence as _evidence
 import app.services.tender_workflow.materialization as _materialization
+from app.schemas import BidDocumentSection
+from app.services.quality_gate import _apply_template_pollution_guard
+
 
 def __reexport_all(module) -> None:
     """将指定模块的公开成员重新导出到当前命名空间。"""
@@ -35,7 +41,7 @@ def _build_internal_audit_snapshot(
         "selected_packages": package_result.get("selected_packages", []),
         "package_count": len(package_result.get("packages", [])),
         "clause_category_counts": {
-            key: len(_ensure_str_list(value))
+            key: len(_common._ensure_str_list(value))
             for key, value in (clause_result.get("clause_categories", {}) or {}).items()
         },
         "normalized_counts": {
@@ -89,8 +95,7 @@ def _normalize_pending_sections(
         content = content.replace("待核实（未匹配到已证实产品事实）", "待补充（投标产品实参）")
         content = content.replace("待核实（需填入投标产品实参）", "待补充（投标产品实参）")
         # 裸 catch-all：只替换不带括号的裸"待核实"
-        import re as _re
-        content = _re.sub(r"待核实(?!（)", "待补充", content)
+        content = re.sub(r"待核实(?!（)", "待补充", content)
         # 展平嵌套
         from app.services.quality_gate import _flatten_nested_placeholders
         content = _flatten_nested_placeholders(content)
@@ -116,10 +121,10 @@ def _sanitize_for_external_delivery(
     for original, cleaned in zip(sections, cleaned_sections, strict=False):
         if original.content != cleaned.content:
             changed_sections.append(cleaned.section_title)
-        if _section_has_unresolved_delivery_content(cleaned.content):
+        if _materialization._section_has_unresolved_delivery_content(cleaned.content):
             placeholder_sections.append(cleaned.section_title)
         # Separately track sections with unresolved *delivery* markers (half-finished evidence)
-        if any(marker in cleaned.content for marker in _UNRESOLVED_DELIVERY_MARKERS):
+        if any(marker in cleaned.content for marker in _common._UNRESOLVED_DELIVERY_MARKERS):
             unresolved_marker_sections.append(cleaned.section_title)
 
     # --- Fix: check for critical placeholders that must block external delivery ---
@@ -159,7 +164,7 @@ def _sanitize_for_external_delivery(
     for cleaned in cleaned_sections:
         if "技术偏离" in cleaned.section_title or "技术偏离" in cleaned.content[:100]:
             for line in cleaned.content.splitlines():
-                if line.strip().startswith("|") and any(kw in line for kw in _SERVICE_KEYWORDS + _ACCEPTANCE_KEYWORDS):
+                if line.strip().startswith("|") and any(kw in line for kw in _common._SERVICE_KEYWORDS + _common._ACCEPTANCE_KEYWORDS):
                     if "技术偏离表混入服务/验收类条款，存在分类混表" not in blocked_reasons:
                         blocked_reasons.append("技术偏离表混入服务/验收类条款，存在分类混表")
                         break
@@ -189,7 +194,7 @@ def _sanitize_for_external_delivery(
         for line in cleaned.content.splitlines():
             stripped = line.strip()
             if stripped.startswith("#"):
-                heading_pkg = _extract_heading_package_id(stripped)
+                heading_pkg = _materialization._extract_heading_package_id(stripped)
                 if heading_pkg:
                     current_pkg = heading_pkg
                 if "技术偏离" in stripped:
@@ -211,7 +216,7 @@ def _sanitize_for_external_delivery(
         blocked_reasons.append("技术偏离表仅有1行笼统条目（详见招标文件），未逐条展开参数")
 
     # (新增) 检查偏离表行数是否达到最低门槛
-    min_dev_rows = _DETAIL_TARGETS["deviation_table_min_rows"]
+    min_dev_rows = _common._DETAIL_TARGETS["deviation_table_min_rows"]
     for pkg_id, row_count in deviation_rows_by_pkg.items():
         if row_count < min_dev_rows:
             blocked_reasons.append(f"包{pkg_id}技术偏离表仅{row_count}行，少于最低要求{min_dev_rows}行")
@@ -241,13 +246,13 @@ def _sanitize_for_external_delivery(
                 pkg_id = _safe_text(r.get("package_id"))
                 tech_reqs_by_pkg[pkg_id] = tech_reqs_by_pkg.get(pkg_id, 0) + 1
 
-        min_tech_clauses = _DETAIL_TARGETS["technical_atomic_clauses_per_package"]
+        min_tech_clauses = _common._DETAIL_TARGETS["technical_atomic_clauses_per_package"]
         for pkg_id, clause_count in tech_reqs_by_pkg.items():
             if clause_count < min_tech_clauses:
                 blocked_reasons.append(f"包{pkg_id}技术条款仅{clause_count}条，少于最低要求{min_tech_clauses}条")
 
     # (新增d) 检查配置项数量门槛
-    min_config_items = _DETAIL_TARGETS["config_items_min"]
+    min_config_items = _common._DETAIL_TARGETS["config_items_min"]
     config_rows_by_pkg: dict[str, int] = {}
     for cleaned in cleaned_sections:
         if not any(marker in cleaned.content for marker in ("详细配置明细表", "配置清单", "配置说明")):
@@ -256,7 +261,7 @@ def _sanitize_for_external_delivery(
         for line in cleaned.content.splitlines():
             stripped = line.strip()
             if stripped.startswith("#"):
-                heading_pkg = _extract_heading_package_id(stripped)
+                heading_pkg = _materialization._extract_heading_package_id(stripped)
                 if heading_pkg:
                     current_pkg = heading_pkg
                 if any(marker in stripped for marker in ("详细配置明细表", "配置清单")):
@@ -374,7 +379,7 @@ def _sanitize_for_external_delivery(
 
     if hard_validation_result and hard_validation_result.get("overall_status") != "通过":
         blocked_reasons.append("硬校验未通过")
-    if evidence_result and float(evidence_result.get("proven_completion_rate", 1.0)) < _MIN_PROVEN_COMPLETION_RATE:
+    if evidence_result and float(evidence_result.get("proven_completion_rate", 1.0)) < _common._MIN_PROVEN_COMPLETION_RATE:
         blocked_reasons.append("已证实完成率未达外发门槛")
     # Block external delivery when half-finished evidence markers are still present
     if unresolved_marker_sections:
